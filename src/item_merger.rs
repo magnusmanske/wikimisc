@@ -141,7 +141,7 @@ impl ItemMerger {
     }
 
 
-    fn get_external_ids_from_reference(reference: &Reference) -> Vec<ExternalId> {
+    pub fn get_external_ids_from_reference(reference: &Reference) -> Vec<ExternalId> {
         reference
             .snaks()
             .iter()
