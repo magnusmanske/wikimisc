@@ -20,4 +20,4 @@ regex = "1"
 serde = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-wikibase = { git = "https://gitlab.com/tobias47n9e/wikibase_rs" }
+wikibase = { git = "https://gitlab.com/tobias47n9e/wikibase_rs", branch = "concurrent_limiter" }
