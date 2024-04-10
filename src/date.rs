@@ -1,3 +1,5 @@
+//! Useful functions to handle dates.
+
 use regex::Regex;
 
 lazy_static! {
@@ -13,16 +15,15 @@ lazy_static! {
             (Regex::new(r"^([+-]?\d{3,})-0[01]-0[01]T\d{2}:\d{2}:\d{2}Z/9$").unwrap(),"+${1}-00-00T00:00:00Z".to_string(),9),
         ]
     };
-    static ref YEAR_FIX: Regex = Regex::new(r"-\d\d-\d\dT").unwrap();
-    static ref MONTH_FIX: Regex = Regex::new(r"-\d\dT").unwrap();
 }
 
 pub struct Date {
-    pub time: String,
-    pub precision: u64,
+    time: String,
+    precision: u64,
 }
 
 impl Date {
+    /// Parses a date from a string. Returns None if the string is not a recognized or valid date.
     pub fn from_str(s: &str) -> Option<Self> {
         let (time, precision) = DATES
             .iter()
@@ -36,7 +37,6 @@ impl Date {
             })
             .next()?;
         let parts = time.split('-').collect::<Vec<&str>>();
-        // println!("{s} => {parts:?}");
         let year = parts.get(0)?.parse::<i16>().ok()?;
         if year>=2025 {
             return None;
@@ -51,6 +51,21 @@ impl Date {
             return None;
         }
         Some(Self{time, precision})
+    }
+
+    /// Returns the date as a QuickStatements-compatible string.
+    pub fn as_qs(&self) -> String {
+        format!("{}/{}", self.time, self.precision)
+    }
+    
+    /// Returns the date as a wikibase timevalue-compatible string.
+    pub fn time(&self) -> &str {
+        &self.time
+    }
+    
+    /// Returns the precision of the date.
+    pub fn precision(&self) -> u64 {
+        self.precision
     }
 }
 
@@ -77,5 +92,26 @@ mod tests {
         assert_eq!(Date::from_str("1234-05-01T00:00:00Z/10").unwrap().precision, 10);
         assert_eq!(Date::from_str("1234-00-01T00:00:00Z/9").unwrap().precision, 9);
         assert_eq!(Date::from_str("1234-01-00T00:00:00Z/9").unwrap().time, "+1234-00-00T00:00:00Z");
+    }
+
+    #[test]
+    fn test_as_qs() {
+        assert_eq!(Date::from_str("1234").unwrap().as_qs(), "+1234-00-00T00:00:00Z/9");
+        assert_eq!(Date::from_str("1234-05").unwrap().as_qs(), "+1234-05-00T00:00:00Z/10");
+        assert_eq!(Date::from_str("1234-05-17").unwrap().as_qs(), "+1234-05-17T00:00:00Z/11");
+    }
+
+    #[test]
+    fn test_time() {
+        assert_eq!(Date::from_str("1234").unwrap().time(), "+1234-00-00T00:00:00Z");
+        assert_eq!(Date::from_str("1234-05").unwrap().time(), "+1234-05-00T00:00:00Z");
+        assert_eq!(Date::from_str("1234-05-17").unwrap().time(), "+1234-05-17T00:00:00Z");
+    }
+
+    #[test]
+    fn test_precision() {
+        assert_eq!(Date::from_str("1234").unwrap().precision(), 9);
+        assert_eq!(Date::from_str("1234-05").unwrap().precision(), 10);
+        assert_eq!(Date::from_str("1234-05-17").unwrap().precision(), 11);
     }
 }

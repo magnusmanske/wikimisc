@@ -1,3 +1,5 @@
+//! Useful functionality for dealing with external identifiers in Wikidata.
+
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -23,11 +25,13 @@ impl fmt::Display for ExternalId {
 }
 
 impl ExternalId {
+    /// Creates a new ExternalId from a property number and an ID string.
     pub fn new(property: usize, id: &str) -> Self {
         let id = Self::fix_property_value(property, id);
         Self { property, id }
     }
 
+    /// Fixes potential issues with the ID value for a given property number.
     fn fix_property_value(property: usize, id: &str) -> String {
         match property {
             213 => id.replace(' ', ""), // P213 (ISNI) has no spaces
@@ -35,6 +39,7 @@ impl ExternalId {
         }
     }
 
+    /// Returns a new ExternalId from a string like "P123:ABC456DEF".
     pub fn from_string(s: &str) -> Option<Self> {
         let captures = RE_FROM_STRING.captures(s)?;
         let property = Self::prop_numeric(captures.get(1)?.as_str())?;
@@ -42,6 +47,7 @@ impl ExternalId {
         Some(Self::new(property, id))
     }
 
+    /// Parses a property number from a string like "P123".
     pub fn prop_numeric(prop: &str) -> Option<usize> {
         RE_PROPERTY_NUMERIC
             .replace(prop, "${1}")
@@ -49,6 +55,7 @@ impl ExternalId {
             .ok()
     }
 
+    /// Retrieves the ExternalId from a Wikidata claim (statement).
     pub fn from_external_id_claim(claim: &Statement) -> Option<Self> {
         if *claim.main_snak().datatype() != SnakDataType::ExternalId {
             return None;
@@ -63,6 +70,8 @@ impl ExternalId {
         Some(Self::new(prop_numeric, id))
     }
 
+    /// Searches Wikidata for a single item with the given query.
+    /// Returns None if none or multiple items are found.
     pub async fn search_wikidata_single_item(&self, query: &str) -> Option<String> {
         // TODO urlencode query?
         let url = format!("https://www.wikidata.org/w/api.php?action=query&list=search&srnamespace=0&format=json&srsearch={}",&query);
@@ -75,24 +84,31 @@ impl ExternalId {
         None
     }
 
+    /// Searches Wikidata for a single item with the given property/value.
+    /// Returns None if none or multiple items are found.
     pub async fn get_item_for_external_id_value(&self) -> Option<String> {
         let query = format!("haswbstatement:\"P{}={}\"", self.property, self.id);
         self.search_wikidata_single_item(&query).await
     }
 
+    /// Searches Wikidata for a single item with the given property/value and string.
+    /// Returns None if none or multiple items are found.
     pub async fn get_item_for_string_external_id_value(&self, s: &str) -> Option<String> {
         let query = format!("{s} haswbstatement:\"P{}={}\"", self.property, &self.id);
         self.search_wikidata_single_item(&query).await
     }
 
+    /// Returns the property number.
     pub fn property(&self) -> usize {
         self.property
     }
 
+    /// Returns the ID string.
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    /// Returns a Reference object for this ExternalId.
     pub fn as_reference(&self, stated_in: &str, use_current_date: bool) -> Reference {
         let time = Utc::now();
         let time = time.format("+%Y-%m-%dT00:00:00Z").to_string();
