@@ -8,6 +8,7 @@ pub mod date;
 pub mod external_id;
 pub mod item_merger;
 pub mod merge_diff;
+pub mod site_matrix;
 
 pub use wikibase;
 pub use wikibase::mediawiki;

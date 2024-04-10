@@ -2,13 +2,13 @@
 //! It will return the differences as a `MergeDiff` object, which can be used with the `wbeditentity` API action.
 //! Note that currently, only added or altered statements will be generated for the diff. Removed statements will be ignored.
 
+use crate::external_id::ExternalId;
+use crate::merge_diff::MergeDiff;
 use regex::Regex;
 use serde_json::json;
 use std::cmp::Ordering;
 use std::vec::Vec;
 use wikibase::*;
-use crate::external_id::ExternalId;
-use crate::merge_diff::MergeDiff;
 
 lazy_static! {
     static ref YEAR_FIX: Regex = Regex::new(r"-\d\d-\d\dT").unwrap();
@@ -26,11 +26,8 @@ impl ItemMerger {
 
     pub fn merge(&mut self, other: &ItemEntity) -> MergeDiff {
         let mut diff = MergeDiff::new();
-        let mut new_aliases = Self::merge_locale_strings(
-            self.item.labels_mut(),
-            other.labels(),
-            &mut diff.labels,
-        );
+        let mut new_aliases =
+            Self::merge_locale_strings(self.item.labels_mut(), other.labels(), &mut diff.labels);
 
         // Descriptions
         let mut new_ones: Vec<LocaleString> = other
@@ -97,7 +94,6 @@ impl ItemMerger {
         diff
     }
 
-
     /// Adds a new claim to the item claims.
     /// If a claim with the same value and qualifiers (TBD) already exists, it will try and add any new references.
     /// Returns `Some(claim)` if the claim was added or changed, `None` otherwise.
@@ -140,7 +136,6 @@ impl ItemMerger {
         Some(new_claim)
     }
 
-
     pub fn get_external_ids_from_reference(reference: &Reference) -> Vec<ExternalId> {
         reference
             .snaks()
@@ -156,7 +151,7 @@ impl ItemMerger {
             })
             .collect()
     }
-    
+
     /// Checks if a reference already exists in a list of references.
     /// Uses direct equal, or the presence of any external ID from the new reference.
     /// Returns `true` if the reference exists, `false` otherwise.

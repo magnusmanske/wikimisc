@@ -112,26 +112,25 @@ impl ExternalId {
     pub fn as_reference(&self, stated_in: &str, use_current_date: bool) -> Reference {
         let time = Utc::now();
         let time = time.format("+%Y-%m-%dT00:00:00Z").to_string();
-        let mut reference = 
-            vec![
-                Snak::new(
-                    SnakDataType::WikibaseItem,
-                    "P248",
-                    SnakType::Value,
-                    Some(DataValue::new(
-                        DataValueType::EntityId,
-                        Value::Entity(EntityValue::new(EntityType::Item, stated_in)),
-                    )),
-                ),
-                Snak::new(
-                    SnakDataType::ExternalId,
-                    format!("P{}", self.property),
-                    SnakType::Value,
-                    Some(DataValue::new(
-                        DataValueType::StringType,
-                        Value::StringValue(self.id.to_owned()),
-                    )),
-                )
+        let mut reference = vec![
+            Snak::new(
+                SnakDataType::WikibaseItem,
+                "P248",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::EntityId,
+                    Value::Entity(EntityValue::new(EntityType::Item, stated_in)),
+                )),
+            ),
+            Snak::new(
+                SnakDataType::ExternalId,
+                format!("P{}", self.property),
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::StringType,
+                    Value::StringValue(self.id.to_owned()),
+                )),
+            ),
         ];
         if use_current_date {
             reference.push(Snak::new(

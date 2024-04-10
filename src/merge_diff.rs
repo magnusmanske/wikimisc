@@ -12,7 +12,6 @@ lazy_static! {
     static ref MONTH_FIX: Regex = Regex::new(r"-\d\dT").unwrap();
 }
 
-
 /// This contains the wbeditentiry payload to ADD data to a base item, generated from a merge
 #[derive(Debug, Clone, Default)]
 pub struct MergeDiff {
@@ -161,7 +160,6 @@ impl Serialize for MergeDiff {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
@@ -218,8 +216,14 @@ mod tests {
         let ls1 = LocaleString::new("en", "foo");
         let ls2 = LocaleString::new("en", "bar");
         let ls3 = LocaleString::new("de", "foo");
-        assert_eq!(Ordering::Equal, ItemMerger::compare_locale_string(&ls1, &ls1));
-        assert_eq!(Ordering::Less, ItemMerger::compare_locale_string(&ls2, &ls1));
+        assert_eq!(
+            Ordering::Equal,
+            ItemMerger::compare_locale_string(&ls1, &ls1)
+        );
+        assert_eq!(
+            Ordering::Less,
+            ItemMerger::compare_locale_string(&ls2, &ls1)
+        );
         assert_eq!(
             Ordering::Greater,
             ItemMerger::compare_locale_string(&ls1, &ls2)
