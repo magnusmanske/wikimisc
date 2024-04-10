@@ -178,7 +178,7 @@ impl ItemMerger {
             })
     }
 
-    fn is_snak_identical(snak1: &Snak, snak2: &Snak) -> bool {
+    pub fn is_snak_identical(snak1: &Snak, snak2: &Snak) -> bool {
         snak1.property() == snak2.property()
             && Self::is_data_value_identical(snak1.data_value(), snak2.data_value())
     }
