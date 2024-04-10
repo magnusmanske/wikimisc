@@ -8,8 +8,10 @@ pub mod date;
 pub mod entity_file_cache;
 pub mod external_id;
 pub mod item_merger;
+pub mod lat_lon;
 pub mod merge_diff;
 pub mod site_matrix;
+pub mod sparql_value;
 
 pub use wikibase;
 pub use wikibase::mediawiki;
