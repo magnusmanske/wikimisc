@@ -216,7 +216,7 @@ impl ItemMerger {
         }
     }
 
-    fn are_qualifiers_identical(q1: &[Snak], q2: &[Snak]) -> bool {
+    pub fn are_qualifiers_identical(q1: &[Snak], q2: &[Snak]) -> bool {
         if q1.is_empty() && q2.is_empty() {
             return true;
         }
