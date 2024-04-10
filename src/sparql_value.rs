@@ -1,3 +1,5 @@
+//! Parses and stores values from a SPARQL JSON result.
+
 use crate::lat_lon::LatLon;
 use regex::Regex;
 use serde_json::Value;

@@ -1,3 +1,5 @@
+//! Stores latitude/longitude coordinates.
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LatLon {
     pub lat: f64,
