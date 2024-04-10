@@ -232,7 +232,7 @@ impl ItemMerger {
             .any(|(snak1, snak2)| !Self::is_snak_identical(snak1, snak2))
     }
 
-    fn check_new_claim_for_dates(&self, new_claim: &mut Statement) {
+    pub fn check_new_claim_for_dates(&self, new_claim: &mut Statement) {
         let prop = new_claim.property();
         if prop != "P569" && prop != "P570" {
             return;
