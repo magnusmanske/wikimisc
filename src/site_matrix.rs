@@ -132,6 +132,11 @@ impl SiteMatrix {
             })
             .next()
     }
+
+    pub async fn get_api_for_wiki(&self, wiki: String) -> Result<Api> {
+        let url = self.get_server_url_for_wiki(&wiki)? + "/w/api.php";
+        Api::new(&url).await.map_err(|e| anyhow!(e))
+    }
 }
 
 #[cfg(test)]
