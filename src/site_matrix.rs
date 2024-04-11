@@ -91,6 +91,47 @@ impl SiteMatrix {
                 "SiteMatrix::get_server_url_for_wiki: Cannot find server for wiki '{wiki}'"
             ))
     }
+
+    fn get_wiki_for_server_url_from_site(&self, url: &str, site: &Value) -> Option<String> {
+        self.get_value_from_site_matrix_entry(url, site, "url", "dbname")
+    }
+
+    pub fn is_language_rtl(&self, language: &str) -> bool {
+        self.site_matrix["sitematrix"]
+            .as_object()
+            .expect("AppState::get_wiki_for_server_url: sitematrix not an object")
+            .iter()
+            .any(
+                |(_id, data)| match (data["code"].as_str(), data["dir"].as_str()) {
+                    (Some(lang), Some("rtl")) => lang == language,
+                    _ => false,
+                },
+            )
+    }
+
+    pub fn get_wiki_for_server_url(&self, url: &str) -> Option<String> {
+        self.site_matrix["sitematrix"]
+            .as_object()
+            .expect("AppState::get_wiki_for_server_url: sitematrix not an object")
+            .iter()
+            .filter_map(|(id, data)| match id.as_str() {
+                "count" => None,
+                "specials" => data
+                    .as_array()
+                    .expect("AppState::get_wiki_for_server_url: 'specials' is not an array")
+                    .iter()
+                    .filter_map(|site| self.get_wiki_for_server_url_from_site(url, site))
+                    .next(),
+                _other => match data["site"].as_array() {
+                    Some(sites) => sites
+                        .iter()
+                        .filter_map(|site| self.get_wiki_for_server_url_from_site(url, site))
+                        .next(),
+                    None => None,
+                },
+            })
+            .next()
+    }
 }
 
 #[cfg(test)]
