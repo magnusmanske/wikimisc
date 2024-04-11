@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use wikibase::mediawiki::api::Api;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SiteMatrix {
     site_matrix: Value,
 }

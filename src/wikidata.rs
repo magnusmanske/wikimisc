@@ -30,6 +30,7 @@ impl Wikidata {
             .build()?)
     }
 
+    #[cfg(not(doctest))]
     /// Queries SPARQL and returns a filename with the result as CSV.
     /// USAGE:
     /// ```rust
