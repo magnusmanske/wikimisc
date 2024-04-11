@@ -12,6 +12,7 @@ pub mod lat_lon;
 pub mod merge_diff;
 pub mod site_matrix;
 pub mod sparql_value;
+pub mod timestamp;
 
 pub use wikibase;
 pub use wikibase::mediawiki;
