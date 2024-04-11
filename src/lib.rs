@@ -13,6 +13,7 @@ pub mod merge_diff;
 pub mod site_matrix;
 pub mod sparql_value;
 pub mod timestamp;
+pub mod wikidata;
 
 pub use wikibase;
 pub use wikibase::mediawiki;

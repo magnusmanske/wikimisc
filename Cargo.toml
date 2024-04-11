@@ -12,6 +12,7 @@ readme = "README.md"
 [dependencies]
 anyhow = "*"
 chrono = "*"
+csv = "*"
 lazy_static = "1"
 reqwest = { version = "*", features = ["json"] }
 regex = "1"
