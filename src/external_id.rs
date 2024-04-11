@@ -12,7 +12,7 @@ lazy_static! {
     static ref RE_FROM_STRING: Regex = Regex::new(r#"^[Pp](\d+):(.+)$"#).expect("Regexp error");
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Default)]
 pub struct ExternalId {
     property: usize,
     id: String,

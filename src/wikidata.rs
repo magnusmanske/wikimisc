@@ -9,6 +9,7 @@ use tempfile::tempfile;
 const WIKIDATA_USER_AGENT: &str = "wikimisc-wikidata/0.1.0";
 const WIKIDATA_SPARQL_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[derive(Debug, Clone, Default)]
 pub struct Wikidata {
     user_agent: String,
     timeout: Duration,

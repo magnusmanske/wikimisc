@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 
+#[derive(Debug, Clone, Default)]
 pub struct TimeStamp {}
 
 impl TimeStamp {

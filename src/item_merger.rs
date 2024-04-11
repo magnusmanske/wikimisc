@@ -15,6 +15,7 @@ lazy_static! {
     static ref MONTH_FIX: Regex = Regex::new(r"-\d\dT").unwrap();
 }
 
+#[derive(Debug, Clone)]
 pub struct ItemMerger {
     pub item: ItemEntity,
 }
