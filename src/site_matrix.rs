@@ -153,6 +153,19 @@ mod tests {
         assert_eq!(url, "https://www.wikidata.org");
     }
 
+
+    #[tokio::test]
+    async fn is_language_rtl() {
+        let api = Api::new("https://www.wikidata.org/w/api.php")
+            .await
+            .unwrap();
+        let site_matrix = SiteMatrix::new(&api).await.unwrap();
+        assert!(!site_matrix.is_language_rtl("en"));
+        assert!(site_matrix.is_language_rtl("ar"));
+        assert!(!site_matrix.is_language_rtl("de"));
+        assert!(site_matrix.is_language_rtl("he"));
+    }
+
     #[test]
     fn test_str_vec_to_hashmap() {
         let v = vec![("a", "b"), ("c", "d")];
