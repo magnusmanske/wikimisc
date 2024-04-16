@@ -153,7 +153,6 @@ mod tests {
         assert_eq!(url, "https://www.wikidata.org");
     }
 
-
     #[tokio::test]
     async fn is_language_rtl() {
         let api = Api::new("https://www.wikidata.org/w/api.php")

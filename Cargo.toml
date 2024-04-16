@@ -14,11 +14,13 @@ anyhow = "*"
 chrono = "*"
 csv = "*"
 lazy_static = "1"
+mysql_async = "*"
 reqwest = { version = "*", features = ["json"] }
 regex = "1"
 serde = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tempfile = "*"
+toolforge = "*"
 urlencoding = "^2"
 wikibase = { git = "https://gitlab.com/tobias47n9e/wikibase_rs", branch = "concurrent_limiter" }

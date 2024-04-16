@@ -14,6 +14,8 @@ pub mod site_matrix;
 pub mod sparql_value;
 pub mod timestamp;
 pub mod wikidata;
+pub mod toolforge_db;
+pub mod toolforge_app;
 
 pub use wikibase;
 pub use wikibase::mediawiki;
