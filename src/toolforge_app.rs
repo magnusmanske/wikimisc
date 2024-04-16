@@ -6,7 +6,6 @@ use std::{
 pub struct ToolforgeApp {}
 
 impl ToolforgeApp {
-
     /// Kills the process (=app) if no activity for a while.
     /// Returns a reference to the last activity time that has to be updated by the main process.
     pub fn seppuku(max_seconds: u64) -> Arc<Mutex<Instant>> {
@@ -23,5 +22,4 @@ impl ToolforgeApp {
         });
         ret
     }
-
 }

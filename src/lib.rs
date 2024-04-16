@@ -19,3 +19,5 @@ pub mod toolforge_app;
 
 pub use wikibase;
 pub use wikibase::mediawiki;
+pub use toolforge;
+pub use toolforge::mysql_async;
