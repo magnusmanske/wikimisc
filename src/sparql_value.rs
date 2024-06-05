@@ -1,7 +1,8 @@
-//! Parses and stores values from a SPARQL JSON result.
+/// Parses and stores values from a SPARQL JSON result.
 
 use crate::lat_lon::LatLon;
 use regex::Regex;
+use serde::Deserializer;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,5 +80,31 @@ impl SparqlValue {
                 .map(|value| SparqlValue::Literal(value.to_string())),
             _ => None,
         }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SparqlValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let json: serde_json::value::Value = serde_json::value::Value::deserialize(deserializer)?;
+        Self::new_from_json(&json).ok_or_else(|| serde::de::Error::custom("Could not parse SparqlValue from JSON"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_from_json() {
+        let json = r#"{"type":"literal","value":"GB-CAM"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, Some(SparqlValue::Literal("GB-CAM".to_string())));
+    }
+
+    #[test]
+    fn test_deserialize() {
+        let json = r#"{"type":"literal","value":"GB-CAM"}"#;
+        let value: SparqlValue = serde_json::from_str(json).unwrap();
+        assert_eq!(value, SparqlValue::Literal("GB-CAM".to_string()));
     }
 }
