@@ -15,6 +15,7 @@ pub mod sparql_value;
 pub mod timestamp;
 pub mod wikidata;
 pub mod toolforge_db;
+pub mod sparql_results;
 pub mod toolforge_app;
 
 pub use wikibase;

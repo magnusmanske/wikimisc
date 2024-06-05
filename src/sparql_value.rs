@@ -1,5 +1,4 @@
 /// Parses and stores values from a SPARQL JSON result.
-
 use crate::lat_lon::LatLon;
 use regex::Regex;
 use serde::Deserializer;
@@ -86,7 +85,8 @@ impl SparqlValue {
 impl<'de> serde::Deserialize<'de> for SparqlValue {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let json: serde_json::value::Value = serde_json::value::Value::deserialize(deserializer)?;
-        Self::new_from_json(&json).ok_or_else(|| serde::de::Error::custom("Could not parse SparqlValue from JSON"))
+        Self::new_from_json(&json)
+            .ok_or_else(|| serde::de::Error::custom("Could not parse SparqlValue from JSON"))
     }
 }
 
