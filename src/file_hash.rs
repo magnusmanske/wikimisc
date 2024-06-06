@@ -41,11 +41,7 @@ impl<KeyType: PartialEq + Eq + std::hash::Hash, ValueType: Serialize + for<'a> D
     /// Adds an entity for the key.
     /// Note that this will overwrite any existing entity for the key.
     /// Also, this will add the new value at the end of the file, wasting space for the previous one.
-    pub fn add_entity<K: Into<KeyType>, V: Into<ValueType>>(
-        &mut self,
-        key: K,
-        value: V,
-    ) -> Result<()> {
+    pub fn insert<K: Into<KeyType>, V: Into<ValueType>>(&mut self, key: K, value: V) -> Result<()> {
         let fh = self.get_or_create_file_handle();
         let mut fh = fh.lock().map_err(|e| anyhow!(format!("{e}")))?;
         let before = fh.metadata()?.len();
@@ -70,11 +66,11 @@ impl<KeyType: PartialEq + Eq + std::hash::Hash, ValueType: Serialize + for<'a> D
         Ok(())
     }
 
-    pub fn has_entity<K: Into<KeyType>>(&self, key: K) -> bool {
+    pub fn contains<K: Into<KeyType>>(&self, key: K) -> bool {
         self.id2pos.contains_key(&key.into())
     }
 
-    pub fn get_entity<K: Into<KeyType>>(&self, key: K) -> Option<ValueType> {
+    pub fn get<K: Into<KeyType>>(&self, key: K) -> Option<ValueType> {
         let mut fh = self.file_handle.as_ref()?.lock().ok()?;
         *self.last_action_was_read.lock().ok()? = true;
         let (start, length) = self.id2pos.get(&key.into())?;
@@ -106,13 +102,13 @@ mod tests {
     #[test]
     fn test_entity_file_cache() {
         let mut efc: FileHash<String, String> = FileHash::new();
-        efc.add_entity("Q123", "Foo").unwrap();
-        efc.add_entity("Q456", "Bar").unwrap();
-        efc.add_entity("Q789", "Baz").unwrap();
-        efc.add_entity("Q456", "Boom").unwrap();
-        assert_eq!(efc.get_entity("Q123").unwrap(), "Foo");
-        assert_eq!(efc.get_entity("Q456").unwrap(), "Boom");
-        assert_eq!(efc.get_entity("Q789").unwrap(), "Baz");
-        assert_eq!(efc.get_entity("Nope"), None);
+        efc.insert("Q123", "Foo").unwrap();
+        efc.insert("Q456", "Bar").unwrap();
+        efc.insert("Q789", "Baz").unwrap();
+        efc.insert("Q456", "Boom").unwrap();
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert_eq!(efc.get("Q456").unwrap(), "Boom");
+        assert_eq!(efc.get("Q789").unwrap(), "Baz");
+        assert_eq!(efc.get("Nope"), None);
     }
 }
