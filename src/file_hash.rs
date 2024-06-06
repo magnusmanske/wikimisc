@@ -15,9 +15,10 @@ pub struct FileHash<KeyType, ValueType> {
     id2pos: HashMap<KeyType, (u64, u64)>, // Position, length
     file_handle: Option<Arc<Mutex<File>>>,
     last_action_was_read: Arc<Mutex<bool>>,
+    phantom: PhantomData<ValueType>,
 }
 
-impl<KeyType: PartialEq + Eq + std::hash::Hash, ValueType: Serialize + for<'a> Deserialize<'a>>
+impl<KeyType: Clone + PartialEq + Eq + std::hash::Hash, ValueType: Clone + Serialize + for<'a> Deserialize<'a>>
     FileHash<KeyType, ValueType>
 {
     pub fn new() -> Self {
@@ -25,6 +26,7 @@ impl<KeyType: PartialEq + Eq + std::hash::Hash, ValueType: Serialize + for<'a> D
             id2pos: HashMap::new(),
             file_handle: None,
             last_action_was_read: Arc::new(Mutex::new(true)),
+            phantom: PhantomData,
         }
     }
 
