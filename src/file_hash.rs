@@ -18,8 +18,10 @@ pub struct FileHash<KeyType, ValueType> {
     phantom: PhantomData<ValueType>,
 }
 
-impl<KeyType: Clone + PartialEq + Eq + std::hash::Hash, ValueType: Clone + Serialize + for<'a> Deserialize<'a>>
-    FileHash<KeyType, ValueType>
+impl<
+        KeyType: Clone + PartialEq + Eq + std::hash::Hash,
+        ValueType: Clone + Serialize + for<'a> Deserialize<'a>,
+    > FileHash<KeyType, ValueType>
 {
     pub fn new() -> Self {
         Self {
@@ -36,6 +38,25 @@ impl<KeyType: Clone + PartialEq + Eq + std::hash::Hash, ValueType: Clone + Seria
 
     pub fn is_empty(&self) -> bool {
         self.id2pos.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.id2pos.clear();
+        if let Some(fh_lock) = &self.file_handle {
+            let fh = fh_lock.lock().expect("Poisoned file handle in FileHash");
+            fh.set_len(0).expect("Could not truncate file");
+        }
+    }
+
+    pub fn swap<K1: Into<KeyType>, K2: Into<KeyType>>(&mut self, idx1: K1, idx2: K2) {
+        let idx1: KeyType = idx1.into();
+        let idx2: KeyType = idx2.into();
+        let v1 = self.id2pos.get(&idx1.clone()).cloned();
+        let v2 = self.id2pos.get(&idx2.clone()).cloned();
+        self.id2pos
+            .insert(idx1.into(), v2.expect("FileHash::swap out-of-bounds"));
+        self.id2pos
+            .insert(idx2.into(), v1.expect("FileHash::swap out-of-bounds"));
     }
 
     /// Adds an entity for the key.
