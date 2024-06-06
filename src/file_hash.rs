@@ -12,7 +12,7 @@ use tempfile::tempfile;
 
 #[derive(Debug)]
 pub struct FileHash<KeyType, ValueType> {
-    id2pos: HashMap<KeyType, (u64, u64)>,
+    id2pos: HashMap<KeyType, (u64, u64)>, // Position, length
     file_handle: Option<Arc<Mutex<File>>>,
     last_action_was_read: Arc<Mutex<bool>>,
     phantom: PhantomData<ValueType>,
@@ -38,6 +38,9 @@ impl<KeyType: PartialEq + Eq + std::hash::Hash, ValueType: Serialize + for<'a> D
         self.id2pos.is_empty()
     }
 
+    /// Adds an entity for the key.
+    /// Note that this will overwrite any existing entity for the key.
+    /// Also, this will add the new value at the end of the file, wasting space for the previous one.
     pub fn add_entity<K: Into<KeyType>, V: Into<ValueType>>(
         &mut self,
         key: K,
@@ -52,6 +55,7 @@ impl<KeyType: PartialEq + Eq + std::hash::Hash, ValueType: Serialize + for<'a> D
             .lock()
             .map_err(|e| anyhow!(format!("{e}")))?
         {
+            // TODO is the new string fits into the old one, we could overwrite it to save disk space?
             fh.seek(SeekFrom::End(0))?;
         }
         *self
@@ -71,10 +75,7 @@ impl<KeyType: PartialEq + Eq + std::hash::Hash, ValueType: Serialize + for<'a> D
     }
 
     pub fn get_entity<K: Into<KeyType>>(&self, key: K) -> Option<ValueType> {
-        let mut fh = match &self.file_handle {
-            Some(fh) => fh.lock().ok()?,
-            None => return None,
-        };
+        let mut fh = self.file_handle.as_ref()?.lock().ok()?;
         *self.last_action_was_read.lock().ok()? = true;
         let (start, length) = self.id2pos.get(&key.into())?;
         fh.seek(SeekFrom::Start(*start)).ok()?;
@@ -108,9 +109,10 @@ mod tests {
         efc.add_entity("Q123", "Foo").unwrap();
         efc.add_entity("Q456", "Bar").unwrap();
         efc.add_entity("Q789", "Baz").unwrap();
-        let s = efc.get_entity("Q456");
-        assert_eq!(s.unwrap(), "Bar");
-        let s = efc.get_entity("Nope");
-        assert_eq!(s, None);
+        efc.add_entity("Q456", "Boom").unwrap();
+        assert_eq!(efc.get_entity("Q123").unwrap(), "Foo");
+        assert_eq!(efc.get_entity("Q456").unwrap(), "Boom");
+        assert_eq!(efc.get_entity("Q789").unwrap(), "Baz");
+        assert_eq!(efc.get_entity("Nope"), None);
     }
 }
