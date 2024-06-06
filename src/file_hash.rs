@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};
 use tempfile::tempfile;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FileHash<KeyType, ValueType> {
     id2pos: HashMap<KeyType, (u64, u64)>, // Position, length
     file_handle: Option<Arc<Mutex<File>>>,
