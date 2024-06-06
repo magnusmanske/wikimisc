@@ -1,17 +1,10 @@
 use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::collections::HashMap;
 
 use crate::sparql_value::SparqlValue;
 
 pub type SparqlResultRow = HashMap<String, SparqlValue>;
 pub type SparqlResultRows = Vec<SparqlResultRow>;
-
-lazy_static! {
-    static ref SPARQL_REQUEST_COUNTER: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SparqlApiResults {
