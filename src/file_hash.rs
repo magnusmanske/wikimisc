@@ -48,15 +48,34 @@ impl<
         }
     }
 
+    pub fn remove<K: Into<KeyType>>(&mut self, key: K) -> Option<ValueType> {
+        let key = key.into();
+        let value = self.get(key.clone());
+        if value.is_some() {
+            self.id2pos.remove(&key);
+        }
+        value
+    }
+
     pub fn swap<K1: Into<KeyType>, K2: Into<KeyType>>(&mut self, idx1: K1, idx2: K2) {
         let idx1: KeyType = idx1.into();
         let idx2: KeyType = idx2.into();
-        let v1 = self.id2pos.get(&idx1.clone()).cloned();
-        let v2 = self.id2pos.get(&idx2.clone()).cloned();
-        self.id2pos
-            .insert(idx1.into(), v2.expect("FileHash::swap out-of-bounds"));
-        self.id2pos
-            .insert(idx2.into(), v1.expect("FileHash::swap out-of-bounds"));
+        let v1 = self.id2pos.remove(&idx1);
+        let v2 = self.id2pos.remove(&idx2);
+
+        match (v1, v2) {
+            (Some(value), None) => {
+                self.id2pos.insert(idx2, value);
+            }
+            (None, Some(value)) => {
+                self.id2pos.insert(idx1, value);
+            }
+            (Some(v1), Some(v2)) => {
+                self.id2pos.insert(idx1, v2);
+                self.id2pos.insert(idx2, v1);
+            }
+            (None, None) => {}
+        }
     }
 
     /// Adds an entity for the key.
@@ -131,5 +150,29 @@ mod tests {
         assert_eq!(efc.get("Q456").unwrap(), "Boom");
         assert_eq!(efc.get("Q789").unwrap(), "Baz");
         assert_eq!(efc.get("Nope"), None);
+    }
+
+    #[test]
+    fn test_entity_file_cache_swap() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.insert("Q123", "Foo").unwrap();
+        efc.insert("Q456", "Bar").unwrap();
+        efc.insert("Q789", "Baz").unwrap();
+        efc.swap("Q123", "Q789");
+        assert_eq!(efc.get("Q123").unwrap(), "Baz");
+        assert_eq!(efc.get("Q456").unwrap(), "Bar");
+        assert_eq!(efc.get("Q789").unwrap(), "Foo");
+    }
+
+    #[test]
+    fn test_entity_file_cache_remove() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.insert("Q123", "Foo").unwrap();
+        efc.insert("Q456", "Bar").unwrap();
+        efc.insert("Q789", "Baz").unwrap();
+        assert_eq!(efc.remove("Q456").unwrap(), "Bar");
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert_eq!(efc.get("Q456"), None);
+        assert_eq!(efc.get("Q789").unwrap(), "Baz");
     }
 }
