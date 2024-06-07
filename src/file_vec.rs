@@ -135,6 +135,45 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
     }
 }
 
+/// CAUTION:
+/// This implementation of `IntoIterator` DOES NOT consume the `FileVec` object.
+/// I couldn't get iter() to work so just use `into_iter()` instead.
+/// It returns values rather than references but they are just copies.
+impl<'a, ValueType> IntoIterator for &'a FileVec<ValueType>
+where
+    ValueType: Clone + Serialize + for<'de> Deserialize<'de>,
+{
+    type Item = ValueType;
+    type IntoIter = FileVecIterator<'a, ValueType>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        FileVecIterator {
+            file_vec: self,
+            index: 0,
+        }
+    }
+}
+
+pub struct FileVecIterator<'a, ValueType> {
+    file_vec: &'a FileVec<ValueType>,
+    index: usize,
+}
+
+impl<'a, ValueType> Iterator for FileVecIterator<'a, ValueType>
+where
+    ValueType: Clone + Serialize + for<'de> Deserialize<'de>,
+{
+    type Item = ValueType;
+    fn next(&mut self) -> Option<ValueType> {
+        if self.index < self.file_vec.len {
+            self.index += 1;
+            self.file_vec.get(self.index - 1)
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,4 +356,25 @@ mod tests {
         assert_eq!(file_vec.get(0).unwrap(), "a");
         assert_eq!(file_vec.get(1).unwrap(), "c");
     }
+
+    #[test]
+    fn test_into_iter() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        let mut iter = file_vec.into_iter();
+        assert_eq!(iter.next().unwrap(), "a");
+        assert_eq!(iter.next().unwrap(), "b");
+        assert_eq!(iter.next().unwrap(), "c");
+        assert_eq!(iter.next(), None);
+
+        // Test that it can be used again
+        let mut iter = file_vec.into_iter();
+        assert_eq!(iter.next().unwrap(), "a");
+        assert_eq!(iter.next().unwrap(), "b");
+        assert_eq!(iter.next().unwrap(), "c");
+        assert_eq!(iter.next(), None);
+    }
+
 }
