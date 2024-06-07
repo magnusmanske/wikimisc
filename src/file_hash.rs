@@ -60,6 +60,9 @@ impl<
     pub fn swap<K1: Into<KeyType>, K2: Into<KeyType>>(&mut self, idx1: K1, idx2: K2) {
         let idx1: KeyType = idx1.into();
         let idx2: KeyType = idx2.into();
+        if idx1 == idx2 {
+            return;
+        }
         let v1 = self.id2pos.remove(&idx1);
         let v2 = self.id2pos.remove(&idx2);
 
