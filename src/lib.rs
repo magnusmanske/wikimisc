@@ -6,6 +6,7 @@ extern crate lazy_static;
 
 pub mod date;
 pub mod external_id;
+pub mod file_vec;
 pub mod file_hash;
 pub mod item_merger;
 pub mod lat_lon;

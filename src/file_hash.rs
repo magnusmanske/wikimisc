@@ -42,12 +42,15 @@ impl<
         self.id2pos.is_empty()
     }
 
-    pub fn clear(&mut self) {
+    pub fn clear(&mut self) -> Result<()> {
         self.id2pos.clear();
         if let Some(fh_lock) = &self.file_handle {
-            let fh = fh_lock.lock().expect("Poisoned file handle in FileHash");
-            fh.set_len(0).expect("Could not truncate file");
+            let fh = fh_lock
+                .lock()
+                .map_err(|e| anyhow!("Poisoned file handle in FileHash: {e}"))?;
+            fh.set_len(0)?;
         }
+        Ok(())
     }
 
     pub fn remove<K: Into<KeyType>>(&mut self, key: K) -> Option<ValueType> {
@@ -87,7 +90,7 @@ impl<
     /// Note that this will overwrite any existing entity for the key.
     /// Also, this will add the new value at the end of the file, wasting space for the previous one.
     pub fn insert<K: Into<KeyType>, V: Into<ValueType>>(&mut self, key: K, value: V) -> Result<()> {
-        let fh = self.get_or_create_file_handle();
+        let fh = self.get_or_create_file_handle()?;
         let mut fh = fh.lock().map_err(|e| anyhow!(format!("{e}")))?;
         let before = fh.metadata()?.len();
         // Writes occur only at the end of the file, so only seek if the last action was "read"
@@ -126,17 +129,18 @@ impl<
         serde_json::from_str(&s).ok()
     }
 
-    fn get_or_create_file_handle(&mut self) -> Arc<Mutex<File>> {
+    fn get_or_create_file_handle(&mut self) -> Result<Arc<Mutex<File>>> {
         if let Some(fh) = &self.file_handle {
-            return fh.clone();
+            return Ok(fh.clone());
         }
-        let fh = tempfile()
-            .expect("FileHash::get_or_create_file_handle: Could not create temporary file");
+        let fh = tempfile()?;
         self.file_handle = Some(Arc::new(Mutex::new(fh))); // Should auto-destruct
         if let Some(fh) = &self.file_handle {
-            return fh.clone();
+            return Ok(fh.clone());
         }
-        panic!("FileHash::get_or_create_file_handle: This is weird");
+        Err(anyhow!(
+            "FileHash::get_or_create_file_handle: This is weird"
+        ))
     }
 }
 

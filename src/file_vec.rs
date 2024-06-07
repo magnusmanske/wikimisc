@@ -1,0 +1,320 @@
+use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+
+use crate::file_hash::FileHash;
+
+#[derive(Debug, Clone)]
+pub struct FileVec<ValueType> {
+    file_hash: FileHash<usize, ValueType>,
+    len: usize,
+}
+
+impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> {
+    pub fn new() -> Self {
+        Self {
+            file_hash: FileHash::new(),
+            len: 0,
+        }
+    }
+
+    pub fn push(&mut self, row: ValueType) {
+        self.file_hash
+            .insert(self.len, row)
+            .expect("Failed to push result");
+        self.len += 1;
+    }
+
+    pub fn get(&self, pos: usize) -> Option<ValueType> {
+        self.file_hash.get(pos)
+    }
+
+    pub fn set(&mut self, pos: usize, row: ValueType) {
+        if pos < self.len {
+            self.file_hash
+                .insert(pos, row)
+                .expect("Failed to set result");
+        } else {
+            panic!("Attempting to set out-of-bounds result {pos}");
+        }
+    }
+
+    pub fn clear(&mut self) -> Result<()> {
+        self.file_hash.clear()?;
+        self.len = 0;
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn remove(&mut self, idx: usize) -> Option<ValueType> {
+        if idx >= self.len {
+            return None;
+        }
+        for pos in idx + 1..self.len {
+            self.swap(pos - 1, pos).ok()?;
+        }
+        self.pop()
+    }
+
+    pub fn pop(&mut self) -> Option<ValueType> {
+        if self.len > 0 {
+            self.len -= 1;
+            self.file_hash.remove(self.len)
+        } else {
+            None
+        }
+    }
+
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&ValueType) -> bool,
+    {
+        let mut write_pos = 0;
+        for read_pos in 0..self.len {
+            let row = self
+                .get(read_pos)
+                .expect("FileVec::keep_marked: row not found");
+            if f(&row) {
+                self.file_hash.swap(read_pos, write_pos);
+                write_pos += 1;
+            }
+        }
+        self.len = write_pos;
+    }
+
+    pub fn sort_by<F>(&mut self, mut f: F) -> Result<()>
+    where
+        F: FnMut(&ValueType, &ValueType) -> Ordering,
+    {
+        let n = self.len;
+        for i in 0..n {
+            let mut min_idx = i;
+            for j in i + 1..n {
+                let row_j = self.get(j).expect("FileVec::sort_by: row not found");
+                let row_min_idx = self.get(min_idx).expect("FileVec::sort_by: row not found");
+                if f(&row_j, &row_min_idx) == Ordering::Less {
+                    min_idx = j;
+                }
+            }
+            self.swap(i, min_idx)?;
+        }
+        Ok(())
+    }
+
+    fn swap(&mut self, idx1: usize, idx2: usize) -> Result<()> {
+        if idx1 >= self.len || idx2 >= self.len {
+            return Err(anyhow!("FileVec::swap: Attempting to swap out-of-bounds"));
+        }
+        let row1 = self
+            .get(idx1)
+            .ok_or_else(|| anyhow!("FileVec::swap: row not found"))?;
+        let row2 = self
+            .get(idx2)
+            .ok_or_else(|| anyhow!("FileVec::swap: row not found"))?;
+        self.set(idx1, row2);
+        self.set(idx2, row1);
+        Ok(())
+    }
+
+    pub fn reverse(&mut self) -> Result<()> {
+        let mut front = 0;
+        let mut end = self.len - 1;
+        while front < end {
+            self.swap(front, end)?;
+            front += 1;
+            end -= 1;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reverse() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        file_vec.reverse().unwrap();
+        assert_eq!(file_vec.len(), 3);
+        assert_eq!(file_vec.get(0).unwrap(), "c");
+        assert_eq!(file_vec.get(1).unwrap(), "b");
+        assert_eq!(file_vec.get(2).unwrap(), "a");
+    }
+
+    #[test]
+    fn test_sort_by() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("c".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("a".to_string());
+        file_vec.sort_by(|a, b| a.cmp(b)).unwrap();
+        assert_eq!(file_vec.len(), 3);
+        assert_eq!(file_vec.get(0).unwrap(), "a");
+        assert_eq!(file_vec.get(1).unwrap(), "b");
+        assert_eq!(file_vec.get(2).unwrap(), "c");
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        file_vec.clear().unwrap();
+        assert_eq!(file_vec.len(), 0);
+    }
+
+    #[test]
+    fn test_push() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        assert_eq!(file_vec.len(), 3);
+        assert_eq!(file_vec.get(0).unwrap(), "a");
+        assert_eq!(file_vec.get(1).unwrap(), "b");
+        assert_eq!(file_vec.get(2).unwrap(), "c");
+    }
+
+    #[test]
+    fn test_set() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        file_vec.set(1, "d".to_string());
+        assert_eq!(file_vec.len(), 3);
+        assert_eq!(file_vec.get(0).unwrap(), "a");
+        assert_eq!(file_vec.get(1).unwrap(), "d");
+        assert_eq!(file_vec.get(2).unwrap(), "c");
+    }
+
+    #[test]
+    fn test_get() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        assert_eq!(file_vec.get(0).unwrap(), "a");
+        assert_eq!(file_vec.get(1).unwrap(), "b");
+        assert_eq!(file_vec.get(2).unwrap(), "c");
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        assert_eq!(file_vec.is_empty(), true);
+        file_vec.push("a".to_string());
+        assert_eq!(file_vec.is_empty(), false);
+    }
+
+    #[test]
+    fn test_len() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        assert_eq!(file_vec.len(), 0);
+        file_vec.push("a".to_string());
+        assert_eq!(file_vec.len(), 1);
+    }
+
+    #[test]
+    fn test_remove() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        file_vec.remove(1);
+        assert_eq!(file_vec.len(), 2);
+        assert_eq!(file_vec.get(0).unwrap(), "a");
+        assert_eq!(file_vec.get(1).unwrap(), "c");
+    }
+
+    #[test]
+    fn test_remove_out_of_bounds() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        assert_eq!(file_vec.remove(3), None);
+    }
+
+    #[test]
+    fn test_swap() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        file_vec.swap(0, 2).unwrap();
+        assert_eq!(file_vec.len(), 3);
+        assert_eq!(file_vec.get(0).unwrap(), "c");
+        assert_eq!(file_vec.get(1).unwrap(), "b");
+        assert_eq!(file_vec.get(2).unwrap(), "a");
+    }
+
+    #[test]
+    fn test_swap_out_of_bounds() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        assert_eq!(file_vec.swap(0, 2).is_err(), true);
+    }
+
+    #[test]
+    fn test_swap_same_index() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        file_vec.swap(0, 0).unwrap();
+        assert_eq!(file_vec.len(), 3);
+        assert_eq!(file_vec.get(0).unwrap(), "a");
+        assert_eq!(file_vec.get(1).unwrap(), "b");
+        assert_eq!(file_vec.get(2).unwrap(), "c");
+    }
+
+    #[test]
+    fn test_swap_same_index_out_of_bounds() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        assert_eq!(file_vec.swap(0, 0).is_err(), true);
+    }
+
+    #[test]
+    fn test_pop() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        assert_eq!(file_vec.pop().unwrap(), "c");
+        assert_eq!(file_vec.len(), 2);
+        assert_eq!(file_vec.pop().unwrap(), "b");
+        assert_eq!(file_vec.len(), 1);
+        assert_eq!(file_vec.pop().unwrap(), "a");
+        assert_eq!(file_vec.len(), 0);
+    }
+
+    #[test]
+    fn test_pop_empty() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        assert_eq!(file_vec.pop(), None);
+    }
+
+    #[test]
+    fn test_retain() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        file_vec.retain(|x| x != "b");
+        assert_eq!(file_vec.len(), 2);
+        assert_eq!(file_vec.get(0).unwrap(), "a");
+        assert_eq!(file_vec.get(1).unwrap(), "c");
+    }
+}
