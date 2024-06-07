@@ -10,6 +10,8 @@ use std::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};
 use tempfile::tempfile;
 
+pub type EntityFileCache = FileHash<String, String>;
+
 #[derive(Clone, Debug)]
 pub struct FileHash<KeyType, ValueType> {
     id2pos: HashMap<KeyType, (u64, u64)>, // Position, length
