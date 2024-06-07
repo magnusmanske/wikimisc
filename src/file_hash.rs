@@ -129,6 +129,18 @@ impl<
         serde_json::from_str(&s).ok()
     }
 
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&KeyType, &ValueType) -> bool,
+    {
+        let keys = self.id2pos.keys().cloned().collect::<Vec<KeyType>>();
+        for key in keys {
+            if !f(&key, &self.get(key.clone()).unwrap()) {
+                self.id2pos.remove(&key);
+            }
+        }
+    }
+
     fn get_or_create_file_handle(&mut self) -> Result<Arc<Mutex<File>>> {
         if let Some(fh) = &self.file_handle {
             return Ok(fh.clone());
@@ -149,7 +161,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_entity_file_cache() {
+    fn test_file_hash() {
         let mut efc: FileHash<String, String> = FileHash::new();
         efc.insert("Q123", "Foo").unwrap();
         efc.insert("Q456", "Bar").unwrap();
@@ -162,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_file_cache_swap() {
+    fn test_file_hash_swap() {
         let mut efc: FileHash<String, String> = FileHash::new();
         efc.insert("Q123", "Foo").unwrap();
         efc.insert("Q456", "Bar").unwrap();
@@ -174,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_file_cache_remove() {
+    fn test_file_hash_remove() {
         let mut efc: FileHash<String, String> = FileHash::new();
         efc.insert("Q123", "Foo").unwrap();
         efc.insert("Q456", "Bar").unwrap();
@@ -183,5 +195,17 @@ mod tests {
         assert_eq!(efc.get("Q123").unwrap(), "Foo");
         assert_eq!(efc.get("Q456"), None);
         assert_eq!(efc.get("Q789").unwrap(), "Baz");
+    }
+
+    #[test]
+    fn test_file_hash_retain() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.insert("Q123", "Foo").unwrap();
+        efc.insert("Q456", "Bar").unwrap();
+        efc.insert("Q789", "Baz").unwrap();
+        efc.retain(|_, v| v == "Bar");
+        assert_eq!(efc.get("Q123"), None);
+        assert_eq!(efc.get("Q456").unwrap(), "Bar");
+        assert_eq!(efc.get("Q789"), None);
     }
 }
