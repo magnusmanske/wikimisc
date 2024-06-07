@@ -78,15 +78,17 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
     {
         let mut write_pos = 0;
         for read_pos in 0..self.len {
-            let row = self
+            let value = self
                 .get(read_pos)
                 .expect("FileVec::keep_marked: row not found");
-            if f(&row) {
+            if f(&value) {
                 self.file_hash.swap(read_pos, write_pos);
                 write_pos += 1;
             }
         }
-        self.len = write_pos;
+        while self.len > write_pos {
+            self.pop();
+        }
     }
 
     pub fn sort_by<F>(&mut self, mut f: F) -> Result<()>
@@ -192,6 +194,27 @@ mod tests {
     }
 
     #[test]
+    fn test_sort_by_empty() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.sort_by(|a, b| a.cmp(b)).unwrap();
+    }
+
+    #[test]
+    fn test_sort_by_single() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.sort_by(|a, b| a.cmp(b)).unwrap();
+    }
+
+    #[test]
+    fn test_sort_by_two() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.sort_by(|a, b| a.cmp(b)).unwrap();
+    }
+
+    #[test]
     fn test_sort_by() {
         let mut file_vec: FileVec<String> = FileVec::new();
         file_vec.push("c".to_string());
@@ -276,6 +299,18 @@ mod tests {
         assert_eq!(file_vec.len(), 2);
         assert_eq!(file_vec.get(0).unwrap(), "a");
         assert_eq!(file_vec.get(1).unwrap(), "c");
+    }
+
+    #[test]
+    fn test_remove_last() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        file_vec.remove(2);
+        assert_eq!(file_vec.len(), 2);
+        assert_eq!(file_vec.get(0).unwrap(), "a");
+        assert_eq!(file_vec.get(1).unwrap(), "b");
     }
 
     #[test]
@@ -376,5 +411,4 @@ mod tests {
         assert_eq!(iter.next().unwrap(), "c");
         assert_eq!(iter.next(), None);
     }
-
 }
