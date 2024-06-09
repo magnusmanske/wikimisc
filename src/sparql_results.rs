@@ -6,12 +6,12 @@ use crate::sparql_value::SparqlValue;
 pub type SparqlResultRow = HashMap<String, SparqlValue>;
 pub type SparqlResultRows = Vec<SparqlResultRow>;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct SparqlApiResults {
     bindings: SparqlResultRows,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct SparqlApiResult {
     head: HashMap<String, Vec<String>>,
     results: SparqlApiResults,

@@ -1,4 +1,4 @@
-use crate::{file_vec::FileVec, sparql_results::SparqlResultRows, sparql_value::SparqlValue};
+use crate::{file_vec::FileVec, sparql_results::SparqlApiResult, sparql_value::SparqlValue};
 use std::collections::HashMap;
 
 /// Maximum number of rows to keep in memory before flushing to disk.
@@ -139,13 +139,26 @@ impl SparqlTable {
         self.max_mem_rows = max_mem_rows;
         self.flush_to_disk();
     }
-}
 
-impl From<SparqlResultRows> for SparqlTable {
-    fn from(rows: SparqlResultRows) -> Self {
+    pub fn set_headers(&mut self, headers: Vec<String>) {
+        self.headers = headers
+            .into_iter()
+            .enumerate()
+            .map(|(a, b)| (b, a))
+            .collect();
+    }
+
+    /// Consumes `result`.
+    pub fn from_api_result(result: SparqlApiResult) -> Self {
         let mut table = Self::new();
-        for row in rows {
-            table.push_sparql_result_row(&row);
+        let headers = result
+            .head()
+            .get("vars")
+            .map(|v| v.to_owned())
+            .unwrap_or_default();
+        table.set_headers(headers);
+        for row in result.bindings() {
+            table.push_sparql_result_row(row);
         }
         table
     }
@@ -154,7 +167,6 @@ impl From<SparqlResultRows> for SparqlTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::iter::FromIterator;
 
     #[test]
     fn test_push() {
@@ -174,38 +186,6 @@ mod tests {
         assert_eq!(
             table.get(2),
             Some(vec![SparqlValue::Literal("c".to_string())])
-        );
-    }
-
-    #[test]
-    fn test_from_sparql_result_rows() {
-        let rows = vec![
-            HashMap::from_iter(vec![(
-                "a".to_string(),
-                SparqlValue::Literal("1".to_string()),
-            )]),
-            HashMap::from_iter(vec![(
-                "a".to_string(),
-                SparqlValue::Literal("2".to_string()),
-            )]),
-            HashMap::from_iter(vec![(
-                "a".to_string(),
-                SparqlValue::Literal("3".to_string()),
-            )]),
-        ];
-        let table = SparqlTable::from(SparqlResultRows::from(rows));
-        assert_eq!(table.len(), 3);
-        assert_eq!(
-            table.get(0),
-            Some(vec![SparqlValue::Literal("1".to_string())])
-        );
-        assert_eq!(
-            table.get(1),
-            Some(vec![SparqlValue::Literal("2".to_string())])
-        );
-        assert_eq!(
-            table.get(2),
-            Some(vec![SparqlValue::Literal("3".to_string())])
         );
     }
 
