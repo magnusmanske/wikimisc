@@ -198,10 +198,13 @@ impl<
     /// This operation is final; the entities will not be kept in memory again.
     fn flush_mem_to_disk(&mut self) -> Result<()> {
         let keys = self.in_memory.keys().cloned().collect::<Vec<KeyType>>();
-        keys.iter().for_each(|k| {
-            let v = self.in_memory.get(k).unwrap();
-            self.insert_disk(k.to_owned(), v.to_owned()).unwrap();
-        });
+        for key in &keys {
+            let v = self
+                .in_memory
+                .get(key)
+                .ok_or_else(|| anyhow!("Key not found"))?;
+            self.insert_disk(key.to_owned(), v.to_owned())?;
+        }
         self.in_memory.clear();
         self.using_disk = true;
         Ok(())
@@ -247,7 +250,11 @@ impl<
         F: FnMut(&KeyType, &ValueType) -> bool,
     {
         for key in self.keys() {
-            if !f(&key, &self.get(key.clone()).unwrap()) {
+            let value = match self.get(key.clone()) {
+                Some(v) => v,
+                None => continue, // TODO continue if key not found? This should never happen but...
+            };
+            if !f(&key, &value) {
                 self.remove(key);
             }
         }
