@@ -114,7 +114,11 @@ impl SparqlTable {
                 .map(|(i, (k, _))| (k.clone(), i))
                 .collect();
         }
-        let new_row: Vec<SparqlValue> = self.headers.iter().filter_map(|(k, _)| row.get(k).cloned()).collect();
+        let new_row: Vec<SparqlValue> = self
+            .headers
+            .iter()
+            .map(|(k, _)| row.get(k).cloned().unwrap_or_else(|| SparqlValue::None))
+            .collect();
         self.push(new_row);
     }
 
