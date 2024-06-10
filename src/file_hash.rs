@@ -14,7 +14,7 @@ pub type EntityFileCache = FileHash<String, String>;
 
 /// Maximum number of rows to keep in memory before flushing to disk.
 /// This is a default value that can be overridden on the individual tables.
-const MAX_MEM_ENTRIES: usize = 20;
+const MAX_MEM_ENTRIES: usize = 5;
 
 #[derive(Clone, Debug)]
 pub struct FileHash<KeyType, ValueType> {
@@ -154,12 +154,12 @@ impl<
     // Only used when `using_disk` is true
     fn get_file_pos_to_write(&mut self, fh: &File, size: u64) -> Result<u64> {
         let mut position = fh.metadata()?.len();
-        for (num,(start, len)) in self.disk_free.iter_mut().enumerate() {
+        for (num, (start, len)) in self.disk_free.iter_mut().enumerate() {
             if *len >= size {
                 position = *start;
 
                 // Poor man's memory management
-                if *len==size {
+                if *len == size {
                     self.disk_free.remove(num);
                 } else {
                     *len -= size;
