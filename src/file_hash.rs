@@ -20,9 +20,9 @@ const MAX_MEM_ENTRIES: usize = 20;
 pub struct FileHash<KeyType, ValueType> {
     id2pos: HashMap<KeyType, (u64, u64)>, // Position, length
     file_handle: Option<Arc<Mutex<File>>>,
-    last_action_was_read: Arc<Mutex<bool>>,
     phantom: PhantomData<ValueType>,
     in_memory: HashMap<KeyType, ValueType>,
+    disk_free: Vec<(u64, u64)>,
     max_mem_entries: usize,
     using_disk: bool,
 }
@@ -36,9 +36,9 @@ impl<
         Self {
             id2pos: HashMap::new(),
             file_handle: None,
-            last_action_was_read: Arc::new(Mutex::new(true)),
             phantom: PhantomData,
             in_memory: HashMap::new(),
+            disk_free: Vec::new(),
             max_mem_entries: MAX_MEM_ENTRIES,
             using_disk: false,
         }
@@ -144,34 +144,52 @@ impl<
     fn insert_mem(&mut self, key: KeyType, value: ValueType) -> Result<()> {
         if self.in_memory.len() >= self.max_mem_entries {
             self.flush_mem_to_disk()?;
-            return self.insert_disk(key, value);
+            self.insert_disk(key, value)
+        } else {
+            self.in_memory.insert(key.into(), value.into());
+            Ok(())
         }
-        self.in_memory.insert(key.into(), value.into());
-        Ok(())
+    }
+
+    // Only used when `using_disk` is true
+    fn get_file_pos_to_write(&mut self, fh: &File, size: u64) -> Result<u64> {
+        let mut position = fh.metadata()?.len();
+        for (num,(start, len)) in self.disk_free.iter_mut().enumerate() {
+            if *len >= size {
+                position = *start;
+
+                // Poor man's memory management
+                if *len==size {
+                    self.disk_free.remove(num);
+                } else {
+                    *len -= size;
+                    *start += size;
+                }
+                break;
+            }
+        }
+        Ok(position)
+    }
+
+    // Only used when `using_disk` is true
+    fn release_storage(&mut self, key: &KeyType) {
+        if let Some((start, len)) = self.id2pos.remove(key) {
+            self.disk_free.push((start, len));
+        }
     }
 
     fn insert_disk(&mut self, key: KeyType, value: ValueType) -> Result<()> {
         let fh = self.get_or_create_file_handle()?;
         let mut fh = fh.lock().map_err(|e| anyhow!(format!("{e}")))?;
-        let before = fh.metadata()?.len();
-        // Writes occur only at the end of the file, so only seek if the last action was "read"
-        if *self
-            .last_action_was_read
-            .lock()
-            .map_err(|e| anyhow!(format!("{e}")))?
-        {
-            // TODO is the new string fits into the old one, we could overwrite it to save disk space?
-            fh.seek(SeekFrom::End(0))?;
-        }
-        *self
-            .last_action_was_read
-            .lock()
-            .map_err(|e| anyhow!(format!("{e}")))? = false;
+        self.release_storage(&key);
+
         let json = serde_json::to_string(&value)?;
-        fh.write_all(json.as_bytes())?;
-        let after = fh.metadata()?.len();
-        let diff = after - before;
-        self.id2pos.insert(key, (before, diff));
+        let bytes = json.as_bytes();
+        let size = bytes.len() as u64;
+        let position_in_file = self.get_file_pos_to_write(&fh, size)?;
+        fh.seek(SeekFrom::Start(position_in_file))?;
+        fh.write_all(bytes)?;
+        self.id2pos.insert(key, (position_in_file, size));
         Ok(())
     }
 
@@ -208,7 +226,6 @@ impl<
 
     fn get_disk(&self, key: KeyType) -> Option<ValueType> {
         let mut fh = self.file_handle.as_ref()?.lock().ok()?;
-        *self.last_action_was_read.lock().ok()? = true;
         let (start, length) = self.id2pos.get(&key)?;
         fh.seek(SeekFrom::Start(*start)).ok()?;
         let mut buffer: Vec<u8> = vec![0; *length as usize];
@@ -285,8 +302,34 @@ mod tests {
     }
 
     #[test]
+    fn test_file_hash_swap_disk() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(0);
+        efc.insert("Q123", "Foo").unwrap();
+        efc.insert("Q456", "Bar").unwrap();
+        efc.insert("Q789", "Baz").unwrap();
+        efc.swap("Q123", "Q789");
+        assert_eq!(efc.get("Q123").unwrap(), "Baz");
+        assert_eq!(efc.get("Q456").unwrap(), "Bar");
+        assert_eq!(efc.get("Q789").unwrap(), "Foo");
+    }
+
+    #[test]
     fn test_file_hash_remove() {
         let mut efc: FileHash<String, String> = FileHash::new();
+        efc.insert("Q123", "Foo").unwrap();
+        efc.insert("Q456", "Bar").unwrap();
+        efc.insert("Q789", "Baz").unwrap();
+        assert_eq!(efc.remove("Q456").unwrap(), "Bar");
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert_eq!(efc.get("Q456"), None);
+        assert_eq!(efc.get("Q789").unwrap(), "Baz");
+    }
+
+    #[test]
+    fn test_file_hash_remove_disk() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(0);
         efc.insert("Q123", "Foo").unwrap();
         efc.insert("Q456", "Bar").unwrap();
         efc.insert("Q789", "Baz").unwrap();
@@ -378,5 +421,33 @@ mod tests {
         assert!(!efc.is_empty());
         efc.clear().unwrap();
         assert!(efc.is_empty());
+    }
+
+    #[test]
+    fn test_file_hash_alter_disk() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(0);
+        efc.insert("Q123", "Foo").unwrap();
+        efc.insert("Q456", "Bar").unwrap();
+        efc.insert("Q789", "Baz").unwrap();
+
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert_eq!(efc.get("Q456").unwrap(), "Bar");
+        assert_eq!(efc.get("Q789").unwrap(), "Baz");
+
+        efc.insert("Q456", "Bob").unwrap();
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert_eq!(efc.get("Q456").unwrap(), "Bob");
+        assert_eq!(efc.get("Q789").unwrap(), "Baz");
+
+        efc.insert("Q456", "Sm").unwrap();
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert_eq!(efc.get("Q456").unwrap(), "Sm");
+        assert_eq!(efc.get("Q789").unwrap(), "Baz");
+
+        efc.insert("Q456", "Boom").unwrap();
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert_eq!(efc.get("Q456").unwrap(), "Boom");
+        assert_eq!(efc.get("Q789").unwrap(), "Baz");
     }
 }
