@@ -28,8 +28,7 @@ impl ToolforgeDB {
             )
             .with_inactive_connection_ttl(Duration::from_secs(keep_sec));
         let wd_url = url;
-        let wd_opts = Opts::from_url(wd_url)
-            .unwrap_or_else(|_| panic!("Can not build options from db_wd URL {}", wd_url));
+        let wd_opts = Opts::from_url(wd_url)?;
         let pool =
             mysql_async::Pool::new(OptsBuilder::from_opts(wd_opts).pool_opts(pool_opts.clone()));
         Ok(pool)

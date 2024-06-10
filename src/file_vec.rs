@@ -29,13 +29,14 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         self.file_hash.get(pos)
     }
 
-    pub fn set(&mut self, pos: usize, row: ValueType) {
+    pub fn set(&mut self, pos: usize, row: ValueType) -> Result<()> {
         if pos < self.len {
             self.file_hash
                 .insert(pos, row)
                 .expect("Failed to set result");
+            Ok(())
         } else {
-            panic!("Attempting to set out-of-bounds result {pos}");
+            Err(anyhow!("Attempting to set out-of-bounds result {pos}"))
         }
     }
 
@@ -114,14 +115,17 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         if idx1 >= self.len || idx2 >= self.len {
             return Err(anyhow!("FileVec::swap: Attempting to swap out-of-bounds"));
         }
+        if idx1 == idx2 {
+            return Ok(()); // No need to swap if the indices are the same
+        }
         let row1 = self
             .get(idx1)
             .ok_or_else(|| anyhow!("FileVec::swap: row not found"))?;
         let row2 = self
             .get(idx2)
             .ok_or_else(|| anyhow!("FileVec::swap: row not found"))?;
-        self.set(idx1, row2);
-        self.set(idx2, row1);
+        self.set(idx1, row2)?;
+        self.set(idx2, row1)?;
         Ok(())
     }
 
@@ -255,7 +259,7 @@ mod tests {
         file_vec.push("a".to_string());
         file_vec.push("b".to_string());
         file_vec.push("c".to_string());
-        file_vec.set(1, "d".to_string());
+        file_vec.set(1, "d".to_string()).unwrap();
         assert_eq!(file_vec.len(), 3);
         assert_eq!(file_vec.get(0).unwrap(), "a");
         assert_eq!(file_vec.get(1).unwrap(), "d");
@@ -357,7 +361,7 @@ mod tests {
     #[test]
     fn test_swap_same_index_out_of_bounds() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        assert_eq!(file_vec.swap(0, 0).is_err(), true);
+        assert_eq!(file_vec.swap(0, 5).is_err(), true);
     }
 
     #[test]

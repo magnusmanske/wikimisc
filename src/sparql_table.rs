@@ -1,4 +1,5 @@
 use crate::{file_vec::FileVec, sparql_results::SparqlApiResult, sparql_value::SparqlValue};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -72,9 +73,9 @@ impl SparqlTable {
         self.rows.get(row_id).map(|r| r.to_owned())
     }
 
-    fn push_sparql_result_row(&mut self, row: &HashMap<String, SparqlValue>) {
+    fn push_sparql_result_row(&mut self, row: &HashMap<String, SparqlValue>) -> Result<()> {
         if self.headers.is_empty() {
-            panic!("Header not set");
+            return Err(anyhow!("Header not set"));
         }
         let new_row: Vec<Option<SparqlValue>> = self
             .headers
@@ -82,6 +83,7 @@ impl SparqlTable {
             .map(|name| row.get(name).cloned())
             .collect();
         self.push(new_row);
+        Ok(())
     }
 
     /// Return the main variable of the table, if set.
@@ -105,7 +107,7 @@ impl SparqlTable {
     }
 
     /// Consumes `result`.
-    pub fn from_api_result(result: SparqlApiResult) -> Self {
+    pub fn from_api_result(result: SparqlApiResult) -> Result<Self> {
         let mut table = Self::new();
         let headers = result
             .head()
@@ -114,9 +116,9 @@ impl SparqlTable {
             .unwrap_or_default();
         table.set_headers(headers);
         for row in result.bindings() {
-            table.push_sparql_result_row(row);
+            table.push_sparql_result_row(row)?;
         }
-        table
+        Ok(table)
     }
 }
 
