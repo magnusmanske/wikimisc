@@ -163,24 +163,4 @@ mod tests {
         table.set_main_variable(Some("b".to_string()));
         assert_eq!(table.main_column(), Some(1));
     }
-
-    #[test]
-    fn sevvbhivbsikd() {
-        let file = "/Users/mm6//Downloads/query(5).json";
-        let json_text = std::fs::read_to_string(file).unwrap();
-        let api_result: SparqlApiResult = serde_json::from_str(&json_text).unwrap();
-        let sparql_table = SparqlTable::from_api_result(api_result);
-        // println!("{}", api_result.bindings().len());
-        let var_index = sparql_table.get_var_index("item").unwrap();
-        // println!("{}", var_index);
-
-        let mut ids_tmp = vec![];
-        for row_id in 0..sparql_table.len() {
-            // println!("{:?}", sparql_table.get(row_id).unwrap());
-            if let Some(SparqlValue::Entity(id)) = sparql_table.get_row_col(row_id, var_index) {
-                ids_tmp.push(id.to_string());
-            }
-        }
-        println!("{}", ids_tmp.len());
-    }
 }

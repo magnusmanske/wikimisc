@@ -82,9 +82,9 @@ mod tests {
         let sparql = "SELECT ?item ?itemLabel WHERE { ?item wdt:P31 wd:Q34038. SERVICE wikibase:label { bd:serviceParam wikibase:language 'en'. }} LIMIT 5";
         let mut reader = wd.load_sparql_csv(&sparql).await.unwrap();
         let mut count = 0;
-        for result in reader.records() {
-            let record = result.unwrap();
-            println!("{:?}", record);
+        for _result in reader.records() {
+            // let record = result.unwrap();
+            // println!("{:?}", record);
             count += 1;
         }
         assert_eq!(count, 5);
