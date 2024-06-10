@@ -13,7 +13,6 @@ pub enum SparqlValue {
     Time(String),
     Location(LatLon),
     Literal(String),
-    None,
 }
 
 impl SparqlValue {
@@ -135,10 +134,6 @@ impl Serialize for SparqlValue {
                 let mut s = serializer.serialize_struct("Literal", 2)?;
                 s.serialize_field("type", "literal")?;
                 s.serialize_field("value", literal)?;
-                s.end()
-            }
-            SparqlValue::None => {
-                let s = serializer.serialize_struct("None", 0)?;
                 s.end()
             }
         }

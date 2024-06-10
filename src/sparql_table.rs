@@ -4,7 +4,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct SparqlTable {
     headers: Vec<String>,
-    rows: FileVec<Vec<SparqlValue>>,
+    rows: FileVec<Vec<Option<SparqlValue>>>,
     main_variable: Option<String>,
 }
 
@@ -45,7 +45,11 @@ impl SparqlTable {
 
     /// Get the value of a cell in the table. Returns None if the row or column does not exist.
     pub fn get_row_col(&self, row_id: usize, col_id: usize) -> Option<SparqlValue> {
-        self.rows.get(row_id)?.get(col_id).map(|v| v.to_owned())
+        self.rows
+            .get(row_id)?
+            .get(col_id)
+            .map(|v| v.to_owned())
+            .flatten()
     }
 
     /// Get the index of a variable in the table. Case-insensitive.
@@ -59,27 +63,23 @@ impl SparqlTable {
     }
 
     /// Push a row to the table.
-    pub fn push(&mut self, row: Vec<SparqlValue>) {
+    pub fn push(&mut self, row: Vec<Option<SparqlValue>>) {
         self.rows.push(row);
     }
 
     /// Get a row from the table. Returns None if the row does not exist.
-    pub fn get(&self, row_id: usize) -> Option<Vec<SparqlValue>> {
+    pub fn get(&self, row_id: usize) -> Option<Vec<Option<SparqlValue>>> {
         self.rows.get(row_id).map(|r| r.to_owned())
     }
 
     fn push_sparql_result_row(&mut self, row: &HashMap<String, SparqlValue>) {
         if self.headers.is_empty() {
             panic!("Header not set");
-            // self.headers = row
-            //     .iter()
-            //     .map(|(k, _)| k.clone())
-            //     .collect();
         }
-        let new_row: Vec<SparqlValue> = self
+        let new_row: Vec<Option<SparqlValue>> = self
             .headers
             .iter()
-            .map(|name| row.get(name).cloned().unwrap_or_else(|| SparqlValue::None))
+            .map(|name| row.get(name).cloned())
             .collect();
         self.push(new_row);
     }
@@ -127,21 +127,21 @@ mod tests {
     #[test]
     fn test_push() {
         let mut table = SparqlTable::new();
-        table.push(vec![SparqlValue::Literal("a".to_string())]);
-        table.push(vec![SparqlValue::Literal("b".to_string())]);
-        table.push(vec![SparqlValue::Literal("c".to_string())]);
+        table.push(vec![Some(SparqlValue::Literal("a".to_string()))]);
+        table.push(vec![Some(SparqlValue::Literal("b".to_string()))]);
+        table.push(vec![Some(SparqlValue::Literal("c".to_string()))]);
         assert_eq!(table.len(), 3);
         assert_eq!(
             table.get(0),
-            Some(vec![SparqlValue::Literal("a".to_string())])
+            Some(vec![Some(SparqlValue::Literal("a".to_string()))])
         );
         assert_eq!(
             table.get(1),
-            Some(vec![SparqlValue::Literal("b".to_string())])
+            Some(vec![Some(SparqlValue::Literal("b".to_string()))])
         );
         assert_eq!(
             table.get(2),
-            Some(vec![SparqlValue::Literal("c".to_string())])
+            Some(vec![Some(SparqlValue::Literal("c".to_string()))])
         );
     }
 
@@ -162,5 +162,25 @@ mod tests {
         table.headers.push("b".to_string());
         table.set_main_variable(Some("b".to_string()));
         assert_eq!(table.main_column(), Some(1));
+    }
+
+    #[test]
+    fn sevvbhivbsikd() {
+        let file = "/Users/mm6//Downloads/query(5).json";
+        let json_text = std::fs::read_to_string(file).unwrap();
+        let api_result: SparqlApiResult = serde_json::from_str(&json_text).unwrap();
+        let sparql_table = SparqlTable::from_api_result(api_result);
+        // println!("{}", api_result.bindings().len());
+        let var_index = sparql_table.get_var_index("item").unwrap();
+        // println!("{}", var_index);
+
+        let mut ids_tmp = vec![];
+        for row_id in 0..sparql_table.len() {
+            // println!("{:?}", sparql_table.get(row_id).unwrap());
+            if let Some(SparqlValue::Entity(id)) = sparql_table.get_row_col(row_id, var_index) {
+                ids_tmp.push(id.to_string());
+            }
+        }
+        println!("{}", ids_tmp.len());
     }
 }
