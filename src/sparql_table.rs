@@ -7,7 +7,7 @@ const MAX_MEM_ROWS: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct SparqlTable {
-    headers: HashMap<String, usize>,
+    headers: Vec<String>,
     rows_file: FileVec<Vec<SparqlValue>>,
     rows_mem: Vec<Vec<SparqlValue>>,
     main_variable: Option<String>,
@@ -25,7 +25,7 @@ impl SparqlTable {
     /// Create a new SparqlTable.
     pub fn new() -> Self {
         Self {
-            headers: HashMap::new(),
+            headers: Vec::new(),
             rows_file: FileVec::new(),
             rows_mem: Vec::new(),
             main_variable: None,
@@ -73,8 +73,9 @@ impl SparqlTable {
         let var = var.to_lowercase();
         self.headers
             .iter()
-            .find(|(name, _num)| name.to_lowercase() == var)
-            .map(|(_, num)| *num)
+            .enumerate()
+            .find(|(_num, name)| name.to_lowercase() == var)
+            .map(|(num, _)| num)
     }
 
     /// Push a row to the table.
@@ -108,16 +109,16 @@ impl SparqlTable {
 
     fn push_sparql_result_row(&mut self, row: &HashMap<String, SparqlValue>) {
         if self.headers.is_empty() {
-            self.headers = row
-                .iter()
-                .enumerate()
-                .map(|(i, (k, _))| (k.clone(), i))
-                .collect();
+            panic!("Header not set");
+            // self.headers = row
+            //     .iter()
+            //     .map(|(k, _)| k.clone())
+            //     .collect();
         }
         let new_row: Vec<SparqlValue> = self
             .headers
             .iter()
-            .map(|(k, _)| row.get(k).cloned().unwrap_or_else(|| SparqlValue::None))
+            .map(|name| row.get(name).cloned().unwrap_or_else(|| SparqlValue::None))
             .collect();
         self.push(new_row);
     }
@@ -134,9 +135,8 @@ impl SparqlTable {
 
     /// Return the index of the main variable in the table, if set.
     pub fn main_column(&self) -> Option<usize> {
-        self.main_variable
-            .as_ref()
-            .and_then(|var| self.headers.get(var).copied())
+        let mv = self.main_variable.as_ref()?;
+        self.headers.iter().position(|header| header == mv)
     }
 
     pub fn set_max_mem_rows(&mut self, max_mem_rows: usize) {
@@ -145,11 +145,7 @@ impl SparqlTable {
     }
 
     pub fn set_headers(&mut self, headers: Vec<String>) {
-        self.headers = headers
-            .into_iter()
-            .enumerate()
-            .map(|(a, b)| (b, a))
-            .collect();
+        self.headers = headers;
     }
 
     /// Consumes `result`.
@@ -196,8 +192,8 @@ mod tests {
     #[test]
     fn test_get_var_index() {
         let mut table = SparqlTable::new();
-        table.headers.insert("a".to_string(), 0);
-        table.headers.insert("b".to_string(), 1);
+        table.headers.push("a".to_string());
+        table.headers.push("b".to_string());
         assert_eq!(table.get_var_index("a"), Some(0));
         assert_eq!(table.get_var_index("b"), Some(1));
         assert_eq!(table.get_var_index("c"), None);
