@@ -251,4 +251,36 @@ mod tests {
         assert_eq!(lit, lit2);
         assert_eq!(lit2, SparqlValue::Literal(literal.to_string()));
     }
+
+    #[test]
+    fn test_serialize_deserialize() {
+        let value = SparqlValue::Literal("GB-CAM".to_string());
+        let json = serde_json::to_string(&value).unwrap();
+        let value2: SparqlValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(value, value2);
+    }
+
+    #[test]
+    fn test_serialize_deserialize_all() {
+        let values = vec![
+            SparqlValue::Literal("GB-CAM".to_string()),
+            SparqlValue::Entity("Q1234".to_string()),
+            SparqlValue::File("File:Example.jpg".to_string()),
+            SparqlValue::Uri("http://example.com".to_string()),
+            SparqlValue::Time("+2020-01-01T:01:23:45Z".to_string()),
+            SparqlValue::Location(LatLon::new(1.0, -2.0)),
+        ];
+        for value in values {
+            let json = serde_json::to_string(&value).unwrap();
+            let value2: SparqlValue = serde_json::from_str(&json).unwrap();
+            assert_eq!(value, value2);
+        }
+    }
+
+    #[test]
+    fn test_new_from_json_entity() {
+        let json = r#"{"type":"uri","value":"http://www.wikidata.org/entity/Q21"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, Some(SparqlValue::Entity("Q21".to_string())));
+    }
 }

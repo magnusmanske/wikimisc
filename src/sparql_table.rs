@@ -1,18 +1,11 @@
 use crate::{file_vec::FileVec, sparql_results::SparqlApiResult, sparql_value::SparqlValue};
 use std::collections::HashMap;
 
-/// Maximum number of rows to keep in memory before flushing to disk.
-/// This is a default value that can be overridden on the individual tables.
-const MAX_MEM_ROWS: usize = 5;
-
 #[derive(Debug, Clone)]
 pub struct SparqlTable {
     headers: Vec<String>,
-    rows_file: FileVec<Vec<SparqlValue>>,
-    rows_mem: Vec<Vec<SparqlValue>>,
+    rows: FileVec<Vec<SparqlValue>>,
     main_variable: Option<String>,
-    max_mem_rows: usize,
-    use_disk: bool,
 }
 
 impl Default for SparqlTable {
@@ -26,11 +19,8 @@ impl SparqlTable {
     pub fn new() -> Self {
         Self {
             headers: Vec::new(),
-            rows_file: FileVec::new(),
-            rows_mem: Vec::new(),
+            rows: FileVec::new(),
             main_variable: None,
-            max_mem_rows: MAX_MEM_ROWS,
-            use_disk: false,
         }
     }
 
@@ -38,34 +28,24 @@ impl SparqlTable {
     pub fn from_table(other: &SparqlTable) -> Self {
         Self {
             headers: other.headers.clone(),
-            rows_file: FileVec::new(),
-            rows_mem: Vec::new(),
+            rows: FileVec::new(),
             main_variable: other.main_variable.clone(),
-            max_mem_rows: other.max_mem_rows,
-            use_disk: false,
         }
     }
 
     /// Return the number of rows in the table.
     pub fn len(&self) -> usize {
-        self.rows_file.len() + self.rows_mem.len()
+        self.rows.len()
     }
 
     /// Return true if the table is empty.
     pub fn is_empty(&self) -> bool {
-        self.rows_file.is_empty() && self.rows_mem.is_empty()
+        self.rows.is_empty()
     }
 
     /// Get the value of a cell in the table. Returns None if the row or column does not exist.
     pub fn get_row_col(&self, row_id: usize, col_id: usize) -> Option<SparqlValue> {
-        if self.use_disk {
-            self.rows_file
-                .get(row_id)?
-                .get(col_id)
-                .map(|v| v.to_owned())
-        } else {
-            self.rows_mem.get(row_id)?.get(col_id).map(|v| v.to_owned())
-        }
+        self.rows.get(row_id)?.get(col_id).map(|v| v.to_owned())
     }
 
     /// Get the index of a variable in the table. Case-insensitive.
@@ -80,31 +60,12 @@ impl SparqlTable {
 
     /// Push a row to the table.
     pub fn push(&mut self, row: Vec<SparqlValue>) {
-        if self.use_disk {
-            self.rows_file.push(row);
-        } else {
-            self.rows_mem.push(row);
-            self.flush_to_disk();
-        }
-    }
-
-    // Checks if the max_mem_rows limit is reached and flushes the memory to disk if needed.
-    fn flush_to_disk(&mut self) {
-        if !self.use_disk && self.rows_mem.len() > self.max_mem_rows {
-            self.use_disk = true;
-            for row in self.rows_mem.drain(..) {
-                self.rows_file.push(row);
-            }
-        }
+        self.rows.push(row);
     }
 
     /// Get a row from the table. Returns None if the row does not exist.
     pub fn get(&self, row_id: usize) -> Option<Vec<SparqlValue>> {
-        if self.use_disk {
-            self.rows_file.get(row_id).map(|r| r.to_owned())
-        } else {
-            self.rows_mem.get(row_id).map(|r| r.to_owned())
-        }
+        self.rows.get(row_id).map(|r| r.to_owned())
     }
 
     fn push_sparql_result_row(&mut self, row: &HashMap<String, SparqlValue>) {
@@ -137,11 +98,6 @@ impl SparqlTable {
     pub fn main_column(&self) -> Option<usize> {
         let mv = self.main_variable.as_ref()?;
         self.headers.iter().position(|header| header == mv)
-    }
-
-    pub fn set_max_mem_rows(&mut self, max_mem_rows: usize) {
-        self.max_mem_rows = max_mem_rows;
-        self.flush_to_disk();
     }
 
     pub fn set_headers(&mut self, headers: Vec<String>) {
@@ -200,22 +156,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mem_to_disk() {
+    fn test_main_column() {
         let mut table = SparqlTable::new();
-        // Add a few, should stay in memory for speed
-        for row_id in 0..MAX_MEM_ROWS {
-            table.push(vec![SparqlValue::Literal(row_id.to_string())]);
-        }
-        assert_eq!(table.len(), MAX_MEM_ROWS);
-        assert_eq!(table.rows_mem.len(), MAX_MEM_ROWS);
-        assert_eq!(table.rows_file.len(), 0);
-        assert_eq!(table.use_disk, false);
-
-        // Add one more, that should flush everything onto disk
-        table.push(vec![SparqlValue::Literal("one too many".to_string())]);
-        assert_eq!(table.len(), MAX_MEM_ROWS + 1);
-        assert_eq!(table.rows_mem.len(), 0);
-        assert_eq!(table.rows_file.len(), MAX_MEM_ROWS + 1);
-        assert_eq!(table.use_disk, true);
+        table.headers.push("a".to_string());
+        table.headers.push("b".to_string());
+        table.set_main_variable(Some("b".to_string()));
+        assert_eq!(table.main_column(), Some(1));
     }
 }

@@ -411,4 +411,47 @@ mod tests {
         assert_eq!(iter.next().unwrap(), "c");
         assert_eq!(iter.next(), None);
     }
+
+    #[test]
+    fn test_into_iter_empty() {
+        let file_vec: FileVec<String> = FileVec::new();
+        let mut iter = file_vec.into_iter();
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_into_iter_single() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        let mut iter = file_vec.into_iter();
+        assert_eq!(iter.next().unwrap(), "a");
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_into_iter_borrowed() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        let mut iter = (&file_vec).into_iter();
+        assert_eq!(iter.next().unwrap(), "a");
+        assert_eq!(iter.next().unwrap(), "b");
+        assert_eq!(iter.next().unwrap(), "c");
+        assert_eq!(iter.next(), None);
+
+        // Test that it can be used again
+        let mut iter = (&file_vec).into_iter();
+        assert_eq!(iter.next().unwrap(), "a");
+        assert_eq!(iter.next().unwrap(), "b");
+        assert_eq!(iter.next().unwrap(), "c");
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_into_iter_borrowed_empty() {
+        let file_vec: FileVec<String> = FileVec::new();
+        let mut iter = (&file_vec).into_iter();
+        assert_eq!(iter.next(), None);
+    }
 }
