@@ -1,6 +1,8 @@
 //! Stores latitude/longitude coordinates.
 
-#[derive(Debug, Clone, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LatLon {
     pub lat: f64,
     pub lon: f64,
@@ -34,5 +36,23 @@ mod tests {
         assert_eq!(LatLon::from_str("12.34,ABC"), None);
         assert_eq!(LatLon::from_str("12.34"), None);
         assert_eq!(LatLon::from_str("ABC,56.78,"), None);
+    }
+
+    #[test]
+    fn test_new() {
+        assert_eq!(LatLon::new(12.34, 56.78), LatLon { lat: 12.34, lon: 56.78 });
+    }
+
+    #[test]
+    fn test_serialize() {
+        let lat_lon = LatLon::new(12.34, 56.78);
+        let serialized = serde_json::to_string(&lat_lon).unwrap();
+        assert_eq!(serialized, r#"{"lat":12.34,"lon":56.78}"#);
+    }
+
+    #[test]
+    fn test_deserialize() {
+        let deserialized: LatLon = serde_json::from_str(r#"{"lat":12.34,"lon":56.78}"#).unwrap();
+        assert_eq!(deserialized, LatLon::new(12.34, 56.78));
     }
 }
