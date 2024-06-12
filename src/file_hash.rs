@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::SeekFrom;
-use std::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};
 use tempfile::tempfile;
 
@@ -18,7 +17,7 @@ const MAX_MEM_ENTRIES: usize = 5;
 #[derive(Clone, Debug)]
 pub struct FileHash<KeyType, ValueType> {
     id2pos: HashMap<KeyType, (u64, u64)>, // Position, length
-    file_handle: Option<Arc<Mutex<File>>>,
+    file_handle: Option<Arc<File>>,
     in_memory: HashMap<KeyType, ValueType>,
     disk_free: Vec<(u64, u64)>,
     max_mem_entries: usize,
@@ -53,10 +52,7 @@ impl<
         self.id2pos.clear();
         self.in_memory.clear();
         if let Some(fh_lock) = &self.file_handle {
-            let fh = fh_lock
-                .lock()
-                .map_err(|e| anyhow!("Poisoned file handle in FileHash: {e}"))?;
-            fh.set_len(0)?;
+            fh_lock.set_len(0)?;
         }
         Ok(())
     }
@@ -176,8 +172,7 @@ impl<
     }
 
     fn insert_disk(&mut self, key: KeyType, value: ValueType) -> Result<()> {
-        let fh = self.get_or_create_file_handle()?;
-        let mut fh = fh.lock().map_err(|e| anyhow!(format!("{e}")))?;
+        let mut fh = self.get_or_create_file_handle()?;
         self.release_storage(&key);
 
         let json = serde_json::to_string(&value)?;
@@ -225,7 +220,7 @@ impl<
     }
 
     fn get_disk(&self, key: KeyType) -> Option<ValueType> {
-        let mut fh = self.file_handle.as_ref()?.lock().ok()?;
+        let mut fh = self.file_handle.clone()?;
         let (start, length) = self.id2pos.get(&key)?;
         fh.seek(SeekFrom::Start(*start)).ok()?;
         let mut buffer: Vec<u8> = vec![0; *length as usize];
@@ -257,12 +252,12 @@ impl<
         }
     }
 
-    fn get_or_create_file_handle(&mut self) -> Result<Arc<Mutex<File>>> {
+    fn get_or_create_file_handle(&mut self) -> Result<Arc<File>> {
         if let Some(fh) = &self.file_handle {
             return Ok(fh.clone());
         }
         let fh = tempfile()?;
-        self.file_handle = Some(Arc::new(Mutex::new(fh))); // Should auto-destruct
+        self.file_handle = Some(Arc::new(fh)); // Should auto-destruct
         if let Some(fh) = &self.file_handle {
             return Ok(fh.clone());
         }
