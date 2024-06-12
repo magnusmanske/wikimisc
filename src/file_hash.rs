@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::SeekFrom;
-use std::marker::PhantomData;
 use std::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};
 use tempfile::tempfile;
@@ -20,7 +19,6 @@ const MAX_MEM_ENTRIES: usize = 5;
 pub struct FileHash<KeyType, ValueType> {
     id2pos: HashMap<KeyType, (u64, u64)>, // Position, length
     file_handle: Option<Arc<Mutex<File>>>,
-    phantom: PhantomData<ValueType>,
     in_memory: HashMap<KeyType, ValueType>,
     disk_free: Vec<(u64, u64)>,
     max_mem_entries: usize,
@@ -36,7 +34,6 @@ impl<
         Self {
             id2pos: HashMap::new(),
             file_handle: None,
-            phantom: PhantomData,
             in_memory: HashMap::new(),
             disk_free: Vec::new(),
             max_mem_entries: MAX_MEM_ENTRIES,
