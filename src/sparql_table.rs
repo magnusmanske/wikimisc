@@ -2,10 +2,12 @@ use crate::{file_vec::FileVec, sparql_results::SparqlApiResult, sparql_value::Sp
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
+pub type SparqlRow = Vec<Option<SparqlValue>>;
+
 #[derive(Debug, Clone)]
 pub struct SparqlTable {
     headers: Vec<String>,
-    rows: FileVec<Vec<Option<SparqlValue>>>,
+    rows: FileVec<SparqlRow>,
     main_variable: Option<String>,
 }
 
@@ -64,12 +66,12 @@ impl SparqlTable {
     }
 
     /// Push a row to the table.
-    pub fn push(&mut self, row: Vec<Option<SparqlValue>>) {
+    pub fn push(&mut self, row: SparqlRow) {
         self.rows.push(row);
     }
 
     /// Get a row from the table. Returns None if the row does not exist.
-    pub fn get(&self, row_id: usize) -> Option<Vec<Option<SparqlValue>>> {
+    pub fn get(&self, row_id: usize) -> Option<SparqlRow> {
         self.rows.get(row_id).map(|r| r.to_owned())
     }
 
@@ -77,7 +79,7 @@ impl SparqlTable {
         if self.headers.is_empty() {
             return Err(anyhow!("Header not set"));
         }
-        let new_row: Vec<Option<SparqlValue>> = self
+        let new_row: SparqlRow = self
             .headers
             .iter()
             .map(|name| row.get(name).cloned())
