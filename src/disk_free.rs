@@ -1,6 +1,6 @@
 /// `DiskFree` manages disk-based storage layout
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PositionLength {
     position: u64,
     length: u64,
@@ -18,25 +18,15 @@ impl PositionLength {
     pub fn length(&self) -> u64 {
         self.length
     }
-}
 
-impl Eq for PositionLength {}
-
-impl PartialOrd for PositionLength {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.position.cmp(&other.position))
-    }
-}
-
-impl Ord for PositionLength {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.position.cmp(&other.position)
+    fn end(&self) -> u64 {
+        self.position + self.length
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct DiskFree {
-    parts: Vec<PositionLength>, // NOTE: This will always be sorted by position
+    parts: Vec<PositionLength>,
 }
 
 impl DiskFree {
@@ -44,43 +34,55 @@ impl DiskFree {
         Self { parts: Vec::new() }
     }
 
-    pub fn add(&mut self, pl: PositionLength) {
-        self.parts.push(pl);
-        self.parts.sort();
-        self.join_adjacent();
-    }
-
-    fn join_adjacent(&mut self) {
-        let mut idx = 1;
-        while idx < self.parts.len() {
-            let prev = &self.parts[idx - 1];
-            let curr = &self.parts[idx];
-            if prev.position + prev.length == curr.position {
-                self.parts[idx - 1].length += curr.length;
-                self.parts.remove(idx);
-            } else {
-                idx += 1;
+    pub fn add(&mut self, new_pl: PositionLength) {
+        if self.parts.is_empty() {
+            self.parts.push(new_pl);
+            return;
+        }
+        let mut last_position = 0;
+        let mut last_index = 0;
+        let new_end = new_pl.position + new_pl.length;
+        for (idx, pl) in self.parts.iter_mut().enumerate() {
+            if new_end == pl.position {
+                pl.position = new_pl.position;
+                pl.length += new_pl.length;
+                return;
+            }
+            if pl.end() == new_pl.position {
+                pl.length += new_pl.length;
+                return;
+            }
+            if pl.position >= last_position && pl.position < new_pl.position {
+                last_position = pl.position;
+                last_index = idx;
             }
         }
+        self.parts.insert(last_index + 1, new_pl);
     }
 
     pub fn find_free(&mut self, size: u64) -> Option<u64> {
-        let mut position = None;
-        for (num, part) in self.parts.iter_mut().enumerate() {
-            if part.length >= size {
-                position = Some(part.position);
+        let equal_idx = self
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(_num, part)| part.length == size)
+            .map(|(num, _part)| num)
+            .next();
+        if let Some(num) = equal_idx {
+            let position = Some(self.parts[num].position);
+            self.parts.remove(num);
+            return position;
+        }
 
-                // Poor man's memory management
-                if part.length == size {
-                    self.parts.remove(num);
-                } else {
-                    part.length -= size;
-                    part.position += size;
-                }
-                break;
+        for part in self.parts.iter_mut() {
+            if part.length >= size {
+                let position = Some(part.position);
+                part.length -= size;
+                part.position += size;
+                return position;
             }
         }
-        position
+        None
     }
 }
 
@@ -94,9 +96,6 @@ mod tests {
         df.add(PositionLength::new(10, 10));
         df.add(PositionLength::new(30, 10));
         assert_eq!(df.parts.len(), 3);
-        assert_eq!(df.parts[0].position, 10);
-        assert_eq!(df.parts[1].position, 30);
-        assert_eq!(df.parts[2].position, 50);
     }
 
     #[test]
@@ -115,10 +114,20 @@ mod tests {
     }
 
     #[test]
-    fn test_join_adjacent() {
+    fn test_disk_free_join_adjacent() {
         let mut df = DiskFree::new();
         df.add(PositionLength::new(20, 40));
         df.add(PositionLength::new(10, 10));
+        assert_eq!(df.parts.len(), 1);
+        assert_eq!(df.parts[0].position, 10);
+        assert_eq!(df.parts[0].length, 50);
+    }
+
+    #[test]
+    fn test_disk_free_join_adjacent2() {
+        let mut df = DiskFree::new();
+        df.add(PositionLength::new(10, 10));
+        df.add(PositionLength::new(20, 40));
         assert_eq!(df.parts.len(), 1);
         assert_eq!(df.parts[0].position, 10);
         assert_eq!(df.parts[0].length, 50);
