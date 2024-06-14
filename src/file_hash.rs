@@ -15,11 +15,24 @@ pub type EntityFileCache = FileHash<String, String>;
 const MAX_MEM_ENTRIES: usize = 5;
 
 #[derive(Clone, Debug)]
+struct PositionLength {
+    position: u64,
+    length: u64,
+}
+
+impl PositionLength {
+    fn new(position: u64, length: u64) -> Self {
+        Self { position, length }
+    }
+
+}
+
+#[derive(Clone, Debug)]
 pub struct FileHash<KeyType, ValueType> {
-    id2pos: HashMap<KeyType, (u64, u64)>, // Position, length
+    id2pos: HashMap<KeyType, PositionLength>, // Position, length
     file_handle: Option<Arc<File>>,
     in_memory: HashMap<KeyType, ValueType>,
-    disk_free: Vec<(u64, u64)>,
+    disk_free: Vec<PositionLength>,
     max_mem_entries: usize,
     using_disk: bool,
 }
@@ -147,16 +160,16 @@ impl<
     // Only used when `using_disk` is true
     fn get_file_pos_to_write(&mut self, fh: &File, size: u64) -> Result<u64> {
         let mut position = fh.metadata()?.len();
-        for (num, (start, len)) in self.disk_free.iter_mut().enumerate() {
-            if *len >= size {
-                position = *start;
+        for (num, pl) in self.disk_free.iter_mut().enumerate() {
+            if pl.length >= size {
+                position = pl.position;
 
                 // Poor man's memory management
-                if *len == size {
+                if pl.length == size {
                     self.disk_free.remove(num);
                 } else {
-                    *len -= size;
-                    *start += size;
+                    pl.length -= size;
+                    pl.position += size;
                 }
                 break;
             }
@@ -166,8 +179,8 @@ impl<
 
     // Only used when `using_disk` is true
     fn release_storage(&mut self, key: &KeyType) {
-        if let Some((start, len)) = self.id2pos.remove(key) {
-            self.disk_free.push((start, len));
+        if let Some(pl) = self.id2pos.remove(key) {
+            self.disk_free.push(pl);
         }
     }
 
@@ -181,7 +194,7 @@ impl<
         let position_in_file = self.get_file_pos_to_write(&fh, size)?;
         fh.seek(SeekFrom::Start(position_in_file))?;
         fh.write_all(bytes)?;
-        self.id2pos.insert(key, (position_in_file, size));
+        self.id2pos.insert(key, PositionLength::new(position_in_file, size));
         Ok(())
     }
 
@@ -221,9 +234,9 @@ impl<
 
     fn get_disk(&self, key: KeyType) -> Option<ValueType> {
         let mut fh = self.file_handle.clone()?;
-        let (start, length) = self.id2pos.get(&key)?;
-        fh.seek(SeekFrom::Start(*start)).ok()?;
-        let mut buffer: Vec<u8> = vec![0; *length as usize];
+        let pl = self.id2pos.get(&key)?;
+        fh.seek(SeekFrom::Start(pl.position)).ok()?;
+        let mut buffer: Vec<u8> = vec![0; pl.length as usize];
         fh.read_exact(&mut buffer).ok()?;
         let s: String = String::from_utf8(buffer).ok()?;
         serde_json::from_str(&s).ok()
