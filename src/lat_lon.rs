@@ -40,7 +40,13 @@ mod tests {
 
     #[test]
     fn test_new() {
-        assert_eq!(LatLon::new(12.34, 56.78), LatLon { lat: 12.34, lon: 56.78 });
+        assert_eq!(
+            LatLon::new(12.34, 56.78),
+            LatLon {
+                lat: 12.34,
+                lon: 56.78
+            }
+        );
     }
 
     #[test]

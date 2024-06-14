@@ -5,6 +5,7 @@
 extern crate lazy_static;
 
 pub mod date;
+pub mod disk_free;
 pub mod external_id;
 pub mod file_hash;
 pub mod file_vec;
