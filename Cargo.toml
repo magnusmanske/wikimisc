@@ -23,4 +23,4 @@ tokio = { version = "1", features = ["full"] }
 tempfile = "*"
 toolforge = "*"
 urlencoding = "^2"
-wikibase = "^0.6"
+wikibase = "^0.7"
