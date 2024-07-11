@@ -100,7 +100,7 @@ impl ItemMerger {
     /// If a claim with the same value and qualifiers (TBD) already exists, it will try and add any new references.
     /// Returns `Some(claim)` if the claim was added or changed, `None` otherwise.
     pub fn add_claim(&mut self, new_claim: Statement) -> Option<Statement> {
-        const PROPERTIES_IGNORE_QUALIFIER_MATCH: &[&str] = &["P225","P1843"];
+        const PROPERTIES_IGNORE_QUALIFIER_MATCH: &[&str] = &["P225", "P1843"];
         let mut existing_claims_iter = self
             .item
             .claims_mut()
@@ -109,15 +109,11 @@ impl ItemMerger {
                 Self::is_snak_identical(new_claim.main_snak(), existing_claim.main_snak())
             })
             .filter(|existing_claim| {
-                // For some properties, qualifiers don't matter
-                if PROPERTIES_IGNORE_QUALIFIER_MATCH.contains(&existing_claim.main_snak().property()) {
-                    true
-                } else {
-                    Self::are_qualifiers_identical(
+                PROPERTIES_IGNORE_QUALIFIER_MATCH.contains(&existing_claim.main_snak().property())
+                    || Self::are_qualifiers_identical(
                         new_claim.qualifiers(),
                         existing_claim.qualifiers(),
                     )
-                }
             });
         if let Some(existing_claim) = existing_claims_iter.next() {
             // At least one claim exists, use first one
@@ -132,8 +128,9 @@ impl ItemMerger {
                     reference_changed = true;
                 }
             }
-            let qualifier_snaks = Self::merge_qualifiers(new_claim.qualifiers(), existing_claim.qualifiers());
-            let qualifiers_changed = qualifier_snaks!=*existing_claim.qualifiers();
+            let qualifier_snaks =
+                Self::merge_qualifiers(new_claim.qualifiers(), existing_claim.qualifiers());
+            let qualifiers_changed = qualifier_snaks != *existing_claim.qualifiers();
 
             if reference_changed || qualifiers_changed {
                 existing_claim.set_references(new_references);
