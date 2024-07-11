@@ -51,6 +51,7 @@ impl ItemMerger {
         diff.descriptions.append(&mut new_ones.clone());
         self.item.descriptions_mut().append(&mut new_ones);
 
+        // Aliases
         new_aliases.append(&mut other.aliases().clone());
         new_aliases.sort_by(Self::compare_locale_string);
         new_aliases.dedup();
@@ -107,7 +108,15 @@ impl ItemMerger {
                 Self::is_snak_identical(new_claim.main_snak(), existing_claim.main_snak())
             })
             .filter(|existing_claim| {
-                Self::are_qualifiers_identical(new_claim.qualifiers(), existing_claim.qualifiers())
+                // For some properties, qualifiers don't matter
+                if existing_claim.main_snak().property() == "P225" {
+                    true
+                } else {
+                    Self::are_qualifiers_identical(
+                        new_claim.qualifiers(),
+                        existing_claim.qualifiers(),
+                    )
+                }
             });
         if let Some(existing_claim) = existing_claims_iter.next() {
             // At least one claim exists, use first one
@@ -122,8 +131,12 @@ impl ItemMerger {
                     reference_changed = true;
                 }
             }
-            if reference_changed {
+            let qualifier_snaks = Self::merge_qualifiers(new_claim.qualifiers(), existing_claim.qualifiers());
+            let qualifiers_changed = qualifier_snaks!=*existing_claim.qualifiers();
+
+            if reference_changed || qualifiers_changed {
                 existing_claim.set_references(new_references);
+                existing_claim.set_qualifier_snaks(qualifier_snaks);
                 return Some(existing_claim.to_owned()); // Claim has changed (references added)
             }
             return None; // Claim already exists, including references
@@ -135,6 +148,22 @@ impl ItemMerger {
         // Claim does not exist, adding
         self.item.add_claim(new_claim.clone());
         Some(new_claim)
+    }
+
+    fn merge_qualifiers(new_qualifiers: &Vec<Snak>, existing_qualifiers: &Vec<Snak>) -> Vec<Snak> {
+        // Start with existing qualifiers
+        let mut qualifier_snaks = existing_qualifiers.to_owned();
+        // Add new qualifiers, if they do not exist yet
+        for qualifier in new_qualifiers {
+            if !existing_qualifiers
+                .iter()
+                .any(|q| Self::is_snak_identical(q, qualifier))
+            {
+                qualifier_snaks.push(qualifier.to_owned());
+            }
+        }
+        // Return merged qualifiers
+        qualifier_snaks
     }
 
     pub fn get_external_ids_from_reference(reference: &Reference) -> Vec<ExternalId> {
@@ -300,5 +329,34 @@ impl ItemMerger {
         diff.append(&mut new_ones.clone());
         mine.append(&mut new_ones);
         ret
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_claim_p225_both_with_qualifiers() {
+        let mut base_item = ItemEntity::new_empty();
+        let mut statement = Statement::new_normal(
+            Snak::new_string("P225", "foo bar"),
+            vec![Snak::new_item("P31", "Q5")],
+            vec![],
+        );
+        statement.set_id("Blah");
+        base_item.add_claim(statement);
+
+        let mut new_item = ItemEntity::new_empty();
+        new_item.add_claim(Statement::new_normal(
+            Snak::new_string("P225", "foo bar"),
+            vec![Snak::new_item("P31", "Q1")],
+            vec![],
+        ));
+
+        let mut im = ItemMerger::new(base_item);
+        let diff = im.merge(&new_item);
+        assert!(!diff.altered_statements.is_empty());
+        assert_eq!(diff.altered_statements["Blah"].qualifiers().len(), 2);
     }
 }
