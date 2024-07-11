@@ -18,11 +18,15 @@ lazy_static! {
 #[derive(Debug, Clone)]
 pub struct ItemMerger {
     pub item: ItemEntity,
+    properties_ignore_qualifier_match: Vec<String>,
 }
 
 impl ItemMerger {
     pub fn new(item: ItemEntity) -> Self {
-        Self { item }
+        Self {
+            item,
+            properties_ignore_qualifier_match: vec![],
+        }
     }
 
     pub fn merge(&mut self, other: &ItemEntity) -> MergeDiff {
@@ -100,7 +104,6 @@ impl ItemMerger {
     /// If a claim with the same value and qualifiers (TBD) already exists, it will try and add any new references.
     /// Returns `Some(claim)` if the claim was added or changed, `None` otherwise.
     pub fn add_claim(&mut self, new_claim: Statement) -> Option<Statement> {
-        const PROPERTIES_IGNORE_QUALIFIER_MATCH: &[&str] = &["P225", "P1843"];
         let mut existing_claims_iter = self
             .item
             .claims_mut()
@@ -109,7 +112,8 @@ impl ItemMerger {
                 Self::is_snak_identical(new_claim.main_snak(), existing_claim.main_snak())
             })
             .filter(|existing_claim| {
-                PROPERTIES_IGNORE_QUALIFIER_MATCH.contains(&existing_claim.main_snak().property())
+                let property = existing_claim.main_snak().property().to_string();
+                self.properties_ignore_qualifier_match.contains(&property)
                     || Self::are_qualifiers_identical(
                         new_claim.qualifiers(),
                         existing_claim.qualifiers(),
@@ -327,6 +331,13 @@ impl ItemMerger {
         diff.append(&mut new_ones.clone());
         mine.append(&mut new_ones);
         ret
+    }
+
+    pub fn set_properties_ignore_qualifier_match(
+        &mut self,
+        properties_ignore_qualifier_match: Vec<String>,
+    ) {
+        self.properties_ignore_qualifier_match = properties_ignore_qualifier_match;
     }
 }
 
