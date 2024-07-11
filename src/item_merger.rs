@@ -364,6 +364,7 @@ mod tests {
         ));
 
         let mut im = ItemMerger::new(base_item);
+        im.set_properties_ignore_qualifier_match(vec!["P225".to_string()]);
         let diff = im.merge(&new_item);
         assert!(!diff.altered_statements.is_empty());
         assert_eq!(diff.altered_statements["Blah"].qualifiers().len(), 2);
