@@ -184,25 +184,45 @@ impl ItemMerger {
             .collect()
     }
 
+    pub fn get_reference_urls_from_reference(reference: &Reference) -> Vec<String> {
+        reference
+            .snaks()
+            .iter()
+            .filter(|snak| *snak.datatype() == SnakDataType::Url)
+            .filter_map(|snak| snak.data_value().to_owned())
+            .filter_map(|dv| match dv.value() {
+                Value::StringValue(s) => Some(s.to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Checks if a reference already exists in a list of references.
     /// Uses direct equal, or the presence of any external ID from the new reference.
     /// Returns `true` if the reference exists, `false` otherwise.
     fn reference_exists(existing_references: &[Reference], new_reference: &Reference) -> bool {
-        if existing_references.contains(new_reference) {
-            // Easy case
-            return true;
-        }
+        // if existing_references.contains(new_reference) {
+        //     // Easy case
+        //     return true;
+        // }
+
         // Check if any external ID in the new reference is present in any existing reference
         let ext_ids = Self::get_external_ids_from_reference(new_reference);
-        existing_references
+        let has_external_ids = existing_references
             .iter()
             .map(Self::get_external_ids_from_reference)
-            .filter(|existing_external_ids| !existing_external_ids.is_empty())
-            .any(|existing_external_ids| {
-                ext_ids
-                    .iter()
-                    .any(|ext_id| existing_external_ids.contains(ext_id))
-            })
+            .flatten()
+            .any(|ext_id| ext_ids.contains(&ext_id));
+
+        // Check if any reference URL in the new reference is present in any existing reference
+        let reference_urls = Self::get_reference_urls_from_reference(new_reference);
+        let has_reference_urls = existing_references
+            .iter()
+            .map(Self::get_reference_urls_from_reference)
+            .flatten()
+            .any(|reference_url| reference_urls.contains(&reference_url));
+
+        has_external_ids || has_reference_urls
     }
 
     pub fn is_snak_identical(snak1: &Snak, snak2: &Snak) -> bool {
@@ -368,5 +388,23 @@ mod tests {
         let diff = im.merge(&new_item);
         assert!(!diff.altered_statements.is_empty());
         assert_eq!(diff.altered_statements["Blah"].qualifiers().len(), 2);
+    }
+
+    #[test]
+    fn test_reference_exists_by_external_ids() {
+        let reference1 = Reference::new(vec![Snak::new_external_id("P214", "12345")]);
+        let reference2 = Reference::new(vec![Snak::new_external_id("P214", "12346")]);
+        let references = vec![reference1.to_owned()];
+        assert!(ItemMerger::reference_exists(&references, &reference1));
+        assert!(!ItemMerger::reference_exists(&references, &reference2));
+    }
+
+    #[test]
+    fn test_reference_exists_by_reference_urls() {
+        let reference1 = Reference::new(vec![Snak::new_url("P854", "http://foo.bar")]);
+        let reference2 = Reference::new(vec![Snak::new_url("P854", "http://foo.bars")]);
+        let references = vec![reference1.to_owned()];
+        assert!(ItemMerger::reference_exists(&references, &reference1));
+        assert!(!ItemMerger::reference_exists(&references, &reference2));
     }
 }
