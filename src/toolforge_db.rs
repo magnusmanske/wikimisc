@@ -65,6 +65,16 @@ impl ToolforgeDB {
         .replace('-', "_")
     }
 
+    pub fn get_pool(&self, key: &str) -> Option<&mysql_async::Pool> {
+        self.mysql_pools.get(key)
+    }
+
+    pub async fn get_connection(&self, key: &str) -> Result<mysql_async::Conn> {
+        let pool = self.get_pool(key).expect("No pool found");
+        let conn = pool.get_conn().await?;
+        Ok(conn)
+    }
+
     /// Returns the server and database name for the wiki, as a tuple
     pub fn db_host_and_schema_for_wiki(&self, wiki: &str) -> Result<(String, String), String> {
         let wiki = Self::fix_wiki_db_name(wiki);
