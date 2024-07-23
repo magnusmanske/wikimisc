@@ -5,6 +5,7 @@ use mysql_async::{Opts, OptsBuilder, PoolConstraints, PoolOpts};
 use serde_json::Value;
 use std::collections::HashMap;
 
+#[derive(Debug, Default)]
 pub struct ToolforgeDB {
     mysql_pools: HashMap<String, mysql_async::Pool>,
 }
