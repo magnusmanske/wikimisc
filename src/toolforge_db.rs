@@ -4,6 +4,8 @@ use mysql_async::{Opts, OptsBuilder, PoolConstraints, PoolOpts};
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::toolforge_app::ToolforgeApp;
+
 #[derive(Debug, Default)]
 pub struct ToolforgeDB {
     mysql_pools: HashMap<String, mysql_async::Pool>,
@@ -34,27 +36,6 @@ impl ToolforgeDB {
         Ok(pool)
     }
 
-    // fn get_mysql_opts_for_wiki(
-    //     &self,
-    //     wiki: &str,
-    //     user: &str,
-    //     pass: &str,
-    // ) -> Result<mysql_async::Opts, String> {
-    //     let (host, schema) = self.db_host_and_schema_for_wiki(wiki)?;
-    //     let port: u16 = match self.port_mapping.get(wiki) {
-    //         Some(port) => *port,
-    //         None => self.config["db_port"].as_u64().unwrap_or(3306) as u16,
-    //     };
-    //     let opts = mysql_async::OptsBuilder::default()
-    //         .ip_or_hostname(host)
-    //         .db_name(Some(schema))
-    //         .user(Some(user))
-    //         .pass(Some(pass))
-    //         .tcp_port(port)
-    //         .into();
-    //     Ok(opts)
-    // }
-
     pub fn fix_wiki_db_name(wiki: &str) -> String {
         match wiki {
             "be-taraskwiki" | "be-x-oldwiki" | "be_taraskwiki" | "be_x_oldwiki" => "be_x_oldwiki",
@@ -79,7 +60,7 @@ impl ToolforgeDB {
     /// Returns the server and database name for the wiki, as a tuple
     pub fn db_host_and_schema_for_wiki(&self, wiki: &str) -> Result<(String, String), String> {
         let wiki = Self::fix_wiki_db_name(wiki);
-        let host = match Self::is_on_toolforge() {
+        let host = match ToolforgeApp::is_on_toolforge() {
             false => "127.0.0.1".to_string(),
             true => wiki.to_owned() + self.get_db_server_group(),
         };
@@ -88,7 +69,7 @@ impl ToolforgeDB {
     }
 
     fn get_db_server_group(&self) -> &str {
-        match Self::is_on_toolforge() {
+        match ToolforgeApp::is_on_toolforge() {
             true => ".web.db.svc.eqiad.wmflabs",
             false => "",
         }
@@ -96,16 +77,9 @@ impl ToolforgeDB {
 
     /// Returns the server and database name for the tool db, as a tuple
     pub fn get_db_host_for_tool_db(&self) -> &str {
-        match Self::is_on_toolforge() {
+        match ToolforgeApp::is_on_toolforge() {
             true => "tools.labsdb",
             false => "127.0.0.1",
         }
-    }
-
-    pub fn is_on_toolforge() -> bool {
-        lazy_static! {
-            static ref IS_ON_TOOLFORGE: bool = std::path::Path::new("/etc/wmcs-project").exists();
-        }
-        IS_ON_TOOLFORGE.to_owned()
     }
 }
