@@ -210,16 +210,14 @@ impl ItemMerger {
         let ext_ids = Self::get_external_ids_from_reference(new_reference);
         let has_external_ids = existing_references
             .iter()
-            .map(Self::get_external_ids_from_reference)
-            .flatten()
+            .flat_map(Self::get_external_ids_from_reference)
             .any(|ext_id| ext_ids.contains(&ext_id));
 
         // Check if any reference URL in the new reference is present in any existing reference
         let reference_urls = Self::get_reference_urls_from_reference(new_reference);
         let has_reference_urls = existing_references
             .iter()
-            .map(Self::get_reference_urls_from_reference)
-            .flatten()
+            .flat_map(Self::get_reference_urls_from_reference)
             .any(|reference_url| reference_urls.contains(&reference_url));
 
         has_external_ids || has_reference_urls
