@@ -1,10 +1,12 @@
 use anyhow::Result;
+use reqwest::ClientBuilder;
 use std::{
     fs::File,
     io::{Seek, Write},
     time::Duration,
 };
 use tempfile::tempfile;
+use wikibase::mediawiki::Api;
 
 const WIKIDATA_USER_AGENT: &str = "wikimisc-wikidata/0.1.0";
 const WIKIDATA_SPARQL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -23,12 +25,21 @@ impl Wikidata {
         }
     }
 
+    pub async fn api(&self) -> Result<Api> {
+        let api_url = "https://www.wikidata.org/w/api.php";
+        let api = Api::new_from_builder(api_url, self.client_builder()).await?;
+        Ok(api)
+    }
+
     /// Returns a reqwest client with the current user agent and timeout.
     pub fn reqwest_client(&self) -> Result<reqwest::Client> {
-        Ok(reqwest::Client::builder()
+        Ok(self.client_builder().build()?)
+    }
+
+    pub fn client_builder(&self) -> ClientBuilder {
+        reqwest::Client::builder()
             .user_agent(&self.user_agent)
             .timeout(self.timeout.to_owned())
-            .build()?)
     }
 
     #[cfg(not(doctest))]
