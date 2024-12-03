@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 #[derive(Debug, PartialEq)]
 pub struct HostSchema {
-    pub host: String,
-    pub schema: String,
+    host: String,
+    schema: String,
 }
 
 impl HostSchema {
@@ -17,6 +17,14 @@ impl HostSchema {
             host: host.to_string(),
             schema: schema.to_string(),
         }
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn schema(&self) -> &str {
+        &self.schema
     }
 }
 
