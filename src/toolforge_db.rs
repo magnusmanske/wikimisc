@@ -1,4 +1,3 @@
-///! UNDER CONSTRUCTION
 use anyhow::{anyhow, Result};
 use core::time::Duration;
 use mysql_async::{Opts, OptsBuilder, PoolConstraints, PoolOpts};
