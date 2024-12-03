@@ -1,6 +1,8 @@
 //! Useful functions to handle dates.
 
+use anyhow::{anyhow, Result};
 use regex::Regex;
+use std::str::FromStr;
 
 lazy_static! {
     static ref DATES : Vec<(Regex,String,u64)> = {
@@ -23,36 +25,6 @@ pub struct Date {
 }
 
 impl Date {
-    /// Parses a date from a string. Returns None if the string is not a recognized or valid date.
-    pub fn from_str(s: &str) -> Option<Self> {
-        let (time, precision) = DATES
-            .iter()
-            .filter_map(|e| {
-                let replaced = e.0.replace_all(s, &e.1);
-                if replaced == s {
-                    None
-                } else {
-                    Some((replaced.to_string(), e.2))
-                }
-            })
-            .next()?;
-        let parts = time.split('-').collect::<Vec<&str>>();
-        let year = parts.get(0)?.parse::<i16>().ok()?;
-        if year >= 2025 {
-            return None;
-        }
-        let month = parts.get(1)?.parse::<u8>().ok()?;
-        if month > 12 || (month == 0 && precision >= 11) {
-            return None;
-        }
-        let parts = parts.get(2)?.split('T').collect::<Vec<&str>>();
-        let day = parts.get(0)?.parse::<u8>().ok()?;
-        if precision >= 11 && (day < 1 || day > 31) {
-            return None;
-        }
-        Some(Self { time, precision })
-    }
-
     /// Returns the date as a QuickStatements-compatible string.
     pub fn as_qs(&self) -> String {
         format!("{}/{}", self.time, self.precision)
@@ -66,6 +38,54 @@ impl Date {
     /// Returns the precision of the date.
     pub fn precision(&self) -> u64 {
         self.precision
+    }
+}
+
+impl FromStr for Date {
+    type Err = anyhow::Error;
+
+    /// Parses a date from a string. Returns None if the string is not a recognized or valid date.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (time, precision) = DATES
+            .iter()
+            .filter_map(|e| {
+                let replaced = e.0.replace_all(s, &e.1);
+                if replaced == s {
+                    None
+                } else {
+                    Some((replaced.to_string(), e.2))
+                }
+            })
+            .next()
+            .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?;
+        let parts = time.split('-').collect::<Vec<&str>>();
+        let year = parts
+            .first()
+            .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?
+            .parse::<i16>()?;
+        if year >= 2025 {
+            return Err(anyhow!("Could not parse '{s}' into date"));
+        }
+        let month = parts
+            .get(1)
+            .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?
+            .parse::<u8>()?;
+        if month > 12 || (month == 0 && precision >= 11) {
+            return Err(anyhow!("Could not parse '{s}' into date"));
+        }
+        let parts = parts
+            .get(2)
+            .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?
+            .split('T')
+            .collect::<Vec<&str>>();
+        let day = parts
+            .first()
+            .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?
+            .parse::<u8>()?;
+        if precision >= 11 && !(1..=31).contains(&day) {
+            return Err(anyhow!("Could not parse '{s}' into date"));
+        }
+        Ok(Self { time, precision })
     }
 }
 
@@ -83,7 +103,7 @@ mod tests {
             Date::from_str("1234-05").unwrap().time,
             "+1234-05-00T00:00:00Z"
         );
-        assert!(Date::from_str("1234-15").is_none());
+        assert!(Date::from_str("1234-15").is_err());
         assert_eq!(
             Date::from_str("1234-05-17").unwrap().time,
             "+1234-05-17T00:00:00Z"

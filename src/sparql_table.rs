@@ -51,8 +51,7 @@ impl SparqlTable {
         self.rows
             .get(row_id)?
             .get(col_id)
-            .map(|v| v.to_owned())
-            .flatten()
+            .and_then(|v| v.to_owned())
     }
 
     /// Get the index of a variable in the table. Case-insensitive.

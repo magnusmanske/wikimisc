@@ -1,5 +1,5 @@
 ///! UNDER CONSTRUCTION
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use core::time::Duration;
 use mysql_async::{Opts, OptsBuilder, PoolConstraints, PoolOpts};
 use serde_json::Value;
@@ -61,7 +61,6 @@ impl ToolforgeDB {
             "be-taraskwiki" | "be-x-oldwiki" | "be_taraskwiki" | "be_x_oldwiki" => "be_x_oldwiki",
             other => other,
         }
-        .to_string()
         .replace('-', "_")
     }
 
@@ -70,8 +69,11 @@ impl ToolforgeDB {
     }
 
     pub async fn get_connection(&self, key: &str) -> Result<mysql_async::Conn> {
-        let pool = self.get_pool(key).expect("No pool found");
-        let conn = pool.get_conn().await?;
+        let conn = self
+            .get_pool(key)
+            .ok_or_else(|| anyhow!("No pool '{key}' found"))?
+            .get_conn()
+            .await?;
         Ok(conn)
     }
 
@@ -102,6 +104,9 @@ impl ToolforgeDB {
     }
 
     pub fn is_on_toolforge() -> bool {
-        std::path::Path::new("/etc/wmcs-project").exists()
+        lazy_static! {
+            static ref IS_ON_TOOLFORGE: bool = std::path::Path::new("/etc/wmcs-project").exists();
+        }
+        IS_ON_TOOLFORGE.to_owned()
     }
 }
