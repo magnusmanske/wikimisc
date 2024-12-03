@@ -16,7 +16,7 @@ impl TimeStamp {
         utc.format("%Y%m%d%H%M%S").to_string()
     }
 
-    pub fn from_str(ts: &str) -> Option<DateTime<Utc>> {
+    pub fn str2utc(ts: &str) -> Option<DateTime<Utc>> {
         match NaiveDateTime::parse_from_str(ts, "%Y%m%d%H%M%S")
             .ok()?
             .and_local_timezone(Utc)
