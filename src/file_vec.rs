@@ -141,6 +141,12 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
     }
 }
 
+impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> Default for FileVec<ValueType> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// CAUTION:
 /// This implementation of `IntoIterator` DOES NOT consume the `FileVec` object.
 /// I couldn't get iter() to work so just use `into_iter()` instead.
@@ -280,9 +286,9 @@ mod tests {
     #[test]
     fn test_is_empty() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        assert_eq!(file_vec.is_empty(), true);
+        assert!(file_vec.is_empty());
         file_vec.push("a".to_string());
-        assert_eq!(file_vec.is_empty(), false);
+        assert!(!file_vec.is_empty());
     }
 
     #[test]
@@ -342,7 +348,7 @@ mod tests {
     #[test]
     fn test_swap_out_of_bounds() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        assert_eq!(file_vec.swap(0, 2).is_err(), true);
+        assert!(file_vec.swap(0, 2).is_err());
     }
 
     #[test]
@@ -361,7 +367,7 @@ mod tests {
     #[test]
     fn test_swap_same_index_out_of_bounds() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        assert_eq!(file_vec.swap(0, 5).is_err(), true);
+        assert!(file_vec.swap(0, 5).is_err());
     }
 
     #[test]
