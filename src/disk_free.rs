@@ -86,6 +86,12 @@ impl DiskFree {
     }
 }
 
+impl Default for DiskFree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

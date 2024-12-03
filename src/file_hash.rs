@@ -142,7 +142,7 @@ impl<
             self.flush_mem_to_disk()?;
             self.insert_disk(key, value)
         } else {
-            self.in_memory.insert(key.into(), value.into());
+            self.in_memory.insert(key, value);
             Ok(())
         }
     }
@@ -261,6 +261,16 @@ impl<
 
     pub fn set_max_mem_entries(&mut self, max_mem_entries: usize) {
         self.max_mem_entries = max_mem_entries;
+    }
+}
+
+impl<
+        KeyType: Clone + PartialEq + Eq + std::hash::Hash,
+        ValueType: Clone + Serialize + for<'a> Deserialize<'a>,
+    > Default for FileHash<KeyType, ValueType>
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
