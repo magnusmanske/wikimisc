@@ -1,6 +1,8 @@
 //! Stores latitude/longitude coordinates.
 
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LatLon {
@@ -12,14 +14,23 @@ impl LatLon {
     pub fn new(lat: f64, lon: f64) -> Self {
         Self { lat, lon }
     }
+}
 
-    /// Parses a string of the form "lat,lon" into a `LatLon`.
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for LatLon {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split(',').collect();
         /* trunk-ignore(clippy/get_first) */
-        let lat = parts.get(0)?.parse::<f64>().ok()?;
-        let lon = parts.get(1)?.parse::<f64>().ok()?;
-        Some(Self { lat, lon })
+        let lat = parts
+            .first()
+            .ok_or_else(|| anyhow!("Cannot parse latitude from '{s}'"))?
+            .parse::<f64>()?;
+        let lon = parts
+            .get(1)
+            .ok_or_else(|| anyhow!("Cannot parse longitude from '{s}'"))?
+            .parse::<f64>()?;
+        Ok(Self { lat, lon })
     }
 }
 
@@ -30,12 +41,12 @@ mod tests {
     #[test]
     fn test_from_str() {
         assert_eq!(
-            LatLon::from_str("12.34,56.78"),
-            Some(LatLon::new(12.34, 56.78))
+            LatLon::from_str("12.34,56.78").unwrap(),
+            LatLon::new(12.34, 56.78)
         );
-        assert_eq!(LatLon::from_str("12.34,ABC"), None);
-        assert_eq!(LatLon::from_str("12.34"), None);
-        assert_eq!(LatLon::from_str("ABC,56.78,"), None);
+        assert!(LatLon::from_str("12.34,ABC").is_err());
+        assert!(LatLon::from_str("12.34").is_err());
+        assert!(LatLon::from_str("ABC,56.78").is_err());
     }
 
     #[test]
