@@ -149,8 +149,19 @@ mod tests {
             .await
             .unwrap();
         let site_matrix = SiteMatrix::new(&api).await.unwrap();
-        let url = site_matrix.get_server_url_for_wiki("wikidatawiki").unwrap();
-        assert_eq!(url, "https://www.wikidata.org");
+        assert_eq!(
+            site_matrix.get_server_url_for_wiki("wikidatawiki").unwrap(),
+            "https://www.wikidata.org"
+        );
+        assert_eq!(
+            site_matrix.get_server_url_for_wiki("enwiki").unwrap(),
+            "https://en.wikipedia.org".to_string()
+        );
+        assert_eq!(
+            site_matrix.get_server_url_for_wiki("enwikisource").unwrap(),
+            "https://en.wikisource.org"
+        );
+        assert!(site_matrix.get_server_url_for_wiki("shcswirk8d7g").is_err());
     }
 
     #[tokio::test]
