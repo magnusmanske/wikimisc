@@ -1,14 +1,38 @@
+use crate::toolforge_app::ToolforgeApp;
 use anyhow::{anyhow, Result};
 use core::time::Duration;
 use mysql_async::{Opts, OptsBuilder, PoolConstraints, PoolOpts};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::toolforge_app::ToolforgeApp;
+#[derive(Debug, PartialEq)]
+pub struct HostSchema {
+    pub host: String,
+    pub schema: String,
+}
 
-#[derive(Debug, Default)]
+impl HostSchema {
+    pub fn new(host: &str, schema: &str) -> Self {
+        Self {
+            host: host.to_string(),
+            schema: schema.to_string(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct ToolforgeDB {
     mysql_pools: HashMap<String, mysql_async::Pool>,
+    is_on_toolforge: bool,
+}
+
+impl Default for ToolforgeDB {
+    fn default() -> Self {
+        Self {
+            mysql_pools: HashMap::new(),
+            is_on_toolforge: ToolforgeApp::is_on_toolforge(),
+        }
+    }
 }
 
 impl ToolforgeDB {
@@ -58,18 +82,18 @@ impl ToolforgeDB {
     }
 
     /// Returns the server and database name for the wiki, as a tuple
-    pub fn db_host_and_schema_for_wiki(&self, wiki: &str) -> Result<(String, String), String> {
+    pub fn db_host_and_schema_for_wiki(&self, wiki: &str) -> Result<HostSchema> {
         let wiki = Self::fix_wiki_db_name(wiki);
-        let host = match ToolforgeApp::is_on_toolforge() {
+        let host = match self.is_on_toolforge {
             false => "127.0.0.1".to_string(),
             true => wiki.to_owned() + self.get_db_server_group(),
         };
         let schema = format!("{}_p", wiki);
-        Ok((host, schema))
+        Ok(HostSchema::new(&host, &schema))
     }
 
     fn get_db_server_group(&self) -> &str {
-        match ToolforgeApp::is_on_toolforge() {
+        match self.is_on_toolforge {
             true => ".web.db.svc.eqiad.wmflabs",
             false => "",
         }
@@ -77,9 +101,99 @@ impl ToolforgeDB {
 
     /// Returns the server and database name for the tool db, as a tuple
     pub fn get_db_host_for_tool_db(&self) -> &str {
-        match ToolforgeApp::is_on_toolforge() {
+        match self.is_on_toolforge {
             true => "tools.labsdb",
             false => "127.0.0.1",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    // THIS TEST REQUIRES THE ENVIRONMENT VARIABLE `TFDB` TO BE SET TO A MYSQL URL
+    // ALSO, THE MYSQL SERVER MUST BE ACCESSIBLE FROM THE MACHINE RUNNING THE TEST, EG:
+    // ssh magnus@tools-login.wmflabs.org -L 3308:tools-db:3306 -N &
+    async fn test_db() {
+        let url = match std::env::var("TFDB") {
+            Ok(val) => val,
+            Err(_) => {
+                eprintln!("TFDB not set");
+                return;
+            }
+        };
+        let mut db = ToolforgeDB::default();
+        db.add_mysql_pool("test_good", &json!({"url":url})).unwrap();
+        assert!(db
+            .add_mysql_pool("test_bad", &json!({"url":"foobar"}))
+            .is_err());
+        assert!(db.get_connection("test_good").await.is_ok());
+    }
+
+    #[test]
+    fn test_fix_wiki_db_name() {
+        assert_eq!(
+            ToolforgeDB::fix_wiki_db_name("be-taraskwiki"),
+            "be_x_oldwiki"
+        );
+        assert_eq!(
+            ToolforgeDB::fix_wiki_db_name("be_taraskwiki"),
+            "be_x_oldwiki"
+        );
+        assert_eq!(
+            ToolforgeDB::fix_wiki_db_name("be-x-oldwiki"),
+            "be_x_oldwiki"
+        );
+        assert_eq!(
+            ToolforgeDB::fix_wiki_db_name("be_x_oldwiki"),
+            "be_x_oldwiki"
+        );
+        assert_eq!(
+            ToolforgeDB::fix_wiki_db_name("be_x_oldwiki"),
+            "be_x_oldwiki"
+        );
+        assert_eq!(ToolforgeDB::fix_wiki_db_name("enwiki"), "enwiki");
+    }
+
+    #[test]
+    fn test_get_db_host_for_tool_db() {
+        let mut db = ToolforgeDB {
+            is_on_toolforge: false,
+            ..Default::default()
+        };
+        assert_eq!(db.get_db_host_for_tool_db(), "127.0.0.1");
+        db.is_on_toolforge = true;
+        assert_eq!(db.get_db_host_for_tool_db(), "tools.labsdb");
+    }
+
+    #[test]
+    fn test_get_db_server_group() {
+        let mut db = ToolforgeDB {
+            is_on_toolforge: false,
+            ..Default::default()
+        };
+        assert_eq!(db.get_db_server_group(), "");
+        db.is_on_toolforge = true;
+        assert_eq!(db.get_db_server_group(), ".web.db.svc.eqiad.wmflabs");
+    }
+
+    #[test]
+    fn test_db_host_and_schema_for_wiki() {
+        let mut db = ToolforgeDB {
+            is_on_toolforge: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            db.db_host_and_schema_for_wiki("enwiki").unwrap(),
+            HostSchema::new("127.0.0.1", "enwiki_p")
+        );
+        db.is_on_toolforge = true;
+        assert_eq!(
+            db.db_host_and_schema_for_wiki("enwiki").unwrap(),
+            HostSchema::new("enwiki.web.db.svc.eqiad.wmflabs", "enwiki_p")
+        );
     }
 }
