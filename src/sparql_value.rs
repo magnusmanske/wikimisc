@@ -29,10 +29,7 @@ impl SparqlValue {
             static ref RE_DATE: Regex = Regex::new(r#"^([+-]{0,1}\d+-\d{2}-\d{2})T00:00:00Z$"#)
                 .expect("RE_DATE does not parse");
         }
-        let value = match j["value"].as_str() {
-            Some(v) => v,
-            None => return None,
-        };
+        let value = j["value"].as_str()?;
         match j["type"].as_str() {
             Some("uri") => match RE_ENTITY.captures(value) {
                 Some(caps) => caps

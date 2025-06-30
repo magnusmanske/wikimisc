@@ -1,0 +1,3 @@
+# Cargo folder
+target/
+Cargo.lock

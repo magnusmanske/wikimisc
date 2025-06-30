@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push() {
+    fn test_file_vec_push() {
         let mut file_vec: FileVec<String> = FileVec::new();
         file_vec.push("a".to_string());
         file_vec.push("b".to_string());
