@@ -13,7 +13,7 @@ lazy_static! {
 }
 
 /// This contains the wbeditentiry payload to ADD data to a base item, generated from a merge
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MergeDiff {
     pub labels: Vec<LocaleString>,
     pub aliases: Vec<LocaleString>,
@@ -26,6 +26,36 @@ pub struct MergeDiff {
 impl MergeDiff {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn extend(&mut self, other: &MergeDiff) {
+        self.labels.extend(other.labels.clone());
+        self.aliases.extend(other.aliases.clone());
+        self.descriptions.extend(other.descriptions.clone());
+        self.sitelinks.extend(other.sitelinks.clone());
+        self.altered_statements
+            .extend(other.altered_statements.clone());
+        self.added_statements.extend(other.added_statements.clone());
+    }
+
+    // TODO tests
+    pub fn apply(&self, item: &mut ItemEntity) {
+        item.labels_mut().extend(self.labels.clone());
+        item.aliases_mut().extend(self.aliases.clone());
+        item.descriptions_mut().extend(self.descriptions.clone());
+        if let Some(sitelinks) = item.sitelinks_mut() {
+            sitelinks.extend(self.sitelinks.clone());
+        };
+        for (id, statement) in self.altered_statements.iter() {
+            let existing_statement = item
+                .claims_mut()
+                .iter_mut()
+                .find(|s| s.id() == Some(id.to_string()));
+            if let Some(existing_statement) = existing_statement {
+                *existing_statement = statement.to_owned();
+            }
+        }
+        item.claims_mut().extend(self.added_statements.clone());
     }
 
     pub fn add_statement(&mut self, s: Statement) {
