@@ -332,6 +332,10 @@ impl ItemMerger {
         diff: &mut Vec<LocaleString>,
     ) -> Vec<LocaleString> {
         let mut ret = vec![];
+        let mul_label = mine
+            .iter()
+            .find(|x| x.language() == "mul")
+            .map(|l| l.value());
         let mut new_ones: Vec<LocaleString> = other
             .iter()
             .filter_map(|x| {
@@ -344,6 +348,11 @@ impl ItemMerger {
                     }
                     None => Some(x.clone()),
                 }
+            })
+            // Filter out labels identical to the existing "mul" one
+            .filter(|x| match mul_label {
+                Some(mul) => x.value() != mul,
+                None => true,
             })
             .collect();
         diff.append(&mut new_ones.clone());

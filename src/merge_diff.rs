@@ -104,7 +104,7 @@ impl MergeDiff {
         match self.sitelinks.is_empty() {
             true => None,
             false => {
-                let labels: HashMap<String, serde_json::Value> = self
+                let sitelinks: HashMap<String, serde_json::Value> = self
                     .sitelinks
                     .iter()
                     .map(|l| {
@@ -114,7 +114,7 @@ impl MergeDiff {
                         )
                     })
                     .collect();
-                Some(json!(labels))
+                Some(json!(sitelinks))
             }
         }
     }
