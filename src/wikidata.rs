@@ -82,7 +82,7 @@ impl Wikidata {
         self.timeout = timeout;
     }
 
-    pub fn item2qs(&self, item: &ItemEntity) -> Result<Vec<String>> {
+    pub fn item2qs(item: &ItemEntity) -> Result<Vec<String>> {
         if !item.id().is_empty() {
             return Err(anyhow!("Wikimisc::Wikidata::item2qs: Item ID is not empty"));
         }
