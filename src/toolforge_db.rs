@@ -96,7 +96,7 @@ impl ToolforgeDB {
             false => "127.0.0.1".to_string(),
             true => wiki.to_owned() + self.get_db_server_group(),
         };
-        let schema = format!("{}_p", wiki);
+        let schema = format!("{wiki}_p");
         Ok(HostSchema::new(&host, &schema))
     }
 

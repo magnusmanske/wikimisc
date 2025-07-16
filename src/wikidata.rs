@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use reqwest::ClientBuilder;
 use std::{
     fs::File,
@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 use tempfile::tempfile;
-use wikibase::mediawiki::Api;
+use wikibase::{mediawiki::Api, EntityTrait, ItemEntity, SnakType};
 
 const WIKIDATA_USER_AGENT: &str = "wikimisc-wikidata/0.1.0";
 const WIKIDATA_SPARQL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -52,7 +52,7 @@ impl Wikidata {
     /// }
     /// ```
     pub async fn load_sparql_csv(&self, sparql: &str) -> Result<csv::Reader<File>> {
-        let url = format!("https://query.wikidata.org/sparql?query={}", sparql);
+        let url = format!("https://query.wikidata.org/sparql?query={sparql}");
         let mut f = tempfile()?;
         let mut res = self
             .reqwest_client()?
@@ -80,6 +80,102 @@ impl Wikidata {
 
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
+    }
+
+    pub fn item2qs(&self, item: &ItemEntity) -> Result<Vec<String>> {
+        if !item.id().is_empty() {
+            return Err(anyhow!("Wikimisc::Wikidata::item2qs: Item ID is not empty"));
+        }
+        let mut ret = vec!["CREATE".into()];
+        ret.extend(
+            item.labels()
+                .iter()
+                .map(|ls| format!("LAST\tL{}\t\"{}\"", ls.language(), ls.value()))
+                .collect::<Vec<String>>(),
+        );
+        ret.extend(
+            item.descriptions()
+                .iter()
+                .map(|ls| format!("LAST\tD{}\t\"{}\"", ls.language(), ls.value()))
+                .collect::<Vec<String>>(),
+        );
+        ret.extend(
+            item.aliases()
+                .iter()
+                .map(|ls| format!("LAST\tA{}\t\"{}\"", ls.language(), ls.value()))
+                .collect::<Vec<String>>(),
+        );
+        ret.extend(
+            item.sitelinks()
+                .clone()
+                .unwrap_or_default()
+                .iter()
+                .map(|sl| format!("LAST\tS{}\t\"{}\"", sl.site(), sl.title()))
+                .collect::<Vec<String>>(),
+        );
+        for statement in item.claims() {
+            let main_value = match Self::snak2qs(statement.main_snak()) {
+                Some(value) => value,
+                None => continue,
+            };
+            let qualifiers = statement
+                .qualifiers()
+                .iter()
+                .filter_map(|snak| {
+                    let v = Self::snak2qs(snak)?;
+                    Some(vec![snak.property().to_string(), v])
+                })
+                .flatten()
+                .collect::<Vec<String>>();
+            let references = statement
+                .references()
+                .iter()
+                .flat_map(|r| {
+                    let mut parts = r
+                        .snaks()
+                        .iter()
+                        .filter_map(|snak| {
+                            let v = Self::snak2qs(snak)?;
+                            let p = snak.property().replace('P', "S");
+                            Some(vec![p, v])
+                        })
+                        .flatten()
+                        .collect::<Vec<String>>();
+                    parts[0] = format!("!{}", parts[0]); // Start new reference section
+                    parts
+                })
+                .collect::<Vec<String>>();
+            let mut parts = vec![main_value];
+            parts.extend(qualifiers);
+            parts.extend(references);
+            ret.push(format!(
+                "LAST\t{}\t{}",
+                statement.property(),
+                parts.join("\t")
+            ));
+        }
+        Ok(ret)
+    }
+
+    fn snak2qs(snak: &wikibase::Snak) -> Option<String> {
+        if *snak.snak_type() != SnakType::Value {
+            return None;
+        }
+        let dv = match snak.data_value() {
+            Some(dv) => dv,
+            None => return None,
+        };
+        let value = match dv.value() {
+            wikibase::Value::Coordinate(c) => format!("@{}/{}", c.latitude(), c.longitude()),
+            wikibase::Value::MonoLingual(m) => format!("{}:\"{}\"", m.language(), m.text()),
+            wikibase::Value::Entity(entity) => format!("\"{}\"", entity.id()),
+            wikibase::Value::Quantity(quantity) => format!("{}", quantity.amount()), // TODO unit?
+            wikibase::Value::StringValue(s) => format!("\"{s}\""),
+            wikibase::Value::Time(time) => format!("{}/{}", time.time(), time.precision()),
+            // wikibase::Value::EntitySchema(_entity_schema) => continue, // TODO
+            _ => return None, // TODO
+        };
+        Some(value)
     }
 }
 
