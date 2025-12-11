@@ -12,6 +12,7 @@ pub mod file_vec;
 pub mod item_merger;
 pub mod lat_lon;
 pub mod merge_diff;
+pub mod seppuku;
 pub mod site_matrix;
 pub mod sparql_results;
 pub mod sparql_table;
