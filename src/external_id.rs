@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use wikibase::*;
 
+use crate::wikidata::Wikidata;
+
 lazy_static! {
     static ref RE_PROPERTY_NUMERIC: Regex =
         Regex::new(r#"^\s*[Pp](\d+)\s*$"#).expect("Regexp error");
@@ -73,10 +75,24 @@ impl ExternalId {
     /// Searches Wikidata for a single item with the given query.
     /// Returns None if none or multiple items are found.
     pub async fn search_wikidata_single_item(&self, query: &str) -> Option<String> {
-        // TODO urlencode query?
-        let url = format!("https://www.wikidata.org/w/api.php?action=query&list=search&srnamespace=0&format=json&srsearch={}",&query);
-        let text = reqwest::get(url).await.ok()?.text().await.ok()?;
-        // let text = ureq::get(&url).call().ok()?.into_string().ok()?;
+        let url = "https://www.wikidata.org/w/api.php";
+        let wd = Wikidata::new();
+        let client = wd.reqwest_client().ok()?;
+        let text = client
+            .get(url)
+            .query(&[
+                ("action", "query"),
+                ("list", "search"),
+                ("srnamespace", "0"),
+                ("format", "json"),
+                ("srsearch", query),
+            ])
+            .send()
+            .await
+            .ok()?
+            .text()
+            .await
+            .ok()?;
         let j: serde_json::Value = serde_json::from_str(&text).ok()?;
         if j["query"]["searchinfo"]["totalhits"].as_i64()? == 1 {
             return Some(j["query"]["search"][0]["title"].as_str()?.to_string());
