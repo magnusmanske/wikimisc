@@ -20,14 +20,13 @@ impl FromStr for LatLon {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split(',').collect();
-        /* trunk-ignore(clippy/get_first) */
+        let mut parts = s.split(',');
         let lat = parts
-            .first()
+            .next()
             .ok_or_else(|| anyhow!("Cannot parse latitude from '{s}'"))?
             .parse::<f64>()?;
         let lon = parts
-            .get(1)
+            .next()
             .ok_or_else(|| anyhow!("Cannot parse longitude from '{s}'"))?
             .parse::<f64>()?;
         Ok(Self { lat, lon })

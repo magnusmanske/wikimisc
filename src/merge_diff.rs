@@ -67,56 +67,53 @@ impl MergeDiff {
     }
 
     fn serialize_labels(&self, list: &[LocaleString]) -> Option<serde_json::Value> {
-        match list.is_empty() {
-            true => None,
-            false => {
-                let labels: HashMap<String, serde_json::Value> = list
-                    .iter()
-                    .map(|l| {
-                        (
-                            l.language().to_owned(),
-                            json!({"language":l.language(),"value":l.value(), "add": ""}),
-                        )
-                    })
-                    .collect();
-                Some(json!(labels))
-            }
+        if list.is_empty() {
+            return None;
         }
+
+        let labels: HashMap<String, serde_json::Value> = list
+            .iter()
+            .map(|l| {
+                (
+                    l.language().to_owned(),
+                    json!({"language":l.language(),"value":l.value(), "add": ""}),
+                )
+            })
+            .collect();
+        Some(json!(labels))
     }
 
     fn _serialize_aliases(&self) -> Option<serde_json::Value> {
-        match self.aliases.is_empty() {
-            true => None,
-            false => {
-                let mut ret: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-                for alias in &self.aliases {
-                    let v = json!({"language":alias.language(),"value":alias.value(), "add": ""});
-                    ret.entry(alias.language().into())
-                        .and_modify(|vec| vec.push(v.to_owned()))
-                        .or_insert(vec![v]);
-                }
-                Some(json!(ret))
-            }
+        if self.aliases.is_empty() {
+            return None;
         }
+
+        let mut ret: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        for alias in &self.aliases {
+            let v = json!({"language":alias.language(),"value":alias.value(), "add": ""});
+            ret.entry(alias.language().into())
+                .and_modify(|vec| vec.push(v.to_owned()))
+                .or_insert_with(|| vec![v]);
+        }
+        Some(json!(ret))
     }
 
     fn serialize_sitelinks(&self) -> Option<serde_json::Value> {
-        match self.sitelinks.is_empty() {
-            true => None,
-            false => {
-                let sitelinks: HashMap<String, serde_json::Value> = self
-                    .sitelinks
-                    .iter()
-                    .map(|l| {
-                        (
-                            l.site().to_owned(),
-                            json!({"site":l.site(),"title":l.title()}),
-                        )
-                    })
-                    .collect();
-                Some(json!(sitelinks))
-            }
+        if self.sitelinks.is_empty() {
+            return None;
         }
+
+        let sitelinks: HashMap<String, serde_json::Value> = self
+            .sitelinks
+            .iter()
+            .map(|l| {
+                (
+                    l.site().to_owned(),
+                    json!({"site":l.site(),"title":l.title()}),
+                )
+            })
+            .collect();
+        Some(json!(sitelinks))
     }
 
     fn clean_snak(&self, snak: &mut serde_json::Value) {
@@ -132,35 +129,34 @@ impl MergeDiff {
             .chain(self.altered_statements.values())
             .cloned()
             .map(|c| json!(c))
-            .map(|c| {
-                let mut c = c;
+            .map(|mut c| {
                 if let Some(snak) = c.get_mut("mainsnak") {
-                    self.clean_snak(snak)
+                    self.clean_snak(snak);
                 }
-                match c["references"].as_array_mut() {
-                    Some(references) => {
-                        for refgroup in references {
-                            if let Some(prop_snaks_map) = refgroup["snaks"].as_object_mut() {
-                                prop_snaks_map.iter_mut().for_each(|prop_snaks| {
-                                    if let Some(snaks) = prop_snaks.1.as_array_mut() {
-                                        snaks.iter_mut().for_each(|snak| self.clean_snak(snak));
+
+                if let Some(references) = c["references"].as_array_mut() {
+                    for refgroup in references {
+                        if let Some(prop_snaks_map) = refgroup["snaks"].as_object_mut() {
+                            for (_, snaks) in prop_snaks_map.iter_mut() {
+                                if let Some(snaks_array) = snaks.as_array_mut() {
+                                    for snak in snaks_array {
+                                        self.clean_snak(snak);
                                     }
-                                })
+                                }
                             }
                         }
                     }
-                    None => {
-                        if let Some(x) = c.as_object_mut() {
-                            x.remove("references");
-                        }
-                    }
+                } else if let Some(obj) = c.as_object_mut() {
+                    obj.remove("references");
                 }
                 c
             })
             .collect();
-        match ret.is_empty() {
-            true => None,
-            false => Some(json!(ret)),
+
+        if ret.is_empty() {
+            None
+        } else {
+            Some(json!(ret))
         }
     }
 }
@@ -262,5 +258,105 @@ mod tests {
             Ordering::Greater,
             ItemMerger::compare_locale_string(&ls1, &ls3)
         );
+    }
+
+    #[test]
+    fn test_merge_diff_new() {
+        let diff = MergeDiff::new();
+        assert!(diff.labels.is_empty());
+        assert!(diff.aliases.is_empty());
+        assert!(diff.descriptions.is_empty());
+        assert!(diff.sitelinks.is_empty());
+        assert!(diff.altered_statements.is_empty());
+        assert!(diff.added_statements.is_empty());
+    }
+
+    #[test]
+    fn test_merge_diff_extend() {
+        let mut diff1 = MergeDiff::new();
+        diff1.labels.push(LocaleString::new("en", "test1"));
+        diff1.added_statements.push(Statement::new_normal(
+            Snak::new_string("P1", "value1"),
+            vec![],
+            vec![],
+        ));
+
+        let mut diff2 = MergeDiff::new();
+        diff2.labels.push(LocaleString::new("de", "test2"));
+        diff2.added_statements.push(Statement::new_normal(
+            Snak::new_string("P2", "value2"),
+            vec![],
+            vec![],
+        ));
+
+        diff1.extend(&diff2);
+        assert_eq!(diff1.labels.len(), 2);
+        assert_eq!(diff1.added_statements.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_diff_add_statement_with_id() {
+        let mut diff = MergeDiff::new();
+        let mut statement = Statement::new_normal(Snak::new_string("P123", "test"), vec![], vec![]);
+        statement.set_id("Q1$abc-123");
+
+        diff.add_statement(statement.clone());
+        assert_eq!(diff.altered_statements.len(), 1);
+        assert_eq!(diff.added_statements.len(), 0);
+        assert!(diff.altered_statements.contains_key("Q1$abc-123"));
+    }
+
+    #[test]
+    fn test_merge_diff_add_statement_without_id() {
+        let mut diff = MergeDiff::new();
+        let statement = Statement::new_normal(Snak::new_string("P123", "test"), vec![], vec![]);
+
+        diff.add_statement(statement.clone());
+        assert_eq!(diff.altered_statements.len(), 0);
+        assert_eq!(diff.added_statements.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_diff_apply_to_item() {
+        let mut item = ItemEntity::new_empty();
+        item.labels_mut().push(LocaleString::new("en", "original"));
+
+        let mut diff = MergeDiff::new();
+        diff.labels.push(LocaleString::new("de", "new_label"));
+        diff.descriptions
+            .push(LocaleString::new("en", "description"));
+        diff.added_statements.push(Statement::new_normal(
+            Snak::new_string("P123", "test"),
+            vec![],
+            vec![],
+        ));
+
+        diff.apply(&mut item);
+        assert_eq!(item.labels().len(), 2);
+        assert_eq!(item.descriptions().len(), 1);
+        assert_eq!(item.claims().len(), 1);
+    }
+
+    #[test]
+    fn test_merge_diff_apply_altered_statement() {
+        let mut item = ItemEntity::new_empty();
+        let mut original_statement =
+            Statement::new_normal(Snak::new_string("P123", "original"), vec![], vec![]);
+        original_statement.set_id("Q1$test-id");
+        item.add_claim(original_statement);
+
+        let mut diff = MergeDiff::new();
+        let mut altered_statement = Statement::new_normal(
+            Snak::new_string("P123", "modified"),
+            vec![Snak::new_string("P1", "qualifier")],
+            vec![],
+        );
+        altered_statement.set_id("Q1$test-id");
+        diff.altered_statements
+            .insert("Q1$test-id".to_string(), altered_statement);
+
+        diff.apply(&mut item);
+        assert_eq!(item.claims().len(), 1);
+        assert_eq!(item.claims()[0].qualifiers().len(), 1);
     }
 }

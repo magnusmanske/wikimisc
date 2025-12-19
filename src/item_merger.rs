@@ -173,13 +173,13 @@ impl ItemMerger {
             .snaks()
             .iter()
             .filter(|snak| *snak.datatype() == SnakDataType::ExternalId)
-            .map(|snak| (ExternalId::prop_numeric(snak.property()), snak.data_value()))
-            .filter(|(prop, dv)| prop.is_some() && dv.is_some())
-            .map(|(prop, dv)| (prop.unwrap(), dv.to_owned().unwrap())) // unwrap()s are safe
-            .map(|(prop, dv)| (prop, dv.value().to_owned()))
-            .filter_map(|(prop, value)| match value {
-                Value::StringValue(s) => Some(ExternalId::new(prop, &s)),
-                _ => None,
+            .filter_map(|snak| {
+                let prop = ExternalId::prop_numeric(snak.property())?;
+                let dv = snak.data_value().as_ref()?;
+                match dv.value() {
+                    Value::StringValue(s) => Some(ExternalId::new(prop, s)),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -189,36 +189,36 @@ impl ItemMerger {
             .snaks()
             .iter()
             .filter(|snak| *snak.datatype() == SnakDataType::Url)
-            .filter_map(|snak| snak.data_value().to_owned())
-            .filter_map(|dv| match dv.value() {
-                Value::StringValue(s) => Some(s.to_owned()),
-                _ => None,
+            .filter_map(|snak| {
+                let dv = snak.data_value().as_ref()?;
+                match dv.value() {
+                    Value::StringValue(s) => Some(s.to_owned()),
+                    _ => None,
+                }
             })
             .collect()
     }
 
     /// Checks if a reference already exists in a list of references.
-    /// Uses direct equal, or the presence of any external ID from the new reference.
+    /// Uses the presence of any external ID or reference URL from the new reference.
     /// Returns `true` if the reference exists, `false` otherwise.
     fn reference_exists(existing_references: &[Reference], new_reference: &Reference) -> bool {
-        // if existing_references.contains(new_reference) {
-        //     // Easy case
-        //     return true;
-        // }
-
-        // Check if any external ID in the new reference is present in any existing reference
         let ext_ids = Self::get_external_ids_from_reference(new_reference);
-        let has_external_ids = existing_references
-            .iter()
-            .flat_map(Self::get_external_ids_from_reference)
-            .any(|ext_id| ext_ids.contains(&ext_id));
-
-        // Check if any reference URL in the new reference is present in any existing reference
         let reference_urls = Self::get_reference_urls_from_reference(new_reference);
-        let has_reference_urls = existing_references
-            .iter()
-            .flat_map(Self::get_reference_urls_from_reference)
-            .any(|reference_url| reference_urls.contains(&reference_url));
+
+        // Check if any external ID matches
+        let has_external_ids = !ext_ids.is_empty()
+            && existing_references
+                .iter()
+                .flat_map(Self::get_external_ids_from_reference)
+                .any(|ext_id| ext_ids.contains(&ext_id));
+
+        // Check if any reference URL matches
+        let has_reference_urls = !reference_urls.is_empty()
+            && existing_references
+                .iter()
+                .flat_map(Self::get_reference_urls_from_reference)
+                .any(|reference_url| reference_urls.contains(&reference_url));
 
         has_external_ids || has_reference_urls
     }
@@ -413,5 +413,135 @@ mod tests {
         let references = vec![reference1.to_owned()];
         assert!(ItemMerger::reference_exists(&references, &reference1));
         assert!(!ItemMerger::reference_exists(&references, &reference2));
+    }
+
+    #[test]
+    fn test_is_snak_identical() {
+        let snak1 = Snak::new_string("P123", "test");
+        let snak2 = Snak::new_string("P123", "test");
+        let snak3 = Snak::new_string("P123", "different");
+        let snak4 = Snak::new_string("P456", "test");
+
+        assert!(ItemMerger::is_snak_identical(&snak1, &snak2));
+        assert!(!ItemMerger::is_snak_identical(&snak1, &snak3));
+        assert!(!ItemMerger::is_snak_identical(&snak1, &snak4));
+    }
+
+    #[test]
+    fn test_is_time_value_identical_precision_9() {
+        let t1 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            9,
+            "+1650-00-00T00:00:00Z",
+            0,
+        );
+        let t2 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            9,
+            "+1650-12-29T00:00:00Z",
+            0,
+        );
+        let t3 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            9,
+            "+1651-00-00T00:00:00Z",
+            0,
+        );
+
+        assert!(ItemMerger::is_time_value_identical(&t1, &t2)); // Same year, different month/day OK for precision 9
+        assert!(!ItemMerger::is_time_value_identical(&t1, &t3)); // Different year
+    }
+
+    #[test]
+    fn test_is_time_value_identical_precision_10() {
+        let t1 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            10,
+            "+1650-05-00T00:00:00Z",
+            0,
+        );
+        let t2 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            10,
+            "+1650-05-15T00:00:00Z",
+            0,
+        );
+        let t3 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            10,
+            "+1650-06-00T00:00:00Z",
+            0,
+        );
+
+        assert!(ItemMerger::is_time_value_identical(&t1, &t2)); // Same year-month, different day OK for precision 10
+        assert!(!ItemMerger::is_time_value_identical(&t1, &t3)); // Different month
+    }
+
+    #[test]
+    fn test_are_qualifiers_identical() {
+        let q1 = vec![Snak::new_string("P1", "a"), Snak::new_string("P2", "b")];
+        let q2 = vec![Snak::new_string("P2", "b"), Snak::new_string("P1", "a")]; // Different order
+        let q3 = vec![Snak::new_string("P1", "a")];
+        let empty: Vec<Snak> = vec![];
+
+        assert!(ItemMerger::are_qualifiers_identical(&q1, &q2)); // Order shouldn't matter
+        assert!(!ItemMerger::are_qualifiers_identical(&q1, &q3)); // Different length
+        assert!(ItemMerger::are_qualifiers_identical(&empty, &empty)); // Both empty
+        assert!(!ItemMerger::are_qualifiers_identical(&q1, &empty)); // One empty
+    }
+
+    #[test]
+    fn test_get_external_ids_from_reference() {
+        let reference = Reference::new(vec![
+            Snak::new_external_id("P214", "12345"),
+            Snak::new_external_id("P227", "67890"),
+            Snak::new_string("P123", "not_an_ext_id"),
+        ]);
+
+        let ext_ids = ItemMerger::get_external_ids_from_reference(&reference);
+        assert_eq!(ext_ids.len(), 2);
+        assert!(ext_ids.contains(&ExternalId::new(214, "12345")));
+        assert!(ext_ids.contains(&ExternalId::new(227, "67890")));
+    }
+
+    #[test]
+    fn test_get_reference_urls_from_reference() {
+        let reference = Reference::new(vec![
+            Snak::new_url("P854", "http://example.com"),
+            Snak::new_url("P973", "http://another.com"),
+            Snak::new_string("P123", "not_a_url"),
+        ]);
+
+        let urls = ItemMerger::get_reference_urls_from_reference(&reference);
+        assert_eq!(urls.len(), 2);
+        assert!(urls.contains(&"http://example.com".to_string()));
+        assert!(urls.contains(&"http://another.com".to_string()));
+    }
+
+    #[test]
+    fn test_reference_exists_empty_references() {
+        let reference = Reference::new(vec![Snak::new_external_id("P214", "12345")]);
+        let empty_refs: Vec<Reference> = vec![];
+        assert!(!ItemMerger::reference_exists(&empty_refs, &reference));
+    }
+
+    #[test]
+    fn test_reference_exists_no_matching_criteria() {
+        // Reference with neither external IDs nor URLs
+        let reference = Reference::new(vec![Snak::new_string("P123", "test")]);
+        let existing = vec![Reference::new(vec![Snak::new_string("P456", "other")])];
+        assert!(!ItemMerger::reference_exists(&existing, &reference));
     }
 }

@@ -8,3 +8,16 @@ impl ToolforgeApp {
         IS_ON_TOOLFORGE.to_owned()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_on_toolforge_consistent() {
+        // The result should be consistent across calls
+        let result1 = ToolforgeApp::is_on_toolforge();
+        let result2 = ToolforgeApp::is_on_toolforge();
+        assert_eq!(result1, result2);
+    }
+}

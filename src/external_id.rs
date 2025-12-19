@@ -95,9 +95,10 @@ impl ExternalId {
             .ok()?;
         let j: serde_json::Value = serde_json::from_str(&text).ok()?;
         if j["query"]["searchinfo"]["totalhits"].as_i64()? == 1 {
-            return Some(j["query"]["search"][0]["title"].as_str()?.to_string());
+            Some(j["query"]["search"][0]["title"].as_str()?.to_string())
+        } else {
+            None
         }
-        None
     }
 
     /// Searches Wikidata for a single item with the given property/value.

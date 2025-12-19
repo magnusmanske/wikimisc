@@ -38,26 +38,20 @@ impl SiteMatrix {
         key_match: &str,
         key_return: &str,
     ) -> Option<String> {
-        if site["closed"].as_str().is_some() {
+        // Skip closed or private sites
+        if site["closed"].as_str().is_some() || site["private"].as_str().is_some() {
             return None;
         }
-        if site["private"].as_str().is_some() {
-            return None;
-        }
-        match site[key_match].as_str() {
-            Some(site_url) => {
-                if value == site_url {
-                    site[key_return].as_str().map(|url| url.to_string())
-                } else {
-                    None
-                }
-            }
-            None => None,
-        }
+
+        site[key_match]
+            .as_str()
+            .filter(|&site_value| value == site_value)
+            .and_then(|_| site[key_return].as_str().map(String::from))
     }
 
     /// Get the server URL for a wiki
     pub fn get_server_url_for_wiki(&self, wiki: &str) -> Result<String> {
+        // Handle special cases
         match wiki.replace('_', "-").as_str() {
             "be-taraskwiki" | "be-x-oldwiki" => {
                 return Ok("https://be-tarask.wikipedia.org".to_string())
@@ -65,31 +59,28 @@ impl SiteMatrix {
             "metawiki" => return Ok("https://meta.wikimedia.org".to_string()),
             _ => {}
         }
+
         self.site_matrix["sitematrix"]
             .as_object()
             .ok_or_else(|| {
-                anyhow!("ListeriaBot::get_server_url_for_wiki: sitematrix not an object")
+                anyhow!("SiteMatrix::get_server_url_for_wiki: sitematrix not an object")
             })?
             .iter()
-            .filter_map(|(id, data)| match id.as_str() {
+            .find_map(|(id, data)| match id.as_str() {
                 "count" => None,
-                "specials" => data
-                    .as_array()?
-                    .iter()
-                    .filter_map(|site| self.get_url_for_wiki_from_site(wiki, site))
-                    .next(),
-                _other => match data["site"].as_array() {
-                    Some(sites) => sites
+                "specials" => data.as_array().and_then(|arr| {
+                    arr.iter()
+                        .find_map(|site| self.get_url_for_wiki_from_site(wiki, site))
+                }),
+                _other => data["site"].as_array().and_then(|sites| {
+                    sites
                         .iter()
-                        .filter_map(|site| self.get_url_for_wiki_from_site(wiki, site))
-                        .next(),
-                    None => None,
-                },
+                        .find_map(|site| self.get_url_for_wiki_from_site(wiki, site))
+                }),
             })
-            .next()
-            .ok_or(anyhow!(
-                "SiteMatrix::get_server_url_for_wiki: Cannot find server for wiki '{wiki}'"
-            ))
+            .ok_or_else(|| {
+                anyhow!("SiteMatrix::get_server_url_for_wiki: Cannot find server for wiki '{wiki}'")
+            })
     }
 
     fn get_wiki_for_server_url_from_site(&self, url: &str, site: &Value) -> Option<String> {
@@ -99,38 +90,34 @@ impl SiteMatrix {
     pub fn is_language_rtl(&self, language: &str) -> bool {
         self.site_matrix["sitematrix"]
             .as_object()
-            .expect("AppState::get_wiki_for_server_url: sitematrix not an object")
+            .expect("SiteMatrix::is_language_rtl: sitematrix not an object")
             .iter()
-            .any(
-                |(_id, data)| match (data["code"].as_str(), data["dir"].as_str()) {
-                    (Some(lang), Some("rtl")) => lang == language,
-                    _ => false,
-                },
-            )
+            .any(|(_id, data)| {
+                matches!(
+                    (data["code"].as_str(), data["dir"].as_str()),
+                    (Some(lang), Some("rtl")) if lang == language
+                )
+            })
     }
 
     pub fn get_wiki_for_server_url(&self, url: &str) -> Option<String> {
         self.site_matrix["sitematrix"]
             .as_object()
-            .expect("AppState::get_wiki_for_server_url: sitematrix not an object")
+            .expect("SiteMatrix::get_wiki_for_server_url: sitematrix not an object")
             .iter()
-            .filter_map(|(id, data)| match id.as_str() {
+            .find_map(|(id, data)| match id.as_str() {
                 "count" => None,
                 "specials" => data
                     .as_array()
-                    .expect("AppState::get_wiki_for_server_url: 'specials' is not an array")
+                    .expect("SiteMatrix::get_wiki_for_server_url: 'specials' is not an array")
                     .iter()
-                    .filter_map(|site| self.get_wiki_for_server_url_from_site(url, site))
-                    .next(),
-                _other => match data["site"].as_array() {
-                    Some(sites) => sites
+                    .find_map(|site| self.get_wiki_for_server_url_from_site(url, site)),
+                _other => data["site"].as_array().and_then(|sites| {
+                    sites
                         .iter()
-                        .filter_map(|site| self.get_wiki_for_server_url_from_site(url, site))
-                        .next(),
-                    None => None,
-                },
+                        .find_map(|site| self.get_wiki_for_server_url_from_site(url, site))
+                }),
             })
-            .next()
     }
 
     pub async fn get_api_for_wiki(&self, wiki: &str) -> Result<Api> {

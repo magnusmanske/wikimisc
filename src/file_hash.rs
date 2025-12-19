@@ -79,48 +79,39 @@ impl<
         if idx1 == idx2 {
             return;
         }
+
         if self.using_disk {
-            self.swap_disk(idx1, idx2);
+            let v1 = self.id2pos.remove(&idx1);
+            let v2 = self.id2pos.remove(&idx2);
+            match (v1, v2) {
+                (Some(value), None) => {
+                    self.id2pos.insert(idx2, value);
+                }
+                (None, Some(value)) => {
+                    self.id2pos.insert(idx1, value);
+                }
+                (Some(v1), Some(v2)) => {
+                    self.id2pos.insert(idx1, v2);
+                    self.id2pos.insert(idx2, v1);
+                }
+                (None, None) => {}
+            }
         } else {
-            self.swap_mem(idx1, idx2);
-        }
-    }
-
-    fn swap_mem(&mut self, idx1: KeyType, idx2: KeyType) {
-        let v1 = self.in_memory.remove(&idx1);
-        let v2 = self.in_memory.remove(&idx2);
-
-        match (v1, v2) {
-            (Some(value), None) => {
-                self.in_memory.insert(idx2, value);
+            let v1 = self.in_memory.remove(&idx1);
+            let v2 = self.in_memory.remove(&idx2);
+            match (v1, v2) {
+                (Some(value), None) => {
+                    self.in_memory.insert(idx2, value);
+                }
+                (None, Some(value)) => {
+                    self.in_memory.insert(idx1, value);
+                }
+                (Some(v1), Some(v2)) => {
+                    self.in_memory.insert(idx1, v2);
+                    self.in_memory.insert(idx2, v1);
+                }
+                (None, None) => {}
             }
-            (None, Some(value)) => {
-                self.in_memory.insert(idx1, value);
-            }
-            (Some(v1), Some(v2)) => {
-                self.in_memory.insert(idx1, v2);
-                self.in_memory.insert(idx2, v1);
-            }
-            (None, None) => {}
-        }
-    }
-
-    fn swap_disk(&mut self, idx1: KeyType, idx2: KeyType) {
-        let v1 = self.id2pos.remove(&idx1);
-        let v2 = self.id2pos.remove(&idx2);
-
-        match (v1, v2) {
-            (Some(value), None) => {
-                self.id2pos.insert(idx2, value);
-            }
-            (None, Some(value)) => {
-                self.id2pos.insert(idx1, value);
-            }
-            (Some(v1), Some(v2)) => {
-                self.id2pos.insert(idx1, v2);
-                self.id2pos.insert(idx2, v1);
-            }
-            (None, None) => {}
         }
     }
 
@@ -250,13 +241,9 @@ impl<
             return Ok(fh.clone());
         }
         let fh = tempfile()?;
-        self.file_handle = Some(Arc::new(fh)); // Should auto-destruct
-        if let Some(fh) = &self.file_handle {
-            return Ok(fh.clone());
-        }
-        Err(anyhow!(
-            "FileHash::get_or_create_file_handle: This is weird"
-        ))
+        let arc_fh = Arc::new(fh);
+        self.file_handle = Some(arc_fh.clone());
+        Ok(arc_fh)
     }
 
     pub fn set_max_mem_entries(&mut self, max_mem_entries: usize) {

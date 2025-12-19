@@ -69,11 +69,11 @@ impl ToolforgeDB {
     }
 
     pub fn fix_wiki_db_name(wiki: &str) -> String {
-        match wiki {
+        let normalized = match wiki {
             "be-taraskwiki" | "be-x-oldwiki" | "be_taraskwiki" | "be_x_oldwiki" => "be_x_oldwiki",
             other => other,
-        }
-        .replace('-', "_")
+        };
+        normalized.replace('-', "_")
     }
 
     pub fn get_pool(&self, key: &str) -> Option<&mysql_async::Pool> {

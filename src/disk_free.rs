@@ -39,47 +39,52 @@ impl DiskFree {
             self.parts.push(new_pl);
             return;
         }
-        let mut last_position = 0;
-        let mut last_index = 0;
+
         let new_end = new_pl.position + new_pl.length;
-        for (idx, pl) in self.parts.iter_mut().enumerate() {
+
+        // Check if we can merge with an existing part
+        for pl in &mut self.parts {
             if new_end == pl.position {
+                // New part comes right before this part
                 pl.position = new_pl.position;
                 pl.length += new_pl.length;
                 return;
             }
             if pl.end() == new_pl.position {
+                // New part comes right after this part
                 pl.length += new_pl.length;
                 return;
             }
-            if pl.position >= last_position && pl.position < new_pl.position {
-                last_position = pl.position;
-                last_index = idx;
-            }
         }
-        self.parts.insert(last_index + 1, new_pl);
-    }
 
-    pub fn find_free(&mut self, size: u64) -> Option<u64> {
-        let equal_idx = self
+        // Find insertion position
+        let insert_idx = self
             .parts
             .iter()
             .enumerate()
-            .filter(|(_num, part)| part.length == size)
-            .map(|(num, _part)| num)
-            .next();
-        if let Some(num) = equal_idx {
-            let position = Some(self.parts[num].position);
-            self.parts.remove(num);
-            return position;
+            .filter(|(_, pl)| pl.position < new_pl.position)
+            .map(|(idx, _)| idx)
+            .next_back()
+            .map_or(0, |idx| idx + 1);
+
+        self.parts.insert(insert_idx, new_pl);
+    }
+
+    pub fn find_free(&mut self, size: u64) -> Option<u64> {
+        // First, try to find an exact match
+        if let Some(idx) = self.parts.iter().position(|part| part.length == size) {
+            let position = self.parts[idx].position;
+            self.parts.remove(idx);
+            return Some(position);
         }
 
-        for part in self.parts.iter_mut() {
+        // Otherwise, find first part large enough
+        for part in &mut self.parts {
             if part.length >= size {
-                let position = Some(part.position);
+                let position = part.position;
                 part.length -= size;
                 part.position += size;
-                return position;
+                return Some(position);
             }
         }
         None

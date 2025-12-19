@@ -58,7 +58,8 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         if idx >= self.len {
             return None;
         }
-        for pos in idx + 1..self.len {
+        // Shift all elements after idx to the left
+        for pos in (idx + 1)..self.len {
             self.swap(pos - 1, pos).ok()?;
         }
         self.pop()
@@ -116,7 +117,7 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
             return Err(anyhow!("FileVec::swap: Attempting to swap out-of-bounds"));
         }
         if idx1 == idx2 {
-            return Ok(()); // No need to swap if the indices are the same
+            return Ok(());
         }
         let row1 = self
             .get(idx1)

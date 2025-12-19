@@ -275,4 +275,93 @@ mod tests {
         let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
         assert_eq!(value, Some(SparqlValue::Entity("Q21".to_string())));
     }
+
+    #[test]
+    fn test_new_from_json_entity_https() {
+        let json = r#"{"type":"uri","value":"https://www.wikidata.org/entity/P123"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, Some(SparqlValue::Entity("P123".to_string())));
+    }
+
+    #[test]
+    fn test_new_from_json_file() {
+        let json = r#"{"type":"uri","value":"http://commons.wikimedia.org/wiki/Special:FilePath/Example.jpg"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, Some(SparqlValue::File("Example.jpg".to_string())));
+    }
+
+    #[test]
+    fn test_new_from_json_file_with_spaces() {
+        let json = r#"{"type":"uri","value":"http://commons.wikimedia.org/wiki/Special:FilePath/My_Example_File.jpg"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(
+            value,
+            Some(SparqlValue::File("My Example File.jpg".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_new_from_json_file_url_encoded() {
+        let json = r#"{"type":"uri","value":"http://commons.wikimedia.org/wiki/Special:FilePath/My%20File.jpg"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, Some(SparqlValue::File("My File.jpg".to_string())));
+    }
+
+    #[test]
+    fn test_new_from_json_generic_uri() {
+        let json = r#"{"type":"uri","value":"http://example.com/resource"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(
+            value,
+            Some(SparqlValue::Uri("http://example.com/resource".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_new_from_json_location() {
+        let json = r#"{"type":"literal","datatype":"http://www.opengis.net/ont/geosparql#wktLiteral","value":"Point(-122.5 37.5)"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(
+            value,
+            Some(SparqlValue::Location(LatLon::new(37.5, -122.5)))
+        );
+    }
+
+    #[test]
+    fn test_new_from_json_datetime() {
+        let json = r#"{"type":"literal","datatype":"http://www.w3.org/2001/XMLSchema#dateTime","value":"2020-01-15T00:00:00Z"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, Some(SparqlValue::Time("2020-01-15".to_string())));
+    }
+
+    #[test]
+    fn test_new_from_json_datetime_full() {
+        let json = r#"{"type":"literal","datatype":"http://www.w3.org/2001/XMLSchema#dateTime","value":"2020-01-15T12:30:45Z"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(
+            value,
+            Some(SparqlValue::Time("2020-01-15T12:30:45Z".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_new_from_json_bnode() {
+        let json = r#"{"type":"bnode","value":"b0"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, Some(SparqlValue::Literal("b0".to_string())));
+    }
+
+    #[test]
+    fn test_new_from_json_invalid() {
+        let json = r#"{"type":"unknown","value":"test"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn test_new_from_json_missing_value() {
+        let json = r#"{"type":"literal"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, None);
+    }
 }

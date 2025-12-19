@@ -166,4 +166,74 @@ mod tests {
         table.set_main_variable(Some("b".to_string()));
         assert_eq!(table.main_column(), Some(1));
     }
+
+    #[test]
+    fn test_from_table() {
+        let mut original = SparqlTable::new();
+        original.set_headers(vec!["x".to_string(), "y".to_string()]);
+        original.set_main_variable(Some("x".to_string()));
+        original.push(vec![Some(SparqlValue::Literal("a".to_string()))]);
+
+        let new_table = SparqlTable::from_table(&original);
+        assert_eq!(new_table.headers, original.headers);
+        assert_eq!(new_table.main_variable, original.main_variable);
+        assert_eq!(new_table.len(), 0); // Should not copy rows
+    }
+
+    #[test]
+    fn test_get_row_col() {
+        let mut table = SparqlTable::new();
+        table.push(vec![
+            Some(SparqlValue::Literal("a".to_string())),
+            Some(SparqlValue::Literal("b".to_string())),
+        ]);
+        table.push(vec![Some(SparqlValue::Literal("c".to_string())), None]);
+
+        assert_eq!(
+            table.get_row_col(0, 0),
+            Some(SparqlValue::Literal("a".to_string()))
+        );
+        assert_eq!(
+            table.get_row_col(0, 1),
+            Some(SparqlValue::Literal("b".to_string()))
+        );
+        assert_eq!(
+            table.get_row_col(1, 0),
+            Some(SparqlValue::Literal("c".to_string()))
+        );
+        assert_eq!(table.get_row_col(1, 1), None);
+        assert_eq!(table.get_row_col(2, 0), None); // Out of bounds row
+        assert_eq!(table.get_row_col(0, 5), None); // Out of bounds column
+    }
+
+    #[test]
+    fn test_get_var_index_case_insensitive() {
+        let mut table = SparqlTable::new();
+        table.headers.push("MyVar".to_string());
+        assert_eq!(table.get_var_index("myvar"), Some(0));
+        assert_eq!(table.get_var_index("MYVAR"), Some(0));
+        assert_eq!(table.get_var_index("MyVar"), Some(0));
+    }
+
+    #[test]
+    fn test_main_column_not_set() {
+        let table = SparqlTable::new();
+        assert_eq!(table.main_column(), None);
+    }
+
+    #[test]
+    fn test_main_variable() {
+        let mut table = SparqlTable::new();
+        assert_eq!(table.main_variable(), None);
+        table.set_main_variable(Some("test".to_string()));
+        assert_eq!(table.main_variable(), Some(&"test".to_string()));
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let mut table = SparqlTable::new();
+        assert!(table.is_empty());
+        table.push(vec![Some(SparqlValue::Literal("test".to_string()))]);
+        assert!(!table.is_empty());
+    }
 }
