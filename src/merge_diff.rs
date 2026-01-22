@@ -127,7 +127,6 @@ impl MergeDiff {
             .added_statements
             .iter()
             .chain(self.altered_statements.values())
-            .cloned()
             .map(|c| json!(c))
             .map(|mut c| {
                 if let Some(snak) = c.get_mut("mainsnak") {

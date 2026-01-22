@@ -1,5 +1,5 @@
+use crate::mediawiki::reqwest::{Client, ClientBuilder};
 use anyhow::{anyhow, Result};
-use reqwest::ClientBuilder;
 use std::{
     fs::File,
     io::{Seek, Write},
@@ -32,12 +32,12 @@ impl Wikidata {
     }
 
     /// Returns a reqwest client with the current user agent and timeout.
-    pub fn reqwest_client(&self) -> Result<reqwest::Client> {
+    pub fn reqwest_client(&self) -> Result<Client> {
         Ok(self.client_builder().build()?)
     }
 
     pub fn client_builder(&self) -> ClientBuilder {
-        reqwest::Client::builder()
+        Client::builder()
             .user_agent(&self.user_agent)
             .timeout(self.timeout.to_owned())
     }

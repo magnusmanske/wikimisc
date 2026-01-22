@@ -1,12 +1,11 @@
 //! Useful functionality for dealing with external identifiers in Wikidata.
 
+use crate::wikidata::Wikidata;
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use wikibase::*;
-
-use crate::wikidata::Wikidata;
 
 lazy_static! {
     static ref RE_PROPERTY_NUMERIC: Regex =
@@ -78,7 +77,7 @@ impl ExternalId {
         let url = "https://www.wikidata.org/w/api.php";
         let wd = Wikidata::new();
         let client = wd.reqwest_client().ok()?;
-        let text = client
+        let text: String = client
             .get(url)
             .query(&[
                 ("action", "query"),
