@@ -1,5 +1,4 @@
 use crate::{
-    file_vec::FileVec,
     sparql_results::{SparqlApiResult, SparqlRow},
     sparql_value::SparqlValue,
 };
@@ -7,33 +6,33 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
-pub struct SparqlTable {
+pub struct SparqlTableVec {
     headers: Vec<String>,
-    rows: FileVec<SparqlRow>,
+    rows: Vec<SparqlRow>,
     main_variable: Option<String>,
 }
 
-impl Default for SparqlTable {
+impl Default for SparqlTableVec {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SparqlTable {
-    /// Create a new SparqlTable.
+impl SparqlTableVec {
+    /// Create a new SparqlTableVec.
     pub fn new() -> Self {
         Self {
             headers: Vec::new(),
-            rows: FileVec::new(),
+            rows: Vec::new(),
             main_variable: None,
         }
     }
 
-    /// Create a new SparqlTable from another SparqlTable, using its headers (not the rows).
-    pub fn from_table(other: &SparqlTable) -> Self {
+    /// Create a new SparqlTableVec from another SparqlTableVec, using its headers (not the rows).
+    pub fn from_table(other: &SparqlTableVec) -> Self {
         Self {
             headers: other.headers.clone(),
-            rows: FileVec::new(),
+            rows: Vec::new(),
             main_variable: other.main_variable.clone(),
         }
     }
@@ -131,7 +130,7 @@ mod tests {
 
     #[test]
     fn test_push() {
-        let mut table = SparqlTable::new();
+        let mut table = SparqlTableVec::new();
         table.push(vec![Some(SparqlValue::Literal("a".to_string()))]);
         table.push(vec![Some(SparqlValue::Literal("b".to_string()))]);
         table.push(vec![Some(SparqlValue::Literal("c".to_string()))]);
@@ -152,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_get_var_index() {
-        let mut table = SparqlTable::new();
+        let mut table = SparqlTableVec::new();
         table.headers.push("a".to_string());
         table.headers.push("b".to_string());
         assert_eq!(table.get_var_index("a"), Some(0));
@@ -162,7 +161,7 @@ mod tests {
 
     #[test]
     fn test_main_column() {
-        let mut table = SparqlTable::new();
+        let mut table = SparqlTableVec::new();
         table.headers.push("a".to_string());
         table.headers.push("b".to_string());
         table.set_main_variable(Some("b".to_string()));
@@ -171,12 +170,12 @@ mod tests {
 
     #[test]
     fn test_from_table() {
-        let mut original = SparqlTable::new();
+        let mut original = SparqlTableVec::new();
         original.set_headers(vec!["x".to_string(), "y".to_string()]);
         original.set_main_variable(Some("x".to_string()));
         original.push(vec![Some(SparqlValue::Literal("a".to_string()))]);
 
-        let new_table = SparqlTable::from_table(&original);
+        let new_table = SparqlTableVec::from_table(&original);
         assert_eq!(new_table.headers, original.headers);
         assert_eq!(new_table.main_variable, original.main_variable);
         assert_eq!(new_table.len(), 0); // Should not copy rows
@@ -184,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_get_row_col() {
-        let mut table = SparqlTable::new();
+        let mut table = SparqlTableVec::new();
         table.push(vec![
             Some(SparqlValue::Literal("a".to_string())),
             Some(SparqlValue::Literal("b".to_string())),
@@ -210,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_get_var_index_case_insensitive() {
-        let mut table = SparqlTable::new();
+        let mut table = SparqlTableVec::new();
         table.headers.push("MyVar".to_string());
         assert_eq!(table.get_var_index("myvar"), Some(0));
         assert_eq!(table.get_var_index("MYVAR"), Some(0));
@@ -219,13 +218,13 @@ mod tests {
 
     #[test]
     fn test_main_column_not_set() {
-        let table = SparqlTable::new();
+        let table = SparqlTableVec::new();
         assert_eq!(table.main_column(), None);
     }
 
     #[test]
     fn test_main_variable() {
-        let mut table = SparqlTable::new();
+        let mut table = SparqlTableVec::new();
         assert_eq!(table.main_variable(), None);
         table.set_main_variable(Some("test".to_string()));
         assert_eq!(table.main_variable(), Some(&"test".to_string()));
@@ -233,7 +232,7 @@ mod tests {
 
     #[test]
     fn test_is_empty() {
-        let mut table = SparqlTable::new();
+        let mut table = SparqlTableVec::new();
         assert!(table.is_empty());
         table.push(vec![Some(SparqlValue::Literal("test".to_string()))]);
         assert!(!table.is_empty());

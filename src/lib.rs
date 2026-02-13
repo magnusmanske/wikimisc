@@ -16,6 +16,7 @@ pub mod seppuku;
 pub mod site_matrix;
 pub mod sparql_results;
 pub mod sparql_table;
+pub mod sparql_table_vec;
 pub mod sparql_value;
 pub mod timestamp;
 pub mod toolforge_app;

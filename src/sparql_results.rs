@@ -5,6 +5,7 @@ use crate::sparql_value::SparqlValue;
 
 pub type SparqlResultRow = HashMap<String, SparqlValue>;
 pub type SparqlResultRows = Vec<SparqlResultRow>;
+pub type SparqlRow = Vec<Option<SparqlValue>>;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct SparqlApiResults {
