@@ -13,7 +13,6 @@ readme = "README.md"
 anyhow = "*"
 chrono = "*"
 csv = "*"
-lazy_static = "1"
 mysql_async = "*"
 reqwest = { version = "*", features = ["json"] }
 regex = "1"

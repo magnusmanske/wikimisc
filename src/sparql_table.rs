@@ -1,6 +1,7 @@
 use crate::{
     file_vec::FileVec,
     sparql_results::{SparqlApiResult, SparqlRow},
+    sparql_table_trait::SparqlTableTrait,
     sparql_value::SparqlValue,
 };
 use anyhow::{anyhow, Result};
@@ -122,6 +123,44 @@ impl SparqlTable {
             table.push_sparql_result_row(row)?;
         }
         Ok(table)
+    }
+}
+
+impl SparqlTableTrait for SparqlTable {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn get_row_col(&self, row_id: usize, col_id: usize) -> Option<SparqlValue> {
+        self.get_row_col(row_id, col_id)
+    }
+
+    fn get_var_index(&self, var: &str) -> Option<usize> {
+        self.get_var_index(var)
+    }
+
+    fn push(&mut self, row: SparqlRow) {
+        self.push(row);
+    }
+
+    fn get(&self, row_id: usize) -> Option<SparqlRow> {
+        self.get(row_id)
+    }
+
+    fn main_variable(&self) -> Option<&String> {
+        self.main_variable()
+    }
+
+    fn set_main_variable(&mut self, main_variable: Option<String>) {
+        self.set_main_variable(main_variable);
+    }
+
+    fn main_column(&self) -> Option<usize> {
+        self.main_column()
+    }
+
+    fn set_headers(&mut self, headers: Vec<String>) {
+        self.set_headers(headers);
     }
 }
 

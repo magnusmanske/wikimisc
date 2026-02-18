@@ -1,11 +1,13 @@
+use std::sync::LazyLock;
+
+static IS_ON_TOOLFORGE: LazyLock<bool> =
+    LazyLock::new(|| std::path::Path::new("/etc/wmcs-project").exists());
+
 pub struct ToolforgeApp {}
 
 impl ToolforgeApp {
     pub fn is_on_toolforge() -> bool {
-        lazy_static! {
-            static ref IS_ON_TOOLFORGE: bool = std::path::Path::new("/etc/wmcs-project").exists();
-        }
-        IS_ON_TOOLFORGE.to_owned()
+        *IS_ON_TOOLFORGE
     }
 }
 

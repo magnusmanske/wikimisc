@@ -4,6 +4,22 @@ use regex::Regex;
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use serde::Deserializer;
 use serde_json::Value;
+use std::sync::LazyLock;
+
+static RE_ENTITY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^https{0,1}://[^/]+/entity/([A-Z]\d+)$"#).expect("RE_ENTITY does not parse")
+});
+static RE_FILE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^https{0,1}://[^/]+/wiki/Special:FilePath/(.+?)$"#)
+        .expect("RE_FILE does not parse")
+});
+static RE_POINT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^Point\((-{0,1}\d+[\.0-9]*) (-{0,1}\d+[\.0-9]*)\)$"#)
+        .expect("RE_POINT does not parse")
+});
+static RE_DATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^([+-]{0,1}\d+-\d{2}-\d{2})T00:00:00Z$"#).expect("RE_DATE does not parse")
+});
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SparqlValue {
@@ -17,18 +33,6 @@ pub enum SparqlValue {
 
 impl SparqlValue {
     pub fn new_from_json(j: &Value) -> Option<Self> {
-        lazy_static! {
-            static ref RE_ENTITY: Regex = Regex::new(r#"^https{0,1}://[^/]+/entity/([A-Z]\d+)$"#)
-                .expect("RE_ENTITY does not parse");
-            static ref RE_FILE: Regex =
-                Regex::new(r#"^https{0,1}://[^/]+/wiki/Special:FilePath/(.+?)$"#)
-                    .expect("RE_FILE does not parse");
-            static ref RE_POINT: Regex =
-                Regex::new(r#"^Point\((-{0,1}\d+[\.0-9]*) (-{0,1}\d+[\.0-9]*)\)$"#)
-                    .expect("RE_POINT does not parse");
-            static ref RE_DATE: Regex = Regex::new(r#"^([+-]{0,1}\d+-\d{2}-\d{2})T00:00:00Z$"#)
-                .expect("RE_DATE does not parse");
-        }
         let value = j["value"].as_str()?;
         match j["type"].as_str() {
             Some("uri") => match RE_ENTITY.captures(value) {

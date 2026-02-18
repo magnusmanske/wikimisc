@@ -7,13 +7,12 @@ use crate::merge_diff::MergeDiff;
 use regex::Regex;
 use serde_json::json;
 use std::cmp::Ordering;
+use std::sync::LazyLock;
 use std::vec::Vec;
 use wikibase::*;
 
-lazy_static! {
-    static ref YEAR_FIX: Regex = Regex::new(r"-\d\d-\d\dT").unwrap();
-    static ref MONTH_FIX: Regex = Regex::new(r"-\d\dT").unwrap();
-}
+static YEAR_FIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-\d\d-\d\dT").unwrap());
+static MONTH_FIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-\d\dT").unwrap());
 
 #[derive(Debug, Clone)]
 pub struct ItemMerger {
@@ -199,10 +198,16 @@ impl ItemMerger {
             .collect()
     }
 
-    /// Checks if a reference already exists in a list of references.
-    /// Uses the presence of any external ID or reference URL from the new reference.
-    /// If the reference contains neither, falls back to full structural snak comparison.
-    /// Returns `true` if the reference exists, `false` otherwise.
+    /// Checks whether a reference is considered a duplicate of any reference in `existing_references`.
+    ///
+    /// Matching strategy (in priority order):
+    /// 1. If the new reference contains any external IDs (e.g. P214), it is considered a
+    ///    duplicate if *any* existing reference shares at least one of those external IDs.
+    /// 2. Otherwise if it contains reference URLs (P854), same rule applies.
+    /// 3. If it has neither, a full structural comparison of all snaks is used.
+    ///
+    /// Note: strategies 1 and 2 are intentionally loose — a partial ID match is enough to
+    /// consider the reference already covered, avoiding duplicate sourcing from the same source.
     fn reference_exists(existing_references: &[Reference], new_reference: &Reference) -> bool {
         let ext_ids = Self::get_external_ids_from_reference(new_reference);
         let reference_urls = Self::get_reference_urls_from_reference(new_reference);
@@ -251,10 +256,10 @@ impl ItemMerger {
 
     pub fn is_time_value_identical(t1: &TimeValue, t2: &TimeValue) -> bool {
         if t1.precision() != t2.precision()
-            || t1.calendarmodel() != t1.calendarmodel()
-            || t1.before() != t1.before()
-            || t1.after() != t1.after()
-            || t1.timezone() != t1.timezone()
+            || t1.calendarmodel() != t2.calendarmodel()
+            || t1.before() != t2.before()
+            || t1.after() != t2.after()
+            || t1.timezone() != t2.timezone()
         {
             return false;
         }
@@ -440,6 +445,80 @@ mod tests {
     }
 
     #[test]
+    fn test_is_time_value_identical_different_calendarmodel() {
+        let t1 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            11,
+            "+1900-01-01T00:00:00Z",
+            0,
+        );
+        let t2 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985786", // Julian calendar
+            11,
+            "+1900-01-01T00:00:00Z",
+            0,
+        );
+        assert!(!ItemMerger::is_time_value_identical(&t1, &t2));
+    }
+
+    #[test]
+    fn test_is_time_value_identical_different_timezone() {
+        let t1 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            11,
+            "+1900-01-01T00:00:00Z",
+            0,
+        );
+        let t2 = TimeValue::new(
+            60, // UTC+1
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            11,
+            "+1900-01-01T00:00:00Z",
+            0,
+        );
+        assert!(!ItemMerger::is_time_value_identical(&t1, &t2));
+    }
+
+    #[test]
+    fn test_is_time_value_identical_different_before_after() {
+        let t1 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            11,
+            "+1900-01-01T00:00:00Z",
+            0,
+        );
+        // Different 'before' offset
+        let t2 = TimeValue::new(
+            0,
+            1,
+            "http://www.wikidata.org/entity/Q1985727",
+            11,
+            "+1900-01-01T00:00:00Z",
+            0,
+        );
+        assert!(!ItemMerger::is_time_value_identical(&t1, &t2));
+        // Different 'after' offset
+        let t3 = TimeValue::new(
+            0,
+            0,
+            "http://www.wikidata.org/entity/Q1985727",
+            11,
+            "+1900-01-01T00:00:00Z",
+            1,
+        );
+        assert!(!ItemMerger::is_time_value_identical(&t1, &t3));
+    }
+
+    #[test]
     fn test_is_time_value_identical_precision_9() {
         let t1 = TimeValue::new(
             0,
@@ -547,6 +626,18 @@ mod tests {
         let reference = Reference::new(vec![Snak::new_external_id("P214", "12345")]);
         let empty_refs: Vec<Reference> = vec![];
         assert!(!ItemMerger::reference_exists(&empty_refs, &reference));
+    }
+
+    #[test]
+    fn test_reference_exists_partial_ext_id_match_counts_as_duplicate() {
+        // A new reference sharing even one external ID with an existing reference
+        // is considered a duplicate, even if the new reference has additional snaks.
+        let existing = vec![Reference::new(vec![Snak::new_external_id("P214", "123")])];
+        let new_ref = Reference::new(vec![
+            Snak::new_external_id("P214", "123"), // shared
+            Snak::new_external_id("P227", "456"), // extra
+        ]);
+        assert!(ItemMerger::reference_exists(&existing, &new_ref));
     }
 
     #[test]

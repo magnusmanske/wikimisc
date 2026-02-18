@@ -5,13 +5,13 @@ use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::LazyLock;
 use wikibase::*;
 
-lazy_static! {
-    static ref RE_PROPERTY_NUMERIC: Regex =
-        Regex::new(r#"^\s*[Pp](\d+)\s*$"#).expect("Regexp error");
-    static ref RE_FROM_STRING: Regex = Regex::new(r#"^[Pp](\d+):(.+)$"#).expect("Regexp error");
-}
+static RE_PROPERTY_NUMERIC: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\s*[Pp](\d+)\s*$"#).expect("Regexp error"));
+static RE_FROM_STRING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^[Pp](\d+):(.+)$"#).expect("Regexp error"));
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Default)]
 pub struct ExternalId {

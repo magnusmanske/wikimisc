@@ -1,16 +1,10 @@
 //! This module contains the MergeDiff struct, which is used by the ItemMerger to generate the differences between two items.
 
-use regex::Regex;
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use serde_json::json;
 use std::collections::HashMap;
 use std::vec::Vec;
 use wikibase::*;
-
-lazy_static! {
-    static ref YEAR_FIX: Regex = Regex::new(r"-\d\d-\d\dT").unwrap();
-    static ref MONTH_FIX: Regex = Regex::new(r"-\d\dT").unwrap();
-}
 
 /// This contains the wbeditentiry payload to ADD data to a base item, generated from a merge
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -145,8 +139,6 @@ impl MergeDiff {
                             }
                         }
                     }
-                } else if let Some(obj) = c.as_object_mut() {
-                    obj.remove("references");
                 }
                 c
             })
@@ -313,6 +305,55 @@ mod tests {
         diff.add_statement(statement.clone());
         assert_eq!(diff.altered_statements.len(), 0);
         assert_eq!(diff.added_statements.len(), 1);
+    }
+
+    #[test]
+    fn test_serialize_claims_no_references_not_removed() {
+        // A statement with no references must serialize without a "references" key —
+        // the old else-if branch would remove it even when it was already absent.
+        let mut diff = MergeDiff::new();
+        diff.added_statements.push(Statement::new_normal(
+            Snak::new_string("P1476", "hello"),
+            vec![],
+            vec![], // no references
+        ));
+        let serialized = serde_json::to_value(&diff).unwrap();
+        let claims = serialized["claims"].as_array().unwrap();
+        assert_eq!(claims.len(), 1);
+        // "references" key must either be absent or be an empty array — never null or garbage
+        let refs = &claims[0]["references"];
+        assert!(
+            refs.is_null() || refs.as_array().map(|a| a.is_empty()).unwrap_or(false),
+            "Expected absent or empty references, got: {refs}"
+        );
+    }
+
+    #[test]
+    fn test_serialize_claims_references_snaks_cleaned() {
+        // References that do exist must have their snak datatype fields removed.
+        let mut diff = MergeDiff::new();
+        diff.added_statements.push(Statement::new_normal(
+            Snak::new_string("P1476", "hello"),
+            vec![],
+            vec![Reference::new(vec![Snak::new_url(
+                "P854",
+                "http://example.com",
+            )])],
+        ));
+        let serialized = serde_json::to_value(&diff).unwrap();
+        let claims = serialized["claims"].as_array().unwrap();
+        let refs = claims[0]["references"].as_array().unwrap();
+        assert_eq!(refs.len(), 1);
+        // Each snak inside the reference must not have a "datatype" field
+        let snaks_map = refs[0]["snaks"].as_object().unwrap();
+        for snaks in snaks_map.values() {
+            for snak in snaks.as_array().unwrap() {
+                assert!(
+                    snak.get("datatype").is_none(),
+                    "datatype should be cleaned from reference snaks"
+                );
+            }
+        }
     }
 
     #[test]
