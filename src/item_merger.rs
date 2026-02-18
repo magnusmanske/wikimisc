@@ -201,6 +201,7 @@ impl ItemMerger {
 
     /// Checks if a reference already exists in a list of references.
     /// Uses the presence of any external ID or reference URL from the new reference.
+    /// If the reference contains neither, falls back to full structural snak comparison.
     /// Returns `true` if the reference exists, `false` otherwise.
     fn reference_exists(existing_references: &[Reference], new_reference: &Reference) -> bool {
         let ext_ids = Self::get_external_ids_from_reference(new_reference);
@@ -220,7 +221,18 @@ impl ItemMerger {
                 .flat_map(Self::get_reference_urls_from_reference)
                 .any(|reference_url| reference_urls.contains(&reference_url));
 
-        has_external_ids || has_reference_urls
+        if has_external_ids || has_reference_urls {
+            return true;
+        }
+
+        // Fallback: if the reference has no external IDs or URLs, compare all snaks structurally
+        if ext_ids.is_empty() && reference_urls.is_empty() {
+            return existing_references.iter().any(|existing| {
+                Self::are_qualifiers_identical(existing.snaks(), new_reference.snaks())
+            });
+        }
+
+        false
     }
 
     pub fn is_snak_identical(snak1: &Snak, snak2: &Snak) -> bool {
@@ -543,5 +555,110 @@ mod tests {
         let reference = Reference::new(vec![Snak::new_string("P123", "test")]);
         let existing = vec![Reference::new(vec![Snak::new_string("P456", "other")])];
         assert!(!ItemMerger::reference_exists(&existing, &reference));
+    }
+
+    /// Regression test for https://github.com/magnusmanske/auth2wd/issues/7
+    /// Statements with the same datavalue and qualifiers but different references should be merged
+    /// into a single statement, with references consolidated (no duplicates).
+    #[test]
+    fn test_merge_same_value_same_qualifiers_different_references() {
+        // Base item has a statement with reference R1
+        let mut base_item = ItemEntity::new_empty();
+        let ref1 = Reference::new(vec![Snak::new_url("P854", "http://source1.example.com")]);
+        let mut stmt1 =
+            Statement::new_normal(Snak::new_string("P1476", "some title"), vec![], vec![ref1]);
+        stmt1.set_id("Q1$base-stmt");
+        base_item.add_claim(stmt1);
+
+        // New item has the same statement (same value, same qualifiers) with reference R2
+        let mut new_item = ItemEntity::new_empty();
+        let ref2 = Reference::new(vec![Snak::new_url("P854", "http://source2.example.com")]);
+        new_item.add_claim(Statement::new_normal(
+            Snak::new_string("P1476", "some title"),
+            vec![],
+            vec![ref2],
+        ));
+
+        let mut im = ItemMerger::new(base_item);
+        let _diff = im.merge(&new_item);
+
+        // Should still be only ONE statement (not two)
+        assert_eq!(
+            im.item.claims().len(),
+            1,
+            "Should have exactly one statement after merging identical statements"
+        );
+
+        // That one statement should have BOTH references
+        let merged_stmt = &im.item.claims()[0];
+        assert_eq!(
+            merged_stmt.references().len(),
+            2,
+            "Merged statement should have 2 references (one from each source)"
+        );
+    }
+
+    /// Regression test: identical references should not be duplicated when merging
+    #[test]
+    fn test_merge_same_value_same_qualifiers_same_references_no_duplicates() {
+        // Base item has a statement with reference R1
+        let mut base_item = ItemEntity::new_empty();
+        let ref1 = Reference::new(vec![Snak::new_url("P854", "http://source1.example.com")]);
+        let mut stmt1 = Statement::new_normal(
+            Snak::new_string("P1476", "some title"),
+            vec![],
+            vec![ref1.clone()],
+        );
+        stmt1.set_id("Q1$base-stmt");
+        base_item.add_claim(stmt1);
+
+        // New item has the same statement with the SAME reference
+        let mut new_item = ItemEntity::new_empty();
+        new_item.add_claim(Statement::new_normal(
+            Snak::new_string("P1476", "some title"),
+            vec![],
+            vec![ref1],
+        ));
+
+        let mut im = ItemMerger::new(base_item);
+        let _diff = im.merge(&new_item);
+
+        // Should still be only ONE statement
+        assert_eq!(im.item.claims().len(), 1);
+        // Reference should not be duplicated
+        assert_eq!(im.item.claims()[0].references().len(), 1);
+    }
+
+    /// Regression test: plain-snak references (no ext ID, no URL) should be deduplicated correctly
+    #[test]
+    fn test_merge_plain_snak_references_no_duplicates() {
+        let mut base_item = ItemEntity::new_empty();
+        let ref1 = Reference::new(vec![Snak::new_string("P813", "2024-01-01")]);
+        let mut stmt1 = Statement::new_normal(
+            Snak::new_string("P31", "some value"),
+            vec![],
+            vec![ref1.clone()],
+        );
+        stmt1.set_id("Q1$base-stmt2");
+        base_item.add_claim(stmt1);
+
+        // New item has the same statement with the SAME plain-snak reference
+        let mut new_item = ItemEntity::new_empty();
+        new_item.add_claim(Statement::new_normal(
+            Snak::new_string("P31", "some value"),
+            vec![],
+            vec![ref1],
+        ));
+
+        let mut im = ItemMerger::new(base_item);
+        let _diff = im.merge(&new_item);
+
+        // Should be ONE statement, and the reference should NOT be duplicated
+        assert_eq!(im.item.claims().len(), 1);
+        assert_eq!(
+            im.item.claims()[0].references().len(),
+            1,
+            "Identical plain-snak reference should not be duplicated"
+        );
     }
 }
