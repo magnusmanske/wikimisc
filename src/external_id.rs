@@ -259,6 +259,128 @@ mod tests {
         assert_eq!(None, ExternalId::from_external_id_claim(&statement));
     }
 
+    #[test]
+    fn test_from_string_invalid_formats() {
+        assert!(ExternalId::from_string("notavalidid").is_none());
+        assert!(ExternalId::from_string("").is_none());
+        assert!(ExternalId::from_string("P123").is_none()); // missing colon and value
+        assert!(ExternalId::from_string(":value").is_none()); // missing property number
+        assert!(ExternalId::from_string("P:value").is_none()); // P without digits
+    }
+
+    #[test]
+    fn test_from_string_preserves_id_case_and_chars() {
+        let ext_id = ExternalId::from_string("P999:abc-DEF_123").unwrap();
+        assert_eq!(ext_id.property(), 999);
+        assert_eq!(ext_id.id(), "abc-DEF_123");
+    }
+
+    #[test]
+    fn test_prop_numeric_lowercase() {
+        assert_eq!(ExternalId::prop_numeric("p42"), Some(42));
+        assert_eq!(ExternalId::prop_numeric("P42"), Some(42));
+    }
+
+    #[test]
+    fn test_prop_numeric_with_surrounding_whitespace() {
+        assert_eq!(ExternalId::prop_numeric(" P10 "), Some(10));
+    }
+
+    #[test]
+    fn test_prop_numeric_zero_and_large() {
+        assert_eq!(ExternalId::prop_numeric("P0"), Some(0));
+        assert_eq!(ExternalId::prop_numeric("P999999"), Some(999_999));
+    }
+
+    #[test]
+    fn test_fix_isni_strips_spaces() {
+        // P213 (ISNI): spaces must be stripped
+        let ext = ExternalId::new(213, "0000 0001 2345 6789");
+        assert_eq!(ext.id(), "0000000123456789");
+        // Other properties must keep spaces (if any)
+        let other = ExternalId::new(214, "1234 5678");
+        assert_eq!(other.id(), "1234 5678");
+    }
+
+    #[test]
+    fn test_display_roundtrip_via_from_string() {
+        let original = ExternalId::new(214, "12345");
+        let s = original.to_string();
+        let roundtripped = ExternalId::from_string(&s).unwrap();
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn test_as_reference_without_date() {
+        let ext = ExternalId::new(214, "12345");
+        let reference = ext.as_reference("Q54919", false);
+        let snaks = reference.snaks();
+
+        // Must have exactly 2 snaks: P248 (stated in) and P214 (external ID)
+        assert_eq!(snaks.len(), 2);
+
+        let stated_in = snaks.iter().find(|s| s.property() == "P248").unwrap();
+        assert_eq!(*stated_in.snak_type(), SnakType::Value);
+
+        let ext_id_snak = snaks.iter().find(|s| s.property() == "P214").unwrap();
+        assert_eq!(*ext_id_snak.datatype(), SnakDataType::ExternalId);
+        if let Some(dv) = ext_id_snak.data_value() {
+            assert_eq!(dv.value(), &Value::StringValue("12345".to_string()));
+        } else {
+            panic!("Expected data value for external-ID snak");
+        }
+    }
+
+    #[test]
+    fn test_as_reference_with_date_has_three_snaks() {
+        let ext = ExternalId::new(214, "12345");
+        let reference = ext.as_reference("Q54919", true);
+        // P248, P214, P813 (retrieval date)
+        assert_eq!(reference.snaks().len(), 3);
+        assert!(reference.snaks().iter().any(|s| s.property() == "P813"));
+    }
+
+    #[test]
+    fn test_as_reference_stated_in_item() {
+        let ext = ExternalId::new(214, "12345");
+        let reference = ext.as_reference("Q54919", false);
+        let p248 = reference
+            .snaks()
+            .iter()
+            .find(|s| s.property() == "P248")
+            .unwrap();
+        if let Some(dv) = p248.data_value() {
+            match dv.value() {
+                Value::Entity(ev) => assert_eq!(ev.id(), "Q54919"),
+                _ => panic!("Expected entity value for P248"),
+            }
+        } else {
+            panic!("Expected data value for P248");
+        }
+    }
+
+    #[test]
+    fn test_from_external_id_claim_p213_normalises_isni() {
+        // When building an ExternalId from a P213 claim, spaces should be stripped.
+        let statement = Statement::new(
+            "statement",
+            StatementRank::Normal,
+            Snak::new(
+                SnakDataType::ExternalId,
+                "P213",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::StringType,
+                    Value::StringValue("0000 0001 2184 9233".to_string()),
+                )),
+            ),
+            vec![],
+            vec![],
+        );
+        let ext = ExternalId::from_external_id_claim(&statement).unwrap();
+        assert_eq!(ext.id(), "0000000121849233");
+    }
+
     #[tokio::test]
     async fn test_get_item_for_external_id() {
         // Test OK

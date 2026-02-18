@@ -629,7 +629,332 @@ mod tests {
         assert_eq!(im.item.claims()[0].references().len(), 1);
     }
 
-    /// Regression test: plain-snak references (no ext ID, no URL) should be deduplicated correctly
+    // ── merge() orchestration edge cases ────────────────────────────────────
+
+    #[test]
+    fn test_merge_empty_into_empty() {
+        let mut im = ItemMerger::new(ItemEntity::new_empty());
+        let diff = im.merge(&ItemEntity::new_empty());
+        assert!(diff.labels.is_empty());
+        assert!(diff.aliases.is_empty());
+        assert!(diff.descriptions.is_empty());
+        assert!(diff.sitelinks.is_empty());
+        assert!(diff.altered_statements.is_empty());
+        assert!(diff.added_statements.is_empty());
+    }
+
+    #[test]
+    fn test_merge_new_labels_added() {
+        let mut base = ItemEntity::new_empty();
+        base.labels_mut().push(LocaleString::new("en", "English"));
+
+        let mut other = ItemEntity::new_empty();
+        other.labels_mut().push(LocaleString::new("de", "Deutsch"));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert_eq!(diff.labels.len(), 1);
+        assert_eq!(diff.labels[0], LocaleString::new("de", "Deutsch"));
+        // Merged into the item
+        assert_eq!(im.item.labels().len(), 2);
+    }
+
+    #[test]
+    fn test_merge_conflicting_label_becomes_alias() {
+        // When the other item has a label for a language that base already has (but different
+        // value), the other's label is added as an alias, not a label.
+        let mut base = ItemEntity::new_empty();
+        base.labels_mut().push(LocaleString::new("en", "Foo"));
+
+        let mut other = ItemEntity::new_empty();
+        other.labels_mut().push(LocaleString::new("en", "Bar"));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        // "Bar" goes into aliases (conflicting label), not labels
+        assert!(
+            diff.labels.is_empty(),
+            "Conflicting label must not appear in diff.labels"
+        );
+        assert!(
+            diff.aliases
+                .iter()
+                .any(|a| a == &LocaleString::new("en", "Bar")),
+            "Conflicting label must appear in diff.aliases"
+        );
+    }
+
+    #[test]
+    fn test_merge_duplicate_label_not_re_added() {
+        let mut base = ItemEntity::new_empty();
+        base.labels_mut().push(LocaleString::new("en", "Same"));
+
+        let mut other = ItemEntity::new_empty();
+        other.labels_mut().push(LocaleString::new("en", "Same"));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert!(diff.labels.is_empty());
+        assert!(diff.aliases.is_empty());
+    }
+
+    #[test]
+    fn test_merge_description_not_added_when_language_exists() {
+        let mut base = ItemEntity::new_empty();
+        base.descriptions_mut()
+            .push(LocaleString::new("en", "original description"));
+
+        let mut other = ItemEntity::new_empty();
+        other
+            .descriptions_mut()
+            .push(LocaleString::new("en", "different description"));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        // Descriptions are only added when the language is absent, never overwritten
+        assert!(diff.descriptions.is_empty());
+    }
+
+    #[test]
+    fn test_merge_new_description_added() {
+        let mut base = ItemEntity::new_empty();
+        base.descriptions_mut()
+            .push(LocaleString::new("en", "English desc"));
+
+        let mut other = ItemEntity::new_empty();
+        other
+            .descriptions_mut()
+            .push(LocaleString::new("fr", "description française"));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert_eq!(diff.descriptions.len(), 1);
+        assert_eq!(
+            diff.descriptions[0],
+            LocaleString::new("fr", "description française")
+        );
+    }
+
+    #[test]
+    fn test_merge_description_not_added_when_equals_existing_label() {
+        // A description equal to an existing label should be silently dropped
+        let mut base = ItemEntity::new_empty();
+        base.labels_mut().push(LocaleString::new("en", "shared"));
+
+        let mut other = ItemEntity::new_empty();
+        other
+            .descriptions_mut()
+            .push(LocaleString::new("de", "shared")); // same value, different language — still a label match
+
+        // Actually the filter checks language+value equality via contains(), so only an exact
+        // LocaleString match is filtered. Test the case where description == label (same lang+val).
+        let mut other2 = ItemEntity::new_empty();
+        other2
+            .descriptions_mut()
+            .push(LocaleString::new("en", "shared"));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other2);
+        assert!(
+            diff.descriptions.is_empty(),
+            "Description that matches an existing label must be dropped"
+        );
+    }
+
+    #[test]
+    fn test_merge_new_claim_added_to_diff() {
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(Statement::new_normal(
+            Snak::new_string("P1", "existing"),
+            vec![],
+            vec![],
+        ));
+
+        let mut other = ItemEntity::new_empty();
+        other.add_claim(Statement::new_normal(
+            Snak::new_string("P2", "new claim"),
+            vec![],
+            vec![],
+        ));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert_eq!(diff.added_statements.len(), 1);
+        assert_eq!(diff.added_statements[0].property(), "P2");
+    }
+
+    #[test]
+    fn test_merge_duplicate_claim_not_readded() {
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(Statement::new_normal(
+            Snak::new_string("P1", "value"),
+            vec![],
+            vec![],
+        ));
+
+        let mut other = ItemEntity::new_empty();
+        other.add_claim(Statement::new_normal(
+            Snak::new_string("P1", "value"),
+            vec![],
+            vec![],
+        ));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert!(diff.added_statements.is_empty());
+        assert!(diff.altered_statements.is_empty());
+        assert_eq!(im.item.claims().len(), 1);
+    }
+
+    #[test]
+    fn test_merge_mul_label_filters_new_labels() {
+        // If the base item has a "mul" (multilingual) label, new labels with the same value
+        // should not be added.
+        let mut base = ItemEntity::new_empty();
+        base.labels_mut().push(LocaleString::new("mul", "UniLabel"));
+
+        let mut other = ItemEntity::new_empty();
+        other.labels_mut().push(LocaleString::new("en", "UniLabel")); // same value as mul
+        other
+            .labels_mut()
+            .push(LocaleString::new("fr", "Different")); // different value
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        // "UniLabel" must be filtered out (matches mul label), "Different" must be added
+        assert!(
+            diff.labels.iter().all(|l| l.value() != "UniLabel"),
+            "Label matching mul value must not be added"
+        );
+        assert!(
+            diff.labels.iter().any(|l| l.value() == "Different"),
+            "Non-matching label must still be added"
+        );
+    }
+
+    // ── check_new_claim_for_dates ──────────────────────────────────────────
+
+    fn make_date_claim(prop: &str, time: &str, precision: u64) -> Statement {
+        Statement::new_normal(
+            Snak::new(
+                SnakDataType::Time,
+                prop,
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::Time,
+                    Value::Time(TimeValue::new(
+                        0,
+                        0,
+                        "http://www.wikidata.org/entity/Q1985727",
+                        precision,
+                        time,
+                        0,
+                    )),
+                )),
+            ),
+            vec![],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn test_check_new_claim_for_dates_non_date_prop_unchanged() {
+        let base = ItemEntity::new_empty();
+        let im = ItemMerger::new(base);
+
+        let mut claim = make_date_claim("P31", "+1900-00-00T00:00:00Z", 9);
+        im.check_new_claim_for_dates(&mut claim);
+        // P31 is not P569/P570, rank must remain Normal
+        assert_eq!(*claim.rank(), StatementRank::Normal);
+    }
+
+    #[test]
+    fn test_check_new_claim_for_dates_lower_precision_deprecated() {
+        // Base already has P569 at precision 11 (day). A new P569 at precision 9 (year)
+        // must be marked deprecated.
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(make_date_claim("P569", "+1900-05-10T00:00:00Z", 11));
+
+        let im = ItemMerger::new(base);
+        let mut new_claim = make_date_claim("P569", "+1900-00-00T00:00:00Z", 9);
+        im.check_new_claim_for_dates(&mut new_claim);
+        assert_eq!(*new_claim.rank(), StatementRank::Deprecated);
+    }
+
+    #[test]
+    fn test_check_new_claim_for_dates_higher_precision_not_deprecated() {
+        // Base has P570 at precision 9, new one at precision 11 — keep Normal.
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(make_date_claim("P570", "+1900-00-00T00:00:00Z", 9));
+
+        let im = ItemMerger::new(base);
+        let mut new_claim = make_date_claim("P570", "+1900-05-10T00:00:00Z", 11);
+        im.check_new_claim_for_dates(&mut new_claim);
+        assert_eq!(*new_claim.rank(), StatementRank::Normal);
+    }
+
+    #[test]
+    fn test_check_new_claim_for_dates_equal_precision_not_deprecated() {
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(make_date_claim("P569", "+1900-00-00T00:00:00Z", 9));
+
+        let im = ItemMerger::new(base);
+        let mut new_claim = make_date_claim("P569", "+1901-00-00T00:00:00Z", 9);
+        im.check_new_claim_for_dates(&mut new_claim);
+        assert_eq!(*new_claim.rank(), StatementRank::Normal);
+    }
+
+    #[test]
+    fn test_check_new_claim_for_dates_no_existing_claim() {
+        // No existing P569 → precision comparison gives 0 → new claim is never deprecated.
+        let base = ItemEntity::new_empty();
+        let im = ItemMerger::new(base);
+        let mut new_claim = make_date_claim("P569", "+1900-00-00T00:00:00Z", 9);
+        im.check_new_claim_for_dates(&mut new_claim);
+        assert_eq!(*new_claim.rank(), StatementRank::Normal);
+    }
+
+    // ── add_claim with external IDs ────────────────────────────────────────
+
+    #[test]
+    fn test_add_claim_external_id_not_duplicated() {
+        // External-ID claims that already exist must not have references added —
+        // the function returns None and the item count stays at 1.
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(Statement::new_normal(
+            Snak::new_external_id("P214", "123456"),
+            vec![],
+            vec![],
+        ));
+
+        let new_claim = Statement::new_normal(
+            Snak::new_external_id("P214", "123456"),
+            vec![],
+            vec![Reference::new(vec![Snak::new_url(
+                "P854",
+                "http://viaf.org",
+            )])],
+        );
+
+        let mut im = ItemMerger::new(base);
+        let result = im.add_claim(new_claim);
+        assert!(
+            result.is_none(),
+            "Existing external-ID claim must not be altered"
+        );
+        assert_eq!(im.item.claims().len(), 1);
+        assert!(im.item.claims()[0].references().is_empty());
+    }
+
+    // ── Regression test: plain-snak references (no ext ID, no URL) should be deduplicated correctly
     #[test]
     fn test_merge_plain_snak_references_no_duplicates() {
         let mut base_item = ItemEntity::new_empty();

@@ -191,6 +191,7 @@ impl Wikidata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wikibase::*;
 
     #[tokio::test]
     async fn test_load_sparql_csv() {
@@ -204,5 +205,260 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn test_item2qs_rejects_item_with_id() {
+        let mut item = ItemEntity::new_empty();
+        item.set_id("Q123".to_string());
+        assert!(Wikidata::item2qs(&item).is_err());
+    }
+
+    #[test]
+    fn test_item2qs_empty_item() {
+        let item = ItemEntity::new_empty();
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert_eq!(qs, vec!["CREATE"]);
+    }
+
+    #[test]
+    fn test_item2qs_labels_descriptions_aliases() {
+        let mut item = ItemEntity::new_empty();
+        item.labels_mut().push(LocaleString::new("en", "Test item"));
+        item.labels_mut()
+            .push(LocaleString::new("de", "Testelement"));
+        item.descriptions_mut()
+            .push(LocaleString::new("en", "a test"));
+        item.aliases_mut().push(LocaleString::new("en", "alias1"));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert!(qs.contains(&"CREATE".to_string()));
+        assert!(qs.contains(&"LAST\tLen\t\"Test item\"".to_string()));
+        assert!(qs.contains(&"LAST\tLde\t\"Testelement\"".to_string()));
+        assert!(qs.contains(&"LAST\tDen\t\"a test\"".to_string()));
+        assert!(qs.contains(&"LAST\tAen\t\"alias1\"".to_string()));
+    }
+
+    #[test]
+    fn test_item2qs_sitelinks() {
+        let mut item = ItemEntity::new_empty();
+        item.sitelinks_mut()
+            .get_or_insert_with(Vec::new)
+            .push(SiteLink::new("enwiki", "Test item", vec![]));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert!(qs.contains(&"LAST\tSenwiki\t\"Test item\"".to_string()));
+    }
+
+    #[test]
+    fn test_item2qs_string_statement_no_qualifiers_no_refs() {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new_string("P1476", "hello world"),
+            vec![],
+            vec![],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert!(qs.contains(&"LAST\tP1476\t\"hello world\"".to_string()));
+    }
+
+    #[test]
+    fn test_item2qs_item_statement() {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new_item("P31", "Q5"),
+            vec![],
+            vec![],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert!(qs.contains(&"LAST\tP31\t\"Q5\"".to_string()));
+    }
+
+    #[test]
+    fn test_item2qs_statement_with_qualifier() {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new_string("P1476", "hello"),
+            vec![Snak::new_item("P407", "Q1860")],
+            vec![],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        // Should have property, value, qualifier property, qualifier value
+        assert!(qs
+            .iter()
+            .any(|s| s.contains("P1476") && s.contains("P407") && s.contains("Q1860")));
+    }
+
+    #[test]
+    fn test_item2qs_statement_with_reference() {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new_string("P1476", "hello"),
+            vec![],
+            vec![Reference::new(vec![Snak::new_url(
+                "P854",
+                "http://example.com",
+            )])],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        // Reference property becomes S854, prefixed with ! to start new ref section
+        assert!(qs
+            .iter()
+            .any(|s| s.contains("!S854") && s.contains("http://example.com")));
+    }
+
+    #[test]
+    fn test_item2qs_statement_with_multiple_references() {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new_string("P1476", "hello"),
+            vec![],
+            vec![
+                Reference::new(vec![Snak::new_url("P854", "http://first.com")]),
+                Reference::new(vec![Snak::new_url("P854", "http://second.com")]),
+            ],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        let line = qs.iter().find(|s| s.starts_with("LAST\tP1476")).unwrap();
+        // Both references start with !S854
+        assert_eq!(line.matches("!S854").count(), 2);
+    }
+
+    #[test]
+    fn test_item2qs_skips_novalue_snak() {
+        let mut item = ItemEntity::new_empty();
+        // A novalue snak — snak2qs should return None, so this claim is skipped
+        item.add_claim(Statement::new_normal(
+            Snak::new(SnakDataType::WikibaseItem, "P31", SnakType::NoValue, None),
+            vec![],
+            vec![],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        // Only "CREATE" — the novalue statement must be skipped
+        assert!(!qs.iter().any(|s| s.contains("P31")));
+    }
+
+    #[test]
+    fn test_item2qs_quantity() {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new(
+                SnakDataType::Quantity,
+                "P1082",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::Quantity,
+                    Value::Quantity(QuantityValue::new(42.0, None, "+42", None)),
+                )),
+            ),
+            vec![],
+            vec![],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert!(qs.iter().any(|s| s.contains("P1082") && s.contains("42")));
+    }
+
+    #[test]
+    fn test_item2qs_monolingual() {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new(
+                SnakDataType::MonolingualText,
+                "P1705",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::MonoLingualText,
+                    Value::MonoLingual(MonoLingualText::new("Original title", "en")),
+                )),
+            ),
+            vec![],
+            vec![],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert!(qs
+            .iter()
+            .any(|s| s.contains("P1705") && s.contains("en:\"Original title\"")));
+    }
+
+    #[test]
+    fn test_item2qs_coordinate() {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new(
+                SnakDataType::GlobeCoordinate,
+                "P625",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::GlobeCoordinate,
+                    Value::Coordinate(Coordinate::new(
+                        None,
+                        "http://www.wikidata.org/entity/Q2".to_string(),
+                        51.5,
+                        -0.1,
+                        None,
+                    )),
+                )),
+            ),
+            vec![],
+            vec![],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert!(qs
+            .iter()
+            .any(|s| s.contains("P625") && s.contains("@51.5/-0.1")));
+    }
+
+    #[test]
+    fn test_item2qs_time_value() {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new(
+                SnakDataType::Time,
+                "P569",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::Time,
+                    Value::Time(TimeValue::new(
+                        0,
+                        0,
+                        "http://www.wikidata.org/entity/Q1985727",
+                        11,
+                        "+1990-05-17T00:00:00Z",
+                        0,
+                    )),
+                )),
+            ),
+            vec![],
+            vec![],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert!(qs
+            .iter()
+            .any(|s| s.contains("P569") && s.contains("+1990-05-17T00:00:00Z/11")));
+    }
+
+    #[test]
+    fn test_set_user_agent() {
+        let mut wd = Wikidata::new();
+        wd.set_user_agent("my-agent/1.0");
+        // Verify it builds without error (can't easily inspect the built client's UA)
+        assert!(wd.reqwest_client().is_ok());
+    }
+
+    #[test]
+    fn test_set_timeout() {
+        let mut wd = Wikidata::new();
+        wd.set_timeout(std::time::Duration::from_secs(30));
+        assert!(wd.reqwest_client().is_ok());
     }
 }

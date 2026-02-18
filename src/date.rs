@@ -246,4 +246,82 @@ mod tests {
         assert!(Date::from_str("").is_err());
         assert!(Date::from_str("abc-def-ghi").is_err());
     }
+
+    #[test]
+    fn test_year_boundary_2024_accepted() {
+        // 2024 is before the cutoff of 2025, so it must be accepted
+        let d = Date::from_str("2024").unwrap();
+        assert_eq!(d.time(), "+2024-00-00T00:00:00Z");
+        assert_eq!(d.precision(), 9);
+    }
+
+    #[test]
+    fn test_year_boundary_2024_full_date_accepted() {
+        let d = Date::from_str("2024-06-15").unwrap();
+        assert_eq!(d.time(), "+2024-06-15T00:00:00Z");
+        assert_eq!(d.precision(), 11);
+    }
+
+    #[test]
+    fn test_bce_year_not_supported() {
+        // The regex patterns always prepend '+' to the captured year group, so
+        // negative-year inputs produce a malformed time string that fails i16 parsing.
+        // BCE years are not supported by Date::from_str.
+        assert!(Date::from_str("-0500-01-01T00:00:00Z/11").is_err());
+        assert!(Date::from_str("-1000-01-01T00:00:00Z/9").is_err());
+    }
+
+    #[test]
+    fn test_positive_signed_year_via_wikibase_format() {
+        // The wikibase /11 format with an explicit '+' prefix: the regex captures
+        // '+1776' as group 1, and the replacement prepends another '+', yielding
+        // '++1776-...' which fails i16 parsing. Only bare (unsigned) years work here.
+        assert!(Date::from_str("+1776-07-04T00:00:00Z/11").is_err());
+        // The unsuffixed form (bare digits) is what works for positive years.
+        let d = Date::from_str("1776-07-04").unwrap();
+        assert_eq!(d.time(), "+1776-07-04T00:00:00Z");
+    }
+
+    #[test]
+    fn test_three_digit_year() {
+        let d = Date::from_str("800").unwrap();
+        assert_eq!(d.time(), "+800-00-00T00:00:00Z");
+        assert_eq!(d.precision(), 9);
+    }
+
+    #[test]
+    fn test_three_digit_year_with_month() {
+        let d = Date::from_str("800-03").unwrap();
+        assert_eq!(d.time(), "+800-03-00T00:00:00Z");
+        assert_eq!(d.precision(), 10);
+    }
+
+    #[test]
+    fn test_two_digit_year_rejected() {
+        // Regex requires \d{3,} so two-digit years are not matched
+        assert!(Date::from_str("99").is_err());
+        assert!(Date::from_str("99-01").is_err());
+    }
+
+    #[test]
+    fn test_bnf_url_with_three_digit_year() {
+        let d = Date::from_str("https://data.bnf.fr/date/800/").unwrap();
+        assert_eq!(d.time(), "+800-00-00T00:00:00Z");
+        assert_eq!(d.precision(), 9);
+    }
+
+    #[test]
+    fn test_day_31_accepted_for_precision_11() {
+        // Day 31 is at the boundary of !(1..=31)
+        let d = Date::from_str("2000-01-31T00:00:00Z/11").unwrap();
+        assert_eq!(d.precision(), 11);
+        assert!(d.time().contains("-31T"));
+    }
+
+    #[test]
+    fn test_month_12_accepted() {
+        let d = Date::from_str("1999-12").unwrap();
+        assert_eq!(d.time(), "+1999-12-00T00:00:00Z");
+        assert_eq!(d.precision(), 10);
+    }
 }

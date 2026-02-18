@@ -237,4 +237,121 @@ mod tests {
         table.push(vec![Some(SparqlValue::Literal("test".to_string()))]);
         assert!(!table.is_empty());
     }
+
+    // ── from_api_result ──────────────────────────────────────────────────────
+
+    fn make_api_result(json: serde_json::Value) -> SparqlApiResult {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn test_from_api_result_basic() {
+        let result = make_api_result(serde_json::json!({
+            "head": {"vars": ["item", "label"]},
+            "results": {"bindings": [
+                {
+                    "item":  {"type": "uri",     "value": "http://www.wikidata.org/entity/Q42"},
+                    "label": {"type": "literal", "value": "Douglas Adams"}
+                }
+            ]}
+        }));
+
+        let table = SparqlTableVec::from_api_result(result).unwrap();
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.get_var_index("item"), Some(0));
+        assert_eq!(table.get_var_index("label"), Some(1));
+        assert_eq!(
+            table.get_row_col(0, 0),
+            Some(SparqlValue::Entity("Q42".to_string()))
+        );
+        assert_eq!(
+            table.get_row_col(0, 1),
+            Some(SparqlValue::Literal("Douglas Adams".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_from_api_result_empty_bindings() {
+        let result = make_api_result(serde_json::json!({
+            "head": {"vars": ["x", "y"]},
+            "results": {"bindings": []}
+        }));
+
+        let table = SparqlTableVec::from_api_result(result).unwrap();
+        assert_eq!(table.len(), 0);
+        assert!(table.is_empty());
+        assert_eq!(table.get_var_index("x"), Some(0));
+        assert_eq!(table.get_var_index("y"), Some(1));
+    }
+
+    #[test]
+    fn test_from_api_result_no_vars_in_head() {
+        // No "vars" key in head → headers are empty → pushing a row fails
+        let result = make_api_result(serde_json::json!({
+            "head": {},
+            "results": {"bindings": [
+                {"x": {"type": "literal", "value": "v"}}
+            ]}
+        }));
+
+        // With no headers, push_sparql_result_row returns Err("Header not set")
+        assert!(SparqlTableVec::from_api_result(result).is_err());
+    }
+
+    #[test]
+    fn test_from_api_result_missing_variable_in_row_becomes_none() {
+        // Row is missing the "label" binding → that column should be None
+        let result = make_api_result(serde_json::json!({
+            "head": {"vars": ["item", "label"]},
+            "results": {"bindings": [
+                {"item": {"type": "uri", "value": "http://www.wikidata.org/entity/Q1"}}
+            ]}
+        }));
+
+        let table = SparqlTableVec::from_api_result(result).unwrap();
+        assert_eq!(table.len(), 1);
+        assert_eq!(
+            table.get_row_col(0, 0),
+            Some(SparqlValue::Entity("Q1".to_string()))
+        );
+        assert_eq!(table.get_row_col(0, 1), None);
+    }
+
+    #[test]
+    fn test_from_api_result_multiple_rows() {
+        let result = make_api_result(serde_json::json!({
+            "head": {"vars": ["q"]},
+            "results": {"bindings": [
+                {"q": {"type": "uri", "value": "http://www.wikidata.org/entity/Q1"}},
+                {"q": {"type": "uri", "value": "http://www.wikidata.org/entity/Q2"}},
+                {"q": {"type": "uri", "value": "http://www.wikidata.org/entity/Q3"}}
+            ]}
+        }));
+
+        let table = SparqlTableVec::from_api_result(result).unwrap();
+        assert_eq!(table.len(), 3);
+        assert_eq!(
+            table.get_row_col(2, 0),
+            Some(SparqlValue::Entity("Q3".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_push_sparql_result_row_fails_without_headers() {
+        // Direct test of the error path: headers must be set before pushing rows
+        let table = SparqlTableVec::new();
+        // headers is empty by default
+        let row: std::collections::HashMap<String, SparqlValue> = std::collections::HashMap::new();
+        // We can't call push_sparql_result_row directly (private), so use from_api_result
+        // with empty head but non-empty bindings to trigger the error.
+        let result = make_api_result(serde_json::json!({
+            "head": {},
+            "results": {"bindings": [{"x": {"type": "literal", "value": "v"}}]}
+        }));
+        // Calling from_api_result should propagate the "Header not set" error
+        assert!(SparqlTableVec::from_api_result(result).is_err());
+        // table itself is untouched
+        assert!(table.is_empty());
+        let _ = row; // suppress unused warning
+    }
 }
