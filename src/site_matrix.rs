@@ -56,8 +56,46 @@ impl SiteMatrix {
             .and_then(|_| site[key_return].as_str().map(String::from))
     }
 
+    /// Normalize a wiki name by stripping a spurious trailing "wiki" suffix that is sometimes
+    /// appended to project names that already contain "wiki" in them.
+    ///
+    /// For example, PetScan and users sometimes specify `enwiktionarywiki` instead of the
+    /// correct MediaWiki dbname `enwiktionary`. This function detects those cases and strips
+    /// the extra "wiki" suffix, converting e.g.:
+    /// - `enwiktionarywiki`  → `enwiktionary`
+    /// - `enwikibookswiki`   → `enwikibooks`
+    /// - `enwikiquotewiki`   → `enwikiquote`
+    /// - `enwikinewswiki`    → `enwikinews`
+    /// - `enwikisourcewiki`  → `enwikisource`
+    /// - `enwikiversitywiki` → `enwikiversity`
+    /// - `enwikivoyagewiki`  → `enwikivoyage`
+    ///
+    /// Names that are already correct (e.g. `enwiki`, `enwiktionary`) are returned unchanged.
+    fn normalize_wiki_name(wiki: &str) -> String {
+        const SUFFIXES_WITH_EXTRA_WIKI: &[&str] = &[
+            "wiktionarywiki",
+            "wikibookswiki",
+            "wikiquotewiki",
+            "wikinewswiki",
+            "wikisourcewiki",
+            "wikiversitywiki",
+            "wikivoyagewiki",
+        ];
+        for suffix in SUFFIXES_WITH_EXTRA_WIKI {
+            if wiki.ends_with(suffix) {
+                // Strip the trailing "wiki" (4 characters)
+                return wiki[..wiki.len() - 4].to_string();
+            }
+        }
+        wiki.to_string()
+    }
+
     /// Get the server URL for a wiki
     pub fn get_server_url_for_wiki(&self, wiki: &str) -> Result<String> {
+        // Normalize the wiki name first: strip any spurious trailing "wiki" suffix
+        // that may have been appended to project names like "wiktionary", "wikibooks", etc.
+        let wiki = &Self::normalize_wiki_name(wiki);
+
         // Handle special cases
         match wiki.replace('_', "-").as_str() {
             "be-taraskwiki" | "be-x-oldwiki" => {
@@ -137,6 +175,203 @@ impl SiteMatrix {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // normalize_wiki_name tests (offline, no network required)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_normalize_wiki_name_wiktionary() {
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("enwiktionarywiki"),
+            "enwiktionary"
+        );
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("dewiktionarywiki"),
+            "dewiktionary"
+        );
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("frwiktionarywiki"),
+            "frwiktionary"
+        );
+    }
+
+    #[test]
+    fn test_normalize_wiki_name_wikibooks() {
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("enwikibookswiki"),
+            "enwikibooks"
+        );
+    }
+
+    #[test]
+    fn test_normalize_wiki_name_wikiquote() {
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("enwikiquotewiki"),
+            "enwikiquote"
+        );
+    }
+
+    #[test]
+    fn test_normalize_wiki_name_wikinews() {
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("enwikinewswiki"),
+            "enwikinews"
+        );
+    }
+
+    #[test]
+    fn test_normalize_wiki_name_wikisource() {
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("enwikisourcewiki"),
+            "enwikisource"
+        );
+    }
+
+    #[test]
+    fn test_normalize_wiki_name_wikiversity() {
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("enwikiversitywiki"),
+            "enwikiversity"
+        );
+    }
+
+    #[test]
+    fn test_normalize_wiki_name_wikivoyage() {
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("enwikivoyagewiki"),
+            "enwikivoyage"
+        );
+    }
+
+    #[test]
+    fn test_normalize_wiki_name_unchanged() {
+        // Names that are already correct must pass through untouched
+        assert_eq!(SiteMatrix::normalize_wiki_name("enwiki"), "enwiki");
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("enwiktionary"),
+            "enwiktionary"
+        );
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("enwikibooks"),
+            "enwikibooks"
+        );
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("wikidatawiki"),
+            "wikidatawiki"
+        );
+        assert_eq!(SiteMatrix::normalize_wiki_name("metawiki"), "metawiki");
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("commonswiki"),
+            "commonswiki"
+        );
+    }
+
+    #[test]
+    fn test_get_server_url_for_wiki_wiktionary_with_extra_wiki_suffix() {
+        // Simulate what PetScan passes: "enwiktionarywiki" – the site matrix only
+        // contains the correct dbname "enwiktionary", so normalize_wiki_name must
+        // strip the trailing "wiki" before the lookup.
+        let site_matrix = SiteMatrix {
+            site_matrix: serde_json::json!({
+                "sitematrix": {
+                    "count": 1,
+                    "0": {
+                        "code": "en",
+                        "site": [
+                            {
+                                "url": "https://en.wikipedia.org",
+                                "dbname": "enwiki",
+                                "code": "wiki"
+                            },
+                            {
+                                "url": "https://en.wiktionary.org",
+                                "dbname": "enwiktionary",
+                                "code": "wiktionary"
+                            }
+                        ]
+                    },
+                    "specials": []
+                }
+            }),
+        };
+        // The "wrong" name with extra "wiki" suffix must resolve correctly
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwiktionarywiki")
+                .unwrap(),
+            "https://en.wiktionary.org"
+        );
+        // The correct dbname must still work
+        assert_eq!(
+            site_matrix.get_server_url_for_wiki("enwiktionary").unwrap(),
+            "https://en.wiktionary.org"
+        );
+        // Wikipedia must still work
+        assert_eq!(
+            site_matrix.get_server_url_for_wiki("enwiki").unwrap(),
+            "https://en.wikipedia.org"
+        );
+    }
+
+    #[test]
+    fn test_get_server_url_for_wiki_other_projects_with_extra_wiki_suffix() {
+        let site_matrix = SiteMatrix {
+            site_matrix: serde_json::json!({
+                "sitematrix": {
+                    "count": 1,
+                    "0": {
+                        "code": "en",
+                        "site": [
+                            {"url": "https://en.wikibooks.org",   "dbname": "enwikibooks",   "code": "wikibooks"},
+                            {"url": "https://en.wikiquote.org",   "dbname": "enwikiquote",   "code": "wikiquote"},
+                            {"url": "https://en.wikinews.org",    "dbname": "enwikinews",    "code": "wikinews"},
+                            {"url": "https://en.wikisource.org",  "dbname": "enwikisource",  "code": "wikisource"},
+                            {"url": "https://en.wikiversity.org", "dbname": "enwikiversity", "code": "wikiversity"},
+                            {"url": "https://en.wikivoyage.org",  "dbname": "enwikivoyage",  "code": "wikivoyage"}
+                        ]
+                    },
+                    "specials": []
+                }
+            }),
+        };
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikibookswiki")
+                .unwrap(),
+            "https://en.wikibooks.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikiquotewiki")
+                .unwrap(),
+            "https://en.wikiquote.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikinewswiki")
+                .unwrap(),
+            "https://en.wikinews.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikisourcewiki")
+                .unwrap(),
+            "https://en.wikisource.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikiversitywiki")
+                .unwrap(),
+            "https://en.wikiversity.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikivoyagewiki")
+                .unwrap(),
+            "https://en.wikivoyage.org"
+        );
+    }
+
     #[tokio::test]
     async fn test_site_matrix() {
         let api = Api::new("https://www.wikidata.org/w/api.php")
@@ -156,6 +391,54 @@ mod tests {
             "https://en.wikisource.org"
         );
         assert!(site_matrix.get_server_url_for_wiki("shcswirk8d7g").is_err());
+        // Wiktionary: both the correct dbname and the "extra wiki" variant must work
+        assert_eq!(
+            site_matrix.get_server_url_for_wiki("enwiktionary").unwrap(),
+            "https://en.wiktionary.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwiktionarywiki")
+                .unwrap(),
+            "https://en.wiktionary.org"
+        );
+        // Other projects with the extra "wiki" suffix
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikibookswiki")
+                .unwrap(),
+            "https://en.wikibooks.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikiquotewiki")
+                .unwrap(),
+            "https://en.wikiquote.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikinewswiki")
+                .unwrap(),
+            "https://en.wikinews.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikisourcewiki")
+                .unwrap(),
+            "https://en.wikisource.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikiversitywiki")
+                .unwrap(),
+            "https://en.wikiversity.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("enwikivoyagewiki")
+                .unwrap(),
+            "https://en.wikivoyage.org"
+        );
     }
 
     #[tokio::test]
