@@ -45,7 +45,14 @@ impl SiteMatrix {
 
         site[key_match]
             .as_str()
-            .filter(|&site_value| value == site_value)
+            .filter(|&site_value| {
+                // Normalize underscores and hyphens for comparison: the SiteMatrix API stores
+                // some dbnames with underscores where the wiki name uses hyphens, e.g.
+                // "zh_classicalwiki" (API) vs "zh-classicalwiki" (caller), so we treat them
+                // as equivalent. This does not affect URL-based lookups since URLs use hyphens
+                // consistently.
+                site_value.replace('_', "-") == value.replace('_', "-")
+            })
             .and_then(|_| site[key_return].as_str().map(String::from))
     }
 
@@ -202,6 +209,30 @@ mod tests {
         assert_eq!(url, Some("https://www.wikidata.org".to_string()));
     }
 
+    #[tokio::test]
+    async fn test_site_matrix_zh_wikis() {
+        let api = Api::new("https://www.wikidata.org/w/api.php")
+            .await
+            .unwrap();
+        let site_matrix = SiteMatrix::new(&api).await.unwrap();
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("zh-classicalwiki")
+                .unwrap(),
+            "https://zh-classical.wikipedia.org"
+        );
+        assert_eq!(
+            site_matrix.get_server_url_for_wiki("zh-yuewiki").unwrap(),
+            "https://zh-yue.wikipedia.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("zh-min-nanwiki")
+                .unwrap(),
+            "https://zh-min-nan.wikipedia.org"
+        );
+    }
+
     #[test]
     fn test_get_server_url_for_wiki() {
         let site_matrix = SiteMatrix {
@@ -265,6 +296,71 @@ mod tests {
         };
         let url = site_matrix.get_server_url_for_wiki("metawiki").unwrap();
         assert_eq!(url, "https://meta.wikimedia.org");
+    }
+
+    #[test]
+    fn test_get_server_url_for_wiki_underscore_dbname() {
+        // The SiteMatrix API stores dbnames with underscores for wikis whose names use hyphens,
+        // e.g. "zh_classicalwiki". The lookup must treat hyphens and underscores as equivalent.
+        let site_matrix = SiteMatrix {
+            site_matrix: serde_json::json!({
+                "sitematrix": {
+                    "count": 3,
+                    "197": {
+                        "code": "lzh",
+                        "site": [
+                            {
+                                "url": "https://zh-classical.wikipedia.org",
+                                "dbname": "zh_classicalwiki"
+                            }
+                        ]
+                    },
+                    "225": {
+                        "code": "nan",
+                        "site": [
+                            {
+                                "url": "https://zh-min-nan.wikipedia.org",
+                                "dbname": "zh_min_nanwiki"
+                            }
+                        ]
+                    },
+                    "361": {
+                        "code": "yue",
+                        "site": [
+                            {
+                                "url": "https://zh-yue.wikipedia.org",
+                                "dbname": "zh_yuewiki"
+                            }
+                        ]
+                    },
+                    "specials": []
+                }
+            }),
+        };
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("zh-classicalwiki")
+                .unwrap(),
+            "https://zh-classical.wikipedia.org"
+        );
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("zh-min-nanwiki")
+                .unwrap(),
+            "https://zh-min-nan.wikipedia.org"
+        );
+        assert_eq!(
+            site_matrix.get_server_url_for_wiki("zh-yuewiki").unwrap(),
+            "https://zh-yue.wikipedia.org"
+        );
+        // Also verify that lookup with underscores in the input works (the existing
+        // replace('_', "-") at the start of get_server_url_for_wiki normalises those too).
+        assert_eq!(
+            site_matrix
+                .get_server_url_for_wiki("zh_classicalwiki")
+                .unwrap(),
+            "https://zh-classical.wikipedia.org"
+        );
     }
 
     #[test]
