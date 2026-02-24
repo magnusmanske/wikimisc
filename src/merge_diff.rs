@@ -164,21 +164,22 @@ impl Serialize for MergeDiff {
     where
         S: Serializer,
     {
-        let mut data: HashMap<&str, Option<serde_json::Value>> = HashMap::new();
-        data.insert("label", self.serialize_labels(&self.labels));
-        data.insert("descriptions", self.serialize_labels(&self.descriptions));
-        //data.insert("aliases",self.serialize_aliases()); // DEACTIVATED too much noise
-        data.insert("sitelinks", self.serialize_sitelinks());
-        data.insert("claims", self.serialize_claims());
-        let data: HashMap<&str, serde_json::Value> = data
-            .iter()
-            .filter(|(_, v)| v.is_some())
-            .map(|(k, v)| (k.to_owned(), v.to_owned().unwrap())) // unwrap() is safe
-            .collect();
+        // Build a Vec of only the fields that have content, avoiding the two-HashMap
+        // allocate-then-filter pattern.
+        let fields: Vec<(&str, serde_json::Value)> = [
+            ("label", self.serialize_labels(&self.labels)),
+            ("descriptions", self.serialize_labels(&self.descriptions)),
+            //("aliases", self.serialize_aliases()), // DEACTIVATED too much noise
+            ("sitelinks", self.serialize_sitelinks()),
+            ("claims", self.serialize_claims()),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|v| (k, v)))
+        .collect();
 
-        let mut state = serializer.serialize_struct("MergeDiff", data.len())?;
-        for (k, v) in data {
-            state.serialize_field(k, &v)?
+        let mut state = serializer.serialize_struct("MergeDiff", fields.len())?;
+        for (k, v) in &fields {
+            state.serialize_field(k, v)?;
         }
         state.end()
     }
