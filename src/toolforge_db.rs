@@ -55,7 +55,9 @@ impl ToolforgeDB {
         let min_connections = config["min_connections"].as_u64().unwrap_or(0) as usize;
         let max_connections = config["max_connections"].as_u64().unwrap_or(10) as usize;
         let keep_sec = config["keep_sec"].as_u64().unwrap_or(0);
-        let url = config["url"].as_str().expect("No url value");
+        let url = config["url"]
+            .as_str()
+            .ok_or_else(|| anyhow!("create_pool: missing 'url' key in pool config"))?;
         let pool_opts = PoolOpts::default()
             .with_constraints(
                 PoolConstraints::new(min_connections, max_connections).expect("Constraints error"),
