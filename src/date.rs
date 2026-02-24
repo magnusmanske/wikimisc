@@ -78,7 +78,7 @@ impl FromStr for Date {
             .iter()
             .find_map(|e| {
                 let replaced = e.0.replace_all(s, &e.1);
-                (replaced != s).then(|| (replaced.to_string(), e.2))
+                (replaced != s).then(|| (replaced.into_owned(), e.2))
             })
             .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?;
 
