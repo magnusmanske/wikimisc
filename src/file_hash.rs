@@ -65,7 +65,9 @@ impl<
             let key = key.into();
             let value = self.get(key.clone());
             if value.is_some() {
-                self.id2pos.remove(&key);
+                // release_storage removes from id2pos AND returns the slot to disk_free,
+                // so the space can be reused by future inserts.
+                self.release_storage(&key);
             }
             value
         } else {
@@ -438,5 +440,38 @@ mod tests {
         assert_eq!(efc.get("Q123").unwrap(), "Foo");
         assert_eq!(efc.get("Q456").unwrap(), "Boom");
         assert_eq!(efc.get("Q789").unwrap(), "Baz");
+    }
+
+    #[test]
+    fn test_file_hash_remove_disk_reclaims_space() {
+        // After removing a key on the disk backend the freed slot must be returned
+        // to disk_free so that a subsequent insert of similar size can reuse it
+        // instead of growing the file.
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(0); // force disk backend immediately
+
+        efc.insert("Q123", "Foo").unwrap();
+        efc.insert("Q456", "Bar").unwrap();
+
+        // Record the file size before the remove.
+        let size_before = efc.file_handle.as_ref().unwrap().metadata().unwrap().len();
+
+        // Remove one entry — its slot should go back to disk_free.
+        assert_eq!(efc.remove("Q456").unwrap(), "Bar");
+
+        // Insert a value of the same length as "Bar" — it should reuse the freed slot,
+        // so the file must not grow beyond its pre-remove size.
+        efc.insert("Q999", "Baz").unwrap();
+        let size_after = efc.file_handle.as_ref().unwrap().metadata().unwrap().len();
+
+        assert_eq!(
+            size_after, size_before,
+            "file must not grow when a same-sized slot is available for reuse"
+        );
+
+        // Correctness of values is unaffected.
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert_eq!(efc.get("Q456"), None);
+        assert_eq!(efc.get("Q999").unwrap(), "Baz");
     }
 }
