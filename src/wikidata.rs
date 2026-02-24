@@ -21,7 +21,7 @@ impl Wikidata {
     pub fn new() -> Self {
         Wikidata {
             user_agent: WIKIDATA_USER_AGENT.to_string(),
-            timeout: WIKIDATA_SPARQL_TIMEOUT.to_owned(),
+            timeout: WIKIDATA_SPARQL_TIMEOUT,
         }
     }
 
@@ -39,7 +39,7 @@ impl Wikidata {
     pub fn client_builder(&self) -> ClientBuilder {
         Client::builder()
             .user_agent(&self.user_agent)
-            .timeout(self.timeout.to_owned())
+            .timeout(self.timeout)
     }
 
     #[cfg(not(doctest))]
