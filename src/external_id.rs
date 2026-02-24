@@ -43,7 +43,9 @@ impl ExternalId {
     /// Returns a new ExternalId from a string like "P123:ABC456DEF".
     pub fn from_string(s: &str) -> Option<Self> {
         let captures = RE_FROM_STRING.captures(s)?;
-        let property = Self::prop_numeric(captures.get(1)?.as_str())?;
+        // Group 1 is already `\d+` from the regex, so parse directly without
+        // running the second RE_PROPERTY_NUMERIC regex that prop_numeric uses.
+        let property = captures.get(1)?.as_str().parse::<usize>().ok()?;
         let id = captures.get(2)?.as_str();
         Some(Self::new(property, id))
     }
