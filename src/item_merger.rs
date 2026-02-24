@@ -8,7 +8,6 @@ use regex::Regex;
 
 use std::cmp::Ordering;
 use std::sync::LazyLock;
-use std::vec::Vec;
 use wikibase::*;
 
 static YEAR_FIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-\d\d-\d\dT").unwrap());
