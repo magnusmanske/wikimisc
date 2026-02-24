@@ -52,11 +52,11 @@ impl Wikidata {
     /// }
     /// ```
     pub async fn load_sparql_csv(&self, sparql: &str) -> Result<csv::Reader<File>> {
-        let url = format!("https://query.wikidata.org/sparql?query={sparql}");
         let mut f = tempfile()?;
         let mut res = self
             .reqwest_client()?
-            .get(url)
+            .get("https://query.wikidata.org/sparql")
+            .query(&[("query", sparql)])
             .header(
                 reqwest::header::ACCEPT,
                 reqwest::header::HeaderValue::from_str("text/csv")?,
