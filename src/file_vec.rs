@@ -116,17 +116,10 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         if idx1 >= self.len || idx2 >= self.len {
             return Err(anyhow!("FileVec::swap: Attempting to swap out-of-bounds"));
         }
-        if idx1 == idx2 {
-            return Ok(());
-        }
-        let row1 = self
-            .get(idx1)
-            .ok_or_else(|| anyhow!("FileVec::swap: row not found"))?;
-        let row2 = self
-            .get(idx2)
-            .ok_or_else(|| anyhow!("FileVec::swap: row not found"))?;
-        self.set(idx1, row2)?;
-        self.set(idx2, row1)?;
+        // Delegate to FileHash::swap, which only exchanges two PositionLength entries
+        // in the in-memory HashMap — no disk I/O required.  The equal-index case is
+        // handled inside FileHash::swap itself.
+        self.file_hash.swap(idx1, idx2);
         Ok(())
     }
 
