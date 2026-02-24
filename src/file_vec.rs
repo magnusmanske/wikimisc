@@ -100,11 +100,14 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         let n = self.len;
         for i in 0..n {
             let mut min_idx = i;
+            // Fetch the current minimum value once per outer iteration; re-fetch only
+            // when a new minimum is found, avoiding a redundant disk read per inner step.
+            let mut min_val = self.get(min_idx).expect("FileVec::sort_by: row not found");
             for j in i + 1..n {
                 let row_j = self.get(j).expect("FileVec::sort_by: row not found");
-                let row_min_idx = self.get(min_idx).expect("FileVec::sort_by: row not found");
-                if f(&row_j, &row_min_idx) == Ordering::Less {
+                if f(&row_j, &min_val) == Ordering::Less {
                     min_idx = j;
+                    min_val = row_j;
                 }
             }
             self.swap(i, min_idx)?;
