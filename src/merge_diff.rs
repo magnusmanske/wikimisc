@@ -23,22 +23,28 @@ impl MergeDiff {
     }
 
     pub fn extend(&mut self, other: &MergeDiff) {
-        self.labels.extend(other.labels.clone());
-        self.aliases.extend(other.aliases.clone());
-        self.descriptions.extend(other.descriptions.clone());
-        self.sitelinks.extend(other.sitelinks.clone());
-        self.altered_statements
-            .extend(other.altered_statements.clone());
-        self.added_statements.extend(other.added_statements.clone());
+        self.labels.extend(other.labels.iter().cloned());
+        self.aliases.extend(other.aliases.iter().cloned());
+        self.descriptions.extend(other.descriptions.iter().cloned());
+        self.sitelinks.extend(other.sitelinks.iter().cloned());
+        self.altered_statements.extend(
+            other
+                .altered_statements
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+        self.added_statements
+            .extend(other.added_statements.iter().cloned());
     }
 
     // TODO tests
     pub fn apply(&self, item: &mut ItemEntity) {
-        item.labels_mut().extend(self.labels.clone());
-        item.aliases_mut().extend(self.aliases.clone());
-        item.descriptions_mut().extend(self.descriptions.clone());
+        item.labels_mut().extend(self.labels.iter().cloned());
+        item.aliases_mut().extend(self.aliases.iter().cloned());
+        item.descriptions_mut()
+            .extend(self.descriptions.iter().cloned());
         if let Some(sitelinks) = item.sitelinks_mut() {
-            sitelinks.extend(self.sitelinks.clone());
+            sitelinks.extend(self.sitelinks.iter().cloned());
         };
         for (id, statement) in self.altered_statements.iter() {
             let existing_statement = item
@@ -49,7 +55,8 @@ impl MergeDiff {
                 *existing_statement = statement.to_owned();
             }
         }
-        item.claims_mut().extend(self.added_statements.clone());
+        item.claims_mut()
+            .extend(self.added_statements.iter().cloned());
     }
 
     pub fn add_statement(&mut self, s: Statement) {
