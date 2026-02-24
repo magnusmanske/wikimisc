@@ -1,6 +1,6 @@
 //! Cache a lot of JSON-(de)serializable items on disk.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::prelude::*;
@@ -175,15 +175,13 @@ impl<
     /// This is done automatically when the number of in-memory entities exceeds the limit.
     /// This operation is final; the entities will not be kept in memory again.
     fn flush_mem_to_disk(&mut self) -> Result<()> {
-        let keys = self.in_memory.keys().cloned().collect::<Vec<KeyType>>();
-        for key in &keys {
-            let v = self
-                .in_memory
-                .get(key)
-                .ok_or_else(|| anyhow!("Key not found"))?;
-            self.insert_disk(key.to_owned(), v.to_owned())?;
+        // drain() moves every (key, value) pair out of the map in one pass,
+        // avoiding the separate key-clone + value-clone that the old collect/get/to_owned
+        // approach required.
+        let entries: Vec<(KeyType, ValueType)> = self.in_memory.drain().collect();
+        for (key, value) in entries {
+            self.insert_disk(key, value)?;
         }
-        self.in_memory.clear();
         self.using_disk = true;
         Ok(())
     }
