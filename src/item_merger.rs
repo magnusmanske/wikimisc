@@ -5,7 +5,7 @@
 use crate::external_id::ExternalId;
 use crate::merge_diff::MergeDiff;
 use regex::Regex;
-use serde_json::json;
+
 use std::cmp::Ordering;
 use std::sync::LazyLock;
 use std::vec::Vec;
@@ -333,11 +333,12 @@ impl ItemMerger {
     fn compare_snak(snak1: &Snak, snak2: &Snak) -> Ordering {
         match snak1.property().cmp(snak2.property()) {
             Ordering::Equal => {
-                let j1 = json!(snak1.data_value());
-                let j2 = json!(snak2.data_value());
-                let j1 = j1.to_string();
-                let j2 = j2.to_string();
-                j1.cmp(&j2)
+                // Serialise directly to a JSON string for a stable, deterministic ordering.
+                // This avoids the intermediate serde_json::Value allocation that json!() would
+                // produce before calling to_string().
+                let s1 = serde_json::to_string(snak1.data_value()).unwrap_or_default();
+                let s2 = serde_json::to_string(snak2.data_value()).unwrap_or_default();
+                s1.cmp(&s2)
             }
             other => other,
         }
