@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use wikibase::mediawiki::api::Api;
 
@@ -71,7 +72,7 @@ impl SiteMatrix {
     /// - `enwikivoyagewiki`  → `enwikivoyage`
     ///
     /// Names that are already correct (e.g. `enwiki`, `enwiktionary`) are returned unchanged.
-    fn normalize_wiki_name(wiki: &str) -> String {
+    fn normalize_wiki_name(wiki: &str) -> Cow<'_, str> {
         const SUFFIXES_WITH_EXTRA_WIKI: &[&str] = &[
             "wiktionarywiki",
             "wikibookswiki",
@@ -83,11 +84,12 @@ impl SiteMatrix {
         ];
         for suffix in SUFFIXES_WITH_EXTRA_WIKI {
             if wiki.ends_with(suffix) {
-                // Strip the trailing "wiki" (4 characters)
-                return wiki[..wiki.len() - 4].to_string();
+                // Strip the trailing "wiki" (4 characters) and return an owned slice.
+                return Cow::Owned(wiki[..wiki.len() - 4].to_string());
             }
         }
-        wiki.to_string()
+        // Common case: nothing to strip — borrow the original string without allocating.
+        Cow::Borrowed(wiki)
     }
 
     /// Get the server URL for a wiki
