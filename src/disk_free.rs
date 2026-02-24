@@ -80,21 +80,27 @@ impl DiskFree {
     }
 
     pub fn find_free(&mut self, size: u64) -> Option<u64> {
-        // First, try to find an exact match
-        if let Some(idx) = self.parts.iter().position(|part| part.length == size) {
-            let position = self.parts[idx].position;
-            self.parts.remove(idx);
-            return Some(position);
-        }
-
-        // Otherwise, find first part large enough
-        for part in &mut self.parts {
-            if part.length >= size {
-                let position = part.position;
-                part.length -= size;
-                part.position += size;
+        // Single pass: prefer an exact-size match (no fragmentation) but record the
+        // first slot that is large enough as a fallback.  If we find an exact match
+        // during the scan we can return immediately; otherwise we use the fallback.
+        let mut first_fit: Option<usize> = None;
+        for (idx, part) in self.parts.iter().enumerate() {
+            if part.length == size {
+                // Exact match — consume the whole slot and remove it.
+                let position = self.parts[idx].position;
+                self.parts.remove(idx);
                 return Some(position);
             }
+            if part.length > size && first_fit.is_none() {
+                first_fit = Some(idx);
+            }
+        }
+        // No exact match; carve `size` bytes from the front of the first-fit slot.
+        if let Some(idx) = first_fit {
+            let position = self.parts[idx].position;
+            self.parts[idx].position += size;
+            self.parts[idx].length -= size;
+            return Some(position);
         }
         None
     }
