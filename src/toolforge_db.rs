@@ -65,8 +65,7 @@ impl ToolforgeDB {
             .with_inactive_connection_ttl(Duration::from_secs(keep_sec));
         let wd_url = url;
         let wd_opts = Opts::from_url(wd_url)?;
-        let pool =
-            mysql_async::Pool::new(OptsBuilder::from_opts(wd_opts).pool_opts(pool_opts.clone()));
+        let pool = mysql_async::Pool::new(OptsBuilder::from_opts(wd_opts).pool_opts(pool_opts));
         Ok(pool)
     }
 
