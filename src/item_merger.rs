@@ -1077,4 +1077,237 @@ mod tests {
             "Identical plain-snak reference should not be duplicated"
         );
     }
+
+    // ── sitelinks ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_sitelinks_added_when_base_has_sitelink_list() {
+        // Sitelinks from `other` must be appended when the base item already has a
+        // (possibly empty) sitelinks Vec.
+        let mut base = ItemEntity::new_empty();
+        base.sitelinks_mut().get_or_insert_with(Vec::new);
+
+        let mut other = ItemEntity::new_empty();
+        other
+            .sitelinks_mut()
+            .get_or_insert_with(Vec::new)
+            .push(SiteLink::new("enwiki", "Test article", vec![]));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert_eq!(diff.sitelinks.len(), 1);
+        assert_eq!(diff.sitelinks[0].site(), "enwiki");
+        assert_eq!(im.item.sitelinks().clone().unwrap().len(), 1);
+        assert_eq!(
+            im.item.sitelinks().clone().unwrap()[0].title(),
+            "Test article"
+        );
+    }
+
+    #[test]
+    fn test_merge_sitelinks_not_duplicated() {
+        // A sitelink already present in the base must not be added again.
+        let mut base = ItemEntity::new_empty();
+        base.sitelinks_mut()
+            .get_or_insert_with(Vec::new)
+            .push(SiteLink::new("enwiki", "Test article", vec![]));
+
+        let mut other = ItemEntity::new_empty();
+        other
+            .sitelinks_mut()
+            .get_or_insert_with(Vec::new)
+            .push(SiteLink::new("enwiki", "Test article", vec![]));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert!(
+            diff.sitelinks.is_empty(),
+            "duplicate sitelink must not appear in diff"
+        );
+        assert_eq!(im.item.sitelinks().clone().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_merge_multiple_sitelinks_only_new_ones_added() {
+        // Only sites not already present in base should be merged in.
+        let mut base = ItemEntity::new_empty();
+        base.sitelinks_mut()
+            .get_or_insert_with(Vec::new)
+            .push(SiteLink::new("enwiki", "Shared", vec![]));
+
+        let mut other = ItemEntity::new_empty();
+        let sl = other.sitelinks_mut().get_or_insert_with(Vec::new);
+        sl.push(SiteLink::new("enwiki", "Shared", vec![])); // already in base
+        sl.push(SiteLink::new("dewiki", "Neu", vec![])); // new
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert_eq!(diff.sitelinks.len(), 1);
+        assert_eq!(diff.sitelinks[0].site(), "dewiki");
+        assert_eq!(im.item.sitelinks().clone().unwrap().len(), 2);
+    }
+
+    // ── description filters ───────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_description_not_added_when_equals_existing_alias() {
+        // A new description whose (language, value) pair matches an existing alias
+        // must be silently dropped.
+        let mut base = ItemEntity::new_empty();
+        base.aliases_mut()
+            .push(LocaleString::new("en", "alias value"));
+
+        let mut other = ItemEntity::new_empty();
+        other
+            .descriptions_mut()
+            .push(LocaleString::new("en", "alias value"));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert!(
+            diff.descriptions.is_empty(),
+            "description matching an existing alias must not be added"
+        );
+        assert!(im.item.descriptions().is_empty());
+    }
+
+    // ── qualifier helpers ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_are_qualifiers_identical_different_values() {
+        // Same property, different value — must not be treated as identical.
+        let q1 = vec![Snak::new_string("P1", "foo")];
+        let q2 = vec![Snak::new_string("P1", "bar")];
+        assert!(!ItemMerger::are_qualifiers_identical(&q1, &q2));
+    }
+
+    #[test]
+    fn test_are_qualifiers_identical_different_properties() {
+        // Same value, different property — must not be treated as identical.
+        let q1 = vec![Snak::new_string("P1", "val")];
+        let q2 = vec![Snak::new_string("P2", "val")];
+        assert!(!ItemMerger::are_qualifiers_identical(&q1, &q2));
+    }
+
+    // ── add_claim edge-cases ──────────────────────────────────────────────
+
+    #[test]
+    fn test_add_claim_external_id_different_value_is_added() {
+        // Two ExternalId claims for the same property but different IDs are distinct
+        // and both should be present after the merge.
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(Statement::new_normal(
+            Snak::new(
+                SnakDataType::ExternalId,
+                "P214",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::StringType,
+                    Value::StringValue("111".to_string()),
+                )),
+            ),
+            vec![],
+            vec![],
+        ));
+
+        let mut other = ItemEntity::new_empty();
+        other.add_claim(Statement::new_normal(
+            Snak::new(
+                SnakDataType::ExternalId,
+                "P214",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::StringType,
+                    Value::StringValue("222".to_string()),
+                )),
+            ),
+            vec![],
+            vec![],
+        ));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert_eq!(
+            diff.added_statements.len(),
+            1,
+            "different external ID must be added"
+        );
+        assert_eq!(im.item.claims().len(), 2);
+    }
+
+    #[test]
+    fn test_add_claim_new_qualifier_appended_to_existing() {
+        // Qualifier merging only fires when the property is in
+        // properties_ignore_qualifier_match (otherwise a non-identical qualifier
+        // set causes the incoming claim to be treated as a brand-new statement).
+        // Here we opt P1 into the ignore list so both claims match and the extra
+        // qualifier from the incoming claim gets merged into the existing one.
+        let mut base = ItemEntity::new_empty();
+        let mut stmt = Statement::new_normal(
+            Snak::new_string("P1", "value"),
+            vec![Snak::new_string("P2", "existing-qual")],
+            vec![],
+        );
+        stmt.set_id("Q1$abc");
+        base.add_claim(stmt);
+
+        let mut other = ItemEntity::new_empty();
+        other.add_claim(Statement::new_normal(
+            Snak::new_string("P1", "value"),
+            vec![
+                Snak::new_string("P2", "existing-qual"), // already present
+                Snak::new_string("P3", "new-qual"),      // new
+            ],
+            vec![],
+        ));
+
+        let mut im = ItemMerger::new(base);
+        // Allow qualifier mismatches for P1 so the merger considers them the same claim.
+        im.set_properties_ignore_qualifier_match(vec!["P1".to_string()]);
+        let diff = im.merge(&other);
+
+        assert!(
+            !diff.altered_statements.is_empty(),
+            "statement must appear in diff when a new qualifier is merged in"
+        );
+        assert_eq!(
+            im.item.claims()[0].qualifiers().len(),
+            2,
+            "both qualifiers must be present after merge"
+        );
+    }
+
+    #[test]
+    fn test_add_claim_different_qualifiers_without_ignore_adds_new_claim() {
+        // Without the ignore list, a claim with a different qualifier set is treated
+        // as a distinct statement and added alongside the original.
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(Statement::new_normal(
+            Snak::new_string("P1", "value"),
+            vec![Snak::new_string("P2", "qual-a")],
+            vec![],
+        ));
+
+        let mut other = ItemEntity::new_empty();
+        other.add_claim(Statement::new_normal(
+            Snak::new_string("P1", "value"),
+            vec![Snak::new_string("P2", "qual-b")], // different qualifier value
+            vec![],
+        ));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert_eq!(
+            diff.added_statements.len(),
+            1,
+            "claim with different qualifiers must be added as a new statement"
+        );
+        assert_eq!(im.item.claims().len(), 2);
+    }
 }

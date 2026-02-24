@@ -461,4 +461,71 @@ mod tests {
         let mut iter = (&file_vec).into_iter();
         assert_eq!(iter.next(), None);
     }
+
+    #[test]
+    fn test_set_out_of_bounds() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        // Exact length is out of bounds (valid indices are 0..len-1).
+        assert!(file_vec.set(1, "x".to_string()).is_err());
+        assert!(file_vec.set(99, "x".to_string()).is_err());
+        // The existing element must be unaffected.
+        assert_eq!(file_vec.get(0).unwrap(), "a");
+    }
+
+    #[test]
+    fn test_sort_by_disk_backend() {
+        // Push more than MAX_MEM_ENTRIES (5) items so the disk backend is engaged,
+        // then verify sort_by still produces a correctly ordered result.
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("f".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("d".to_string());
+        file_vec.push("a".to_string());
+        file_vec.push("e".to_string());
+        file_vec.push("c".to_string()); // 6th element — flushes to disk
+        file_vec.sort_by(|a, b| a.cmp(b)).unwrap();
+        assert_eq!(file_vec.len(), 6);
+        assert_eq!(file_vec.get(0).unwrap(), "a");
+        assert_eq!(file_vec.get(1).unwrap(), "b");
+        assert_eq!(file_vec.get(2).unwrap(), "c");
+        assert_eq!(file_vec.get(3).unwrap(), "d");
+        assert_eq!(file_vec.get(4).unwrap(), "e");
+        assert_eq!(file_vec.get(5).unwrap(), "f");
+    }
+
+    #[test]
+    fn test_pop_single_element() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("only".to_string());
+        assert_eq!(file_vec.pop().unwrap(), "only");
+        assert_eq!(file_vec.len(), 0);
+        assert!(file_vec.is_empty());
+        // A second pop on the now-empty vec must return None.
+        assert_eq!(file_vec.pop(), None);
+    }
+
+    #[test]
+    fn test_reverse_even_length() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("a".to_string());
+        file_vec.push("b".to_string());
+        file_vec.push("c".to_string());
+        file_vec.push("d".to_string());
+        file_vec.reverse().unwrap();
+        assert_eq!(file_vec.len(), 4);
+        assert_eq!(file_vec.get(0).unwrap(), "d");
+        assert_eq!(file_vec.get(1).unwrap(), "c");
+        assert_eq!(file_vec.get(2).unwrap(), "b");
+        assert_eq!(file_vec.get(3).unwrap(), "a");
+    }
+
+    #[test]
+    fn test_reverse_single_element() {
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.push("only".to_string());
+        file_vec.reverse().unwrap();
+        assert_eq!(file_vec.len(), 1);
+        assert_eq!(file_vec.get(0).unwrap(), "only");
+    }
 }

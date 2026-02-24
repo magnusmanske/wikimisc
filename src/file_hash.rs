@@ -472,4 +472,82 @@ mod tests {
         assert_eq!(efc.get("Q456"), None);
         assert_eq!(efc.get("Q999").unwrap(), "Baz");
     }
+
+    #[test]
+    fn test_file_hash_clear_disk() {
+        // clear() on the disk backend must truncate the file and allow fresh inserts.
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(0);
+        efc.insert("Q123", "Foo").unwrap();
+        efc.insert("Q456", "Bar").unwrap();
+        assert!(efc.using_disk);
+        efc.clear().unwrap();
+        assert!(efc.is_empty());
+        assert_eq!(efc.len(), 0);
+        // Fresh inserts after clear must work correctly.
+        efc.insert("Q789", "Baz").unwrap();
+        assert_eq!(efc.len(), 1);
+        assert_eq!(efc.get("Q789").unwrap(), "Baz");
+        assert_eq!(efc.get("Q123"), None);
+        assert_eq!(efc.get("Q456"), None);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_key_mem() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.insert("Q123", "Foo").unwrap();
+        // Removing a key that was never inserted must return None without side-effects.
+        assert_eq!(efc.remove("nonexistent"), None);
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert_eq!(efc.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_key_disk() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(0);
+        efc.insert("Q123", "Foo").unwrap();
+        // Same expectation on the disk backend.
+        assert_eq!(efc.remove("nonexistent"), None);
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert_eq!(efc.len(), 1);
+    }
+
+    #[test]
+    fn test_file_hash_retain_disk() {
+        // retain() must work correctly on the disk backend.
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(0);
+        efc.insert("Q123", "Foo").unwrap();
+        efc.insert("Q456", "Bar").unwrap();
+        efc.insert("Q789", "Baz").unwrap();
+        efc.retain(|_, v| v == "Bar");
+        assert_eq!(efc.get("Q123"), None);
+        assert_eq!(efc.get("Q456").unwrap(), "Bar");
+        assert_eq!(efc.get("Q789"), None);
+        assert_eq!(efc.len(), 1);
+    }
+
+    #[test]
+    fn test_len_after_mixed_mem_and_disk() {
+        // len() must count entries correctly across the transition from memory to disk.
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(2);
+
+        efc.insert("Q1", "a").unwrap();
+        efc.insert("Q2", "b").unwrap();
+        assert_eq!(efc.len(), 2);
+        assert!(!efc.using_disk);
+
+        // Third insert flushes to disk.
+        efc.insert("Q3", "c").unwrap();
+        assert!(efc.using_disk);
+        assert_eq!(efc.len(), 3);
+
+        efc.remove("Q2");
+        assert_eq!(efc.len(), 2);
+
+        efc.insert("Q4", "d").unwrap();
+        assert_eq!(efc.len(), 3);
+    }
 }

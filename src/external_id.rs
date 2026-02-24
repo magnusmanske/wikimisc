@@ -412,4 +412,86 @@ mod tests {
 
         // TODOO multiple items
     }
+
+    #[test]
+    fn test_from_external_id_claim_novalue_snak_returns_none() {
+        // A snak with ExternalId datatype but SnakType::NoValue has no data value;
+        // from_external_id_claim must return None rather than panic.
+        let statement = Statement::new(
+            "statement",
+            StatementRank::Normal,
+            Snak::new(SnakDataType::ExternalId, "P214", SnakType::NoValue, None),
+            vec![],
+            vec![],
+        );
+        assert_eq!(ExternalId::from_external_id_claim(&statement), None);
+    }
+
+    #[test]
+    fn test_from_external_id_claim_unknownvalue_snak_returns_none() {
+        // UnknownValue ("somevalue") snaks also have no concrete data value.
+        let statement = Statement::new(
+            "statement",
+            StatementRank::Normal,
+            Snak::new(
+                SnakDataType::ExternalId,
+                "P214",
+                SnakType::UnknownValue,
+                None,
+            ),
+            vec![],
+            vec![],
+        );
+        assert_eq!(ExternalId::from_external_id_claim(&statement), None);
+    }
+
+    #[test]
+    fn test_property_and_id_accessors() {
+        let ext = ExternalId::new(42, "ABC-123");
+        assert_eq!(ext.property(), 42);
+        assert_eq!(ext.id(), "ABC-123");
+    }
+
+    #[test]
+    fn test_default_is_property_zero_empty_id() {
+        let ext = ExternalId::default();
+        assert_eq!(ext.property(), 0);
+        assert_eq!(ext.id(), "");
+    }
+
+    #[test]
+    fn test_prop_numeric_bare_digits_still_parse() {
+        // When the regex does not match (no P/p prefix), replace() returns the
+        // original string unchanged, and parse::<usize>() then succeeds on bare
+        // digit strings.  This is an emergent behaviour of the implementation.
+        assert_eq!(ExternalId::prop_numeric("123"), Some(123));
+        assert_eq!(ExternalId::prop_numeric("0"), Some(0));
+    }
+
+    #[test]
+    fn test_prop_numeric_non_numeric_returns_none() {
+        // Strings that cannot be parsed as usize after regex processing return None.
+        assert_eq!(ExternalId::prop_numeric("abc"), None);
+        assert_eq!(ExternalId::prop_numeric(""), None);
+        assert_eq!(ExternalId::prop_numeric("P"), None); // P with no digits
+    }
+
+    #[test]
+    fn test_from_string_colon_in_id() {
+        // The ID part may itself contain colons — only the first colon is the separator.
+        let ext = ExternalId::from_string("P999:part1:part2").unwrap();
+        assert_eq!(ext.property(), 999);
+        assert_eq!(ext.id(), "part1:part2");
+    }
+
+    #[test]
+    fn test_ordering() {
+        // ExternalId derives Ord; verify that ordering is property-first, then id.
+        let a = ExternalId::new(100, "aaa");
+        let b = ExternalId::new(100, "bbb");
+        let c = ExternalId::new(200, "aaa");
+        assert!(a < b);
+        assert!(b < c);
+        assert!(a < c);
+    }
 }

@@ -461,4 +461,79 @@ mod tests {
         wd.set_timeout(std::time::Duration::from_secs(30));
         assert!(wd.reqwest_client().is_ok());
     }
+
+    #[test]
+    fn test_item2qs_novalue_qualifier_is_skipped() {
+        // A qualifier whose snak_type is NoValue has no concrete value and must be
+        // silently skipped by snak2qs / the qualifier filter_map.
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new_string("P1476", "title"),
+            vec![Snak::new(
+                SnakDataType::WikibaseItem,
+                "P31",
+                SnakType::NoValue,
+                None,
+            )],
+            vec![],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        let line = qs.iter().find(|s| s.contains("P1476")).unwrap();
+        // The NoValue qualifier must not appear in the output.
+        assert!(
+            !line.contains("P31"),
+            "NoValue qualifier must be omitted from QS output, got: {line}"
+        );
+    }
+
+    #[test]
+    fn test_item2qs_novalue_reference_snak_is_skipped() {
+        // A reference snak with NoValue produces no value string and must be
+        // omitted from the QS reference section.
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new_string("P1476", "title"),
+            vec![],
+            vec![Reference::new(vec![
+                Snak::new_url("P854", "http://example.com"), // valid — must appear
+                Snak::new(SnakDataType::WikibaseItem, "P248", SnakType::NoValue, None), // must be skipped
+            ])],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        let line = qs.iter().find(|s| s.contains("P1476")).unwrap();
+        // The valid URL reference must be present.
+        assert!(
+            line.contains("S854") && line.contains("http://example.com"),
+            "URL reference snak must be present, got: {line}"
+        );
+        // The NoValue reference snak must not appear.
+        assert!(
+            !line.contains("S248"),
+            "NoValue reference snak must be omitted, got: {line}"
+        );
+    }
+
+    #[test]
+    fn test_item2qs_multiple_aliases() {
+        // All aliases must each get their own LAST\tA… line.
+        let mut item = ItemEntity::new_empty();
+        item.aliases_mut().push(LocaleString::new("en", "first"));
+        item.aliases_mut().push(LocaleString::new("en", "second"));
+        item.aliases_mut().push(LocaleString::new("de", "erstes"));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert!(qs.contains(&"LAST\tAen\t\"first\"".to_string()));
+        assert!(qs.contains(&"LAST\tAen\t\"second\"".to_string()));
+        assert!(qs.contains(&"LAST\tAde\t\"erstes\"".to_string()));
+    }
+
+    #[test]
+    fn test_wikidata_new_builds_client() {
+        // Wikidata::new() must produce a working instance whose client builder
+        // compiles and builds without error.
+        let wd = Wikidata::new();
+        assert!(wd.reqwest_client().is_ok());
+    }
 }

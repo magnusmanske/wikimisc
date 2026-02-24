@@ -277,4 +277,104 @@ mod tests {
         table.push(vec![Some(SparqlValue::Literal("test".to_string()))]);
         assert!(!table.is_empty());
     }
+
+    // ── from_api_result ──────────────────────────────────────────────────────
+
+    fn make_api_result(json: serde_json::Value) -> SparqlApiResult {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn test_from_api_result_basic() {
+        let result = make_api_result(serde_json::json!({
+            "head": {"vars": ["item", "label"]},
+            "results": {"bindings": [
+                {
+                    "item":  {"type": "uri",     "value": "http://www.wikidata.org/entity/Q42"},
+                    "label": {"type": "literal", "value": "Douglas Adams"}
+                }
+            ]}
+        }));
+
+        let table = SparqlTable::from_api_result(result).unwrap();
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.get_var_index("item"), Some(0));
+        assert_eq!(table.get_var_index("label"), Some(1));
+        assert_eq!(
+            table.get_row_col(0, 0),
+            Some(SparqlValue::Entity("Q42".to_string()))
+        );
+        assert_eq!(
+            table.get_row_col(0, 1),
+            Some(SparqlValue::Literal("Douglas Adams".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_from_api_result_empty_bindings() {
+        let result = make_api_result(serde_json::json!({
+            "head": {"vars": ["x", "y"]},
+            "results": {"bindings": []}
+        }));
+
+        let table = SparqlTable::from_api_result(result).unwrap();
+        assert_eq!(table.len(), 0);
+        assert!(table.is_empty());
+        assert_eq!(table.get_var_index("x"), Some(0));
+        assert_eq!(table.get_var_index("y"), Some(1));
+    }
+
+    #[test]
+    fn test_from_api_result_no_vars_in_head_is_err() {
+        // No "vars" key → empty headers → pushing the non-empty row errors.
+        let result = make_api_result(serde_json::json!({
+            "head": {},
+            "results": {"bindings": [
+                {"x": {"type": "literal", "value": "v"}}
+            ]}
+        }));
+        assert!(SparqlTable::from_api_result(result).is_err());
+    }
+
+    #[test]
+    fn test_from_api_result_missing_variable_in_row_becomes_none() {
+        // A row that is missing the "label" binding should produce None for that column.
+        let result = make_api_result(serde_json::json!({
+            "head": {"vars": ["item", "label"]},
+            "results": {"bindings": [
+                {"item": {"type": "uri", "value": "http://www.wikidata.org/entity/Q1"}}
+            ]}
+        }));
+
+        let table = SparqlTable::from_api_result(result).unwrap();
+        assert_eq!(table.len(), 1);
+        assert_eq!(
+            table.get_row_col(0, 0),
+            Some(SparqlValue::Entity("Q1".to_string()))
+        );
+        assert_eq!(table.get_row_col(0, 1), None);
+    }
+
+    #[test]
+    fn test_from_api_result_multiple_rows() {
+        let result = make_api_result(serde_json::json!({
+            "head": {"vars": ["q"]},
+            "results": {"bindings": [
+                {"q": {"type": "uri", "value": "http://www.wikidata.org/entity/Q1"}},
+                {"q": {"type": "uri", "value": "http://www.wikidata.org/entity/Q2"}},
+                {"q": {"type": "uri", "value": "http://www.wikidata.org/entity/Q3"}}
+            ]}
+        }));
+
+        let table = SparqlTable::from_api_result(result).unwrap();
+        assert_eq!(table.len(), 3);
+        assert_eq!(
+            table.get_row_col(0, 0),
+            Some(SparqlValue::Entity("Q1".to_string()))
+        );
+        assert_eq!(
+            table.get_row_col(2, 0),
+            Some(SparqlValue::Entity("Q3".to_string()))
+        );
+    }
 }

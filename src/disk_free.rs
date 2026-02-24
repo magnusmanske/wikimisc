@@ -184,4 +184,53 @@ mod tests {
         assert_eq!(df.parts[0].position, 0);
         assert_eq!(df.parts[0].length, 30);
     }
+
+    #[test]
+    fn test_find_free_empty_list() {
+        let mut df = DiskFree::new();
+        assert_eq!(df.find_free(1), None);
+        assert_eq!(df.find_free(100), None);
+    }
+
+    #[test]
+    fn test_find_free_all_slots_too_small() {
+        let mut df = DiskFree::new();
+        df.add(PositionLength::new(0, 5));
+        df.add(PositionLength::new(100, 3));
+        // Requesting more than any slot holds must return None.
+        assert_eq!(df.find_free(6), None);
+        // Both slots are still intact.
+        assert_eq!(df.find_free(5), Some(0));
+        assert_eq!(df.find_free(3), Some(100));
+    }
+
+    #[test]
+    fn test_find_free_exact_match_preferred_over_first_fit() {
+        let mut df = DiskFree::new();
+        // Slot at position 0 is larger (first-fit candidate).
+        df.add(PositionLength::new(0, 20));
+        // Slot at position 100 is an exact match.
+        df.add(PositionLength::new(100, 10));
+        // find_free(10) must choose the exact match at 100, not carve from the first slot.
+        assert_eq!(df.find_free(10), Some(100));
+        // The first slot must be untouched.
+        assert_eq!(df.find_free(20), Some(0));
+    }
+
+    #[test]
+    fn test_find_free_first_fit_carves_from_front() {
+        let mut df = DiskFree::new();
+        df.add(PositionLength::new(50, 30)); // [50, 80)
+                                             // Request 10 bytes — must carve from the front of the slot.
+        let pos = df.find_free(10).unwrap();
+        assert_eq!(pos, 50);
+        // Remaining slot must be [60, 80).
+        assert_eq!(df.find_free(20), Some(60));
+    }
+
+    #[test]
+    fn test_default_is_empty() {
+        let mut df = DiskFree::default();
+        assert_eq!(df.find_free(1), None);
+    }
 }

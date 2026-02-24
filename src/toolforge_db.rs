@@ -205,4 +205,57 @@ mod tests {
             HostSchema::new("enwiki.web.db.svc.eqiad.wmflabs", "enwiki_p")
         );
     }
+
+    #[test]
+    fn test_host_schema_accessors() {
+        let hs = HostSchema::new("myhost.example.com", "mydb_p");
+        assert_eq!(hs.host(), "myhost.example.com");
+        assert_eq!(hs.schema(), "mydb_p");
+    }
+
+    #[test]
+    fn test_host_schema_equality() {
+        let hs1 = HostSchema::new("host", "schema");
+        let hs2 = HostSchema::new("host", "schema");
+        let hs3 = HostSchema::new("other", "schema");
+        assert_eq!(hs1, hs2);
+        assert_ne!(hs1, hs3);
+    }
+
+    #[test]
+    fn test_get_pool_missing_key() {
+        let db = ToolforgeDB::default();
+        assert!(db.get_pool("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_add_mysql_pool_missing_url_returns_err() {
+        // A config object without a "url" key must produce an Err, not a panic.
+        let mut db = ToolforgeDB::default();
+        let result = db.add_mysql_pool("test", &json!({}));
+        assert!(
+            result.is_err(),
+            "add_mysql_pool must return Err when 'url' is absent from the config"
+        );
+        // The pool must not have been registered.
+        assert!(db.get_pool("test").is_none());
+    }
+
+    #[test]
+    fn test_add_mysql_pool_invalid_url_returns_err() {
+        // A config object with a syntactically invalid URL must also return Err.
+        let mut db = ToolforgeDB::default();
+        let result = db.add_mysql_pool("bad", &json!({"url": "not-a-valid-mysql-url"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fix_wiki_db_name_hyphen_to_underscore() {
+        // Hyphens in ordinary wiki names (not the special be-tarask cases) must be
+        // converted to underscores.
+        assert_eq!(
+            ToolforgeDB::fix_wiki_db_name("zh-min-nanwiki"),
+            "zh_min_nanwiki"
+        );
+    }
 }

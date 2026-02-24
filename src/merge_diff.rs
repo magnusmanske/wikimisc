@@ -407,4 +407,89 @@ mod tests {
         assert_eq!(item.claims().len(), 1);
         assert_eq!(item.claims()[0].qualifiers().len(), 1);
     }
+
+    #[test]
+    fn test_merge_diff_apply_with_sitelinks() {
+        // apply() must append diff sitelinks to a pre-existing sitelinks Vec on the item.
+        let mut item = ItemEntity::new_empty();
+        item.sitelinks_mut()
+            .get_or_insert_with(Vec::new)
+            .push(SiteLink::new("enwiki", "Existing", vec![]));
+
+        let mut diff = MergeDiff::new();
+        diff.sitelinks.push(SiteLink::new("dewiki", "Neu", vec![]));
+
+        diff.apply(&mut item);
+
+        let sl = item.sitelinks().clone().unwrap();
+        assert_eq!(sl.len(), 2);
+        assert!(sl.iter().any(|s| s.site() == "enwiki"));
+        assert!(sl.iter().any(|s| s.site() == "dewiki"));
+    }
+
+    #[test]
+    fn test_merge_diff_apply_altered_statement_not_in_item_is_ignored() {
+        // If an altered-statement ID does not exist on the item, apply() must not
+        // panic and must leave the item's existing claims unchanged.
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new_string("P1", "existing"),
+            vec![],
+            vec![],
+        ));
+
+        let mut diff = MergeDiff::new();
+        let mut ghost = Statement::new_normal(Snak::new_string("P99", "ghost"), vec![], vec![]);
+        ghost.set_id("Q1$does-not-exist");
+        diff.altered_statements
+            .insert("Q1$does-not-exist".to_string(), ghost);
+
+        diff.apply(&mut item);
+
+        // The existing claim must be untouched and no new claim must have appeared.
+        assert_eq!(item.claims().len(), 1);
+        assert_eq!(item.claims()[0].property(), "P1");
+    }
+
+    #[test]
+    fn test_merge_diff_extend_covers_all_fields() {
+        // extend() must propagate every field, including aliases and sitelinks.
+        let mut diff1 = MergeDiff::new();
+        diff1.aliases.push(LocaleString::new("en", "alias1"));
+        diff1
+            .sitelinks
+            .push(SiteLink::new("enwiki", "Article", vec![]));
+
+        let mut diff2 = MergeDiff::new();
+        diff2.aliases.push(LocaleString::new("de", "alias2"));
+        diff2
+            .sitelinks
+            .push(SiteLink::new("dewiki", "Artikel", vec![]));
+
+        diff1.extend(&diff2);
+
+        assert_eq!(diff1.aliases.len(), 2);
+        assert_eq!(diff1.sitelinks.len(), 2);
+        assert!(diff1.aliases.iter().any(|a| a.language() == "en"));
+        assert!(diff1.aliases.iter().any(|a| a.language() == "de"));
+        assert!(diff1.sitelinks.iter().any(|s| s.site() == "enwiki"));
+        assert!(diff1.sitelinks.iter().any(|s| s.site() == "dewiki"));
+    }
+
+    #[test]
+    fn test_merge_diff_apply_aliases_and_descriptions() {
+        let mut item = ItemEntity::new_empty();
+
+        let mut diff = MergeDiff::new();
+        diff.aliases.push(LocaleString::new("en", "alt-name"));
+        diff.descriptions
+            .push(LocaleString::new("en", "a description"));
+
+        diff.apply(&mut item);
+
+        assert_eq!(item.aliases().len(), 1);
+        assert_eq!(item.aliases()[0].value(), "alt-name");
+        assert_eq!(item.descriptions().len(), 1);
+        assert_eq!(item.descriptions()[0].value(), "a description");
+    }
 }
