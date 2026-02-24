@@ -133,28 +133,25 @@ impl SiteMatrix {
     }
 
     pub fn is_language_rtl(&self, language: &str) -> bool {
-        self.site_matrix["sitematrix"]
-            .as_object()
-            .expect("SiteMatrix::is_language_rtl: sitematrix not an object")
-            .iter()
-            .any(|(_id, data)| {
-                matches!(
-                    (data["code"].as_str(), data["dir"].as_str()),
-                    (Some(lang), Some("rtl")) if lang == language
-                )
-            })
+        let Some(obj) = self.site_matrix["sitematrix"].as_object() else {
+            return false;
+        };
+        obj.iter().any(|(_id, data)| {
+            matches!(
+                (data["code"].as_str(), data["dir"].as_str()),
+                (Some(lang), Some("rtl")) if lang == language
+            )
+        })
     }
 
     pub fn get_wiki_for_server_url(&self, url: &str) -> Option<String> {
         self.site_matrix["sitematrix"]
-            .as_object()
-            .expect("SiteMatrix::get_wiki_for_server_url: sitematrix not an object")
+            .as_object()?
             .iter()
             .find_map(|(id, data)| match id.as_str() {
                 "count" => None,
                 "specials" => data
-                    .as_array()
-                    .expect("SiteMatrix::get_wiki_for_server_url: 'specials' is not an array")
+                    .as_array()?
                     .iter()
                     .find_map(|site| self.get_wiki_for_server_url_from_site(url, site)),
                 _other => data["site"].as_array().and_then(|sites| {
