@@ -6,6 +6,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::LazyLock;
+use wikibase::mediawiki::prelude::*;
 use wikibase::*;
 
 static RE_PROPERTY_NUMERIC: LazyLock<Regex> =
@@ -76,25 +77,14 @@ impl ExternalId {
     /// Searches Wikidata for a single item with the given query.
     /// Returns None if none or multiple items are found.
     pub async fn search_wikidata_single_item(&self, query: &str) -> Option<String> {
-        let url = "https://www.wikidata.org/w/api.php";
         let wd = Wikidata::new();
-        let client = wd.reqwest_client().ok()?;
-        let text: String = client
-            .get(url)
-            .query(&[
-                ("action", "query"),
-                ("list", "search"),
-                ("srnamespace", "0"),
-                ("format", "json"),
-                ("srsearch", query),
-            ])
-            .send()
-            .await
-            .ok()?
-            .text()
+        let api = wd.api().await.ok()?;
+        let j = ActionApiList::search()
+            .srnamespace(&[0])
+            .srsearch(query)
+            .run(&api)
             .await
             .ok()?;
-        let j: serde_json::Value = serde_json::from_str(&text).ok()?;
         if j["query"]["searchinfo"]["totalhits"].as_i64()? == 1 {
             Some(j["query"]["search"][0]["title"].as_str()?.to_string())
         } else {

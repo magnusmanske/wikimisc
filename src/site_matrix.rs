@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use wikibase::mediawiki::api::Api;
+use wikibase::mediawiki::prelude::*;
 
 #[derive(Debug, Clone, Default)]
 pub struct SiteMatrix {
@@ -14,8 +14,7 @@ pub struct SiteMatrix {
 impl SiteMatrix {
     /// Create a new SiteMatrix object
     pub async fn new(api: &Api) -> Result<Self> {
-        let params = Self::str_vec_to_hashmap(&[("action", "sitematrix")]);
-        let site_matrix = api.get_query_api_json(&params).await?;
+        let site_matrix = ActionApi::sitematrix().run(api).await?;
         Ok(Self { site_matrix })
     }
 
