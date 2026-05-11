@@ -1,3 +1,11 @@
+//! Inactivity watchdog that kills the current process when no activity has
+//! been observed for `max_seconds`.
+//!
+//! Intended for Toolforge web services that should self-terminate when idle:
+//! call [`Seppuku::arm`] once at startup, then call [`Seppuku::alive`] on each
+//! request. If no `alive()` arrives within the configured window, the timer
+//! task calls `std::process::exit(0)`.
+
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -49,25 +57,34 @@ impl Seppuku {
     }
 
     /// Starts the seppuku timer.
+    ///
+    /// On each iteration the timer sleeps until the *deadline* (the moment that
+    /// is `max_seconds` after the last recorded activity), rather than always
+    /// sleeping for the full `max_seconds`. Without this, an `alive()` call
+    /// late in the window could push the actual fire time out to nearly
+    /// `2 * max_seconds` past the last activity.
     fn start_timer(&self) {
         let mut timer_running = self.timer_running.lock().unwrap();
         if *timer_running {
             // Already running
             return;
         }
+        let max = Duration::from_secs(self.max_seconds);
         let max_seconds = self.max_seconds;
         let last_activity = self.last_activity.clone();
         let armed = self.armed.clone();
         *timer_running = true;
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(max_seconds)).await;
-                if *armed.lock().unwrap()
-                    && last_activity.lock().unwrap().elapsed().as_secs() > max_seconds
-                {
+                let elapsed = last_activity.lock().unwrap().elapsed();
+                if *armed.lock().unwrap() && elapsed >= max {
                     println!("Committing seppuku after {max_seconds} seconds of inactivity");
                     std::process::exit(0);
                 }
+                // Sleep just until the deadline. A fresh `alive()` call will
+                // simply mean we wake up early and loop without firing.
+                let remaining = max.checked_sub(elapsed).unwrap_or(max);
+                tokio::time::sleep(remaining).await;
             }
         });
     }

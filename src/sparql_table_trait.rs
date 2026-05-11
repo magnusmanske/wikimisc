@@ -26,8 +26,8 @@ pub trait SparqlTableTrait {
     /// Get the zero-based column index for a variable name (case-insensitive).
     fn get_var_index(&self, var: &str) -> Option<usize>;
 
-    /// Append a row.
-    fn push(&mut self, row: SparqlRow);
+    /// Append a row. Returns `Err` if the underlying storage fails (e.g. disk I/O).
+    fn push(&mut self, row: SparqlRow) -> anyhow::Result<()>;
 
     /// Get a row by index. Returns `None` if out of range.
     fn get(&self, row_id: usize) -> Option<SparqlRow>;
@@ -68,11 +68,15 @@ mod tests {
         assert_eq!(table.main_column(), Some(0));
         assert_eq!(table.main_variable(), Some(&"item".to_string()));
 
-        table.push(vec![
-            Some(SparqlValue::Entity("Q1".to_string())),
-            Some(SparqlValue::Literal("Earth".to_string())),
-        ]);
-        table.push(vec![Some(SparqlValue::Entity("Q2".to_string())), None]);
+        table
+            .push(vec![
+                Some(SparqlValue::Entity("Q1".to_string())),
+                Some(SparqlValue::Literal("Earth".to_string())),
+            ])
+            .unwrap();
+        table
+            .push(vec![Some(SparqlValue::Entity("Q2".to_string())), None])
+            .unwrap();
 
         assert!(!table.is_empty());
         assert_eq!(table.len(), 2);
@@ -96,7 +100,20 @@ mod tests {
 
     #[test]
     fn test_sparql_table_trait_file_backend() {
-        let mut table = SparqlTable::new();
+        let mut table: SparqlTable = SparqlTable::new();
         assert_table_behaviour(&mut table);
+    }
+
+    #[test]
+    fn test_dyn_dispatch_works_for_both_backends() {
+        // The trait must remain object-safe so callers can hold a `&dyn SparqlTableTrait`
+        // pointing at either backend.
+        fn count(t: &dyn SparqlTableTrait) -> usize {
+            t.len()
+        }
+        let v = SparqlTableVec::new();
+        let f: SparqlTable = SparqlTable::new();
+        assert_eq!(count(&v), 0);
+        assert_eq!(count(&f), 0);
     }
 }

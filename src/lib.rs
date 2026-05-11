@@ -2,7 +2,7 @@
 //! based on the `wikibase` and `mediawiki` crates.
 
 pub mod date;
-pub mod disk_free;
+pub(crate) mod disk_free;
 pub mod external_id;
 pub mod file_hash;
 pub mod file_vec;

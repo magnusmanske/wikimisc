@@ -1,3 +1,14 @@
+//! Convenience wrapper for talking to Wikidata.
+//!
+//! [`Wikidata`] holds a configurable user-agent string and request timeout,
+//! and constructs `reqwest::Client` / `mediawiki::Api` instances with both
+//! applied consistently. New HTTP calls against Wikidata or WDQS should go
+//! through this struct rather than building a `reqwest::Client` directly, so
+//! that the project's UA and timeout policy stay uniform.
+//!
+//! Also provides [`Wikidata::item2qs`] for converting an `ItemEntity` into a
+//! QuickStatements-compatible line list.
+
 use crate::mediawiki::reqwest::{Client, ClientBuilder};
 use anyhow::{anyhow, Result};
 use std::{
@@ -200,6 +211,7 @@ mod tests {
     use wikibase::*;
 
     #[tokio::test]
+    #[ignore = "requires network access to query.wikidata.org"]
     async fn test_load_sparql_csv() {
         let wd = Wikidata::new();
         let sparql = "SELECT ?item ?itemLabel WHERE { ?item wdt:P31 wd:Q34038. SERVICE wikibase:label { bd:serviceParam wikibase:language 'en'. }} LIMIT 5";

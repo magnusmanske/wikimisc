@@ -1,3 +1,14 @@
+//! MySQL connection pool registry for Toolforge replicas and tool databases.
+//!
+//! [`ToolforgeDB`] owns a `HashMap<String, mysql_async::Pool>` keyed by
+//! caller-chosen names. Pools are constructed from `serde_json::Value` config
+//! blobs via [`ToolforgeDB::add_mysql_pool`], so configuration can live in a
+//! JSON file alongside other settings.
+//!
+//! [`ToolforgeDB::db_host_and_schema_for_wiki`] handles the
+//! Toolforge-vs-local-dev fork: on Toolforge it produces the `*.web.db.svc`
+//! cluster hostname; locally it returns `127.0.0.1` so SSH tunnels work.
+
 use crate::toolforge_app::ToolforgeApp;
 use anyhow::{anyhow, Result};
 use core::time::Duration;
@@ -123,6 +134,7 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
+    #[ignore = "requires TFDB env var pointing at a reachable MySQL server"]
     // THIS TEST REQUIRES THE ENVIRONMENT VARIABLE `TFDB` TO BE SET TO A MYSQL URL
     // ALSO, THE MYSQL SERVER MUST BE ACCESSIBLE FROM THE MACHINE RUNNING THE TEST, EG:
     // ssh magnus@tools-login.wmflabs.org -L 3308:tools-db:3306 -N &

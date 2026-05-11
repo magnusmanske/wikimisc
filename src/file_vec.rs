@@ -1,3 +1,14 @@
+//! `Vec`-like container backed by [`crate::file_hash::FileHash`].
+//!
+//! Holds up to `MAX_MEM_ENTRIES` rows in memory, then spills the rest to a
+//! temp file as JSON blobs. The API mirrors [`Vec`] for the common operations
+//! (`push`, `get`, `pop`, `remove`, `retain`, `sort_by`, `reverse`) but every
+//! mutation may fail on disk I/O once spilling has begun, so most fallible
+//! operations return `Result`.
+//!
+//! Reach for `FileVec` when you have many rows whose memory footprint would
+//! exceed RAM but whose access pattern is sequential or random-access by index.
+
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -18,11 +29,10 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         }
     }
 
-    pub fn push(&mut self, row: ValueType) {
-        self.file_hash
-            .insert(self.len, row)
-            .expect("Failed to push result");
+    pub fn push(&mut self, row: ValueType) -> Result<()> {
+        self.file_hash.insert(self.len, row)?;
         self.len += 1;
+        Ok(())
     }
 
     pub fn get(&self, pos: usize) -> Option<ValueType> {
@@ -31,9 +41,7 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
 
     pub fn set(&mut self, pos: usize, row: ValueType) -> Result<()> {
         if pos < self.len {
-            self.file_hash
-                .insert(pos, row)
-                .expect("Failed to set result");
+            self.file_hash.insert(pos, row)?;
             Ok(())
         } else {
             Err(anyhow!("Attempting to set out-of-bounds result {pos}"))
@@ -74,7 +82,7 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         }
     }
 
-    pub fn retain<F>(&mut self, mut f: F)
+    pub fn retain<F>(&mut self, mut f: F) -> Result<()>
     where
         F: FnMut(&ValueType) -> bool,
     {
@@ -82,7 +90,7 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         for read_pos in 0..self.len {
             let value = self
                 .get(read_pos)
-                .expect("FileVec::keep_marked: row not found");
+                .ok_or_else(|| anyhow!("FileVec::retain: row {read_pos} unreadable"))?;
             if f(&value) {
                 self.file_hash.swap(read_pos, write_pos);
                 write_pos += 1;
@@ -91,26 +99,37 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         while self.len > write_pos {
             self.pop();
         }
+        Ok(())
     }
 
+    /// Sort the rows in place by the comparison function.
+    ///
+    /// Reads every row into memory once, sorts in-memory with `std::slice::sort_by`,
+    /// then writes the rows back in sorted order. This is `O(n log n)` comparisons
+    /// plus `2N` disk operations — a major improvement over the previous in-place
+    /// selection sort which performed `O(n²)` disk reads.
+    ///
+    /// The trade-off: peak memory while sorting holds `n` rows. For the typical
+    /// use case (sorting result sets after parsing) this is acceptable; if a
+    /// caller needs to sort a dataset that exceeds available RAM, an external
+    /// merge sort would be needed instead.
     pub fn sort_by<F>(&mut self, mut f: F) -> Result<()>
     where
         F: FnMut(&ValueType, &ValueType) -> Ordering,
     {
-        let n = self.len;
-        for i in 0..n {
-            let mut min_idx = i;
-            // Fetch the current minimum value once per outer iteration; re-fetch only
-            // when a new minimum is found, avoiding a redundant disk read per inner step.
-            let mut min_val = self.get(min_idx).expect("FileVec::sort_by: row not found");
-            for j in i + 1..n {
-                let row_j = self.get(j).expect("FileVec::sort_by: row not found");
-                if f(&row_j, &min_val) == Ordering::Less {
-                    min_idx = j;
-                    min_val = row_j;
-                }
-            }
-            self.swap(i, min_idx)?;
+        if self.len < 2 {
+            return Ok(());
+        }
+        let mut buffered: Vec<ValueType> = Vec::with_capacity(self.len);
+        for i in 0..self.len {
+            buffered.push(
+                self.get(i)
+                    .ok_or_else(|| anyhow!("FileVec::sort_by: row {i} unreadable"))?,
+            );
+        }
+        buffered.sort_by(|a, b| f(a, b));
+        for (i, v) in buffered.into_iter().enumerate() {
+            self.set(i, v)?;
         }
         Ok(())
     }
@@ -193,9 +212,9 @@ mod tests {
     #[test]
     fn test_reverse() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         file_vec.reverse().unwrap();
         assert_eq!(file_vec.len(), 3);
         assert_eq!(file_vec.get(0).unwrap(), "c");
@@ -212,24 +231,24 @@ mod tests {
     #[test]
     fn test_sort_by_single() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
+        file_vec.push("a".to_string()).unwrap();
         file_vec.sort_by(|a, b| a.cmp(b)).unwrap();
     }
 
     #[test]
     fn test_sort_by_two() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
         file_vec.sort_by(|a, b| a.cmp(b)).unwrap();
     }
 
     #[test]
     fn test_sort_by() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("c".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("a".to_string());
+        file_vec.push("c".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("a".to_string()).unwrap();
         file_vec.sort_by(|a, b| a.cmp(b)).unwrap();
         assert_eq!(file_vec.len(), 3);
         assert_eq!(file_vec.get(0).unwrap(), "a");
@@ -240,9 +259,9 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         file_vec.clear().unwrap();
         assert_eq!(file_vec.len(), 0);
     }
@@ -250,9 +269,9 @@ mod tests {
     #[test]
     fn test_file_vec_push() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         assert_eq!(file_vec.len(), 3);
         assert_eq!(file_vec.get(0).unwrap(), "a");
         assert_eq!(file_vec.get(1).unwrap(), "b");
@@ -262,9 +281,9 @@ mod tests {
     #[test]
     fn test_set() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         file_vec.set(1, "d".to_string()).unwrap();
         assert_eq!(file_vec.len(), 3);
         assert_eq!(file_vec.get(0).unwrap(), "a");
@@ -275,9 +294,9 @@ mod tests {
     #[test]
     fn test_get() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         assert_eq!(file_vec.get(0).unwrap(), "a");
         assert_eq!(file_vec.get(1).unwrap(), "b");
         assert_eq!(file_vec.get(2).unwrap(), "c");
@@ -287,7 +306,7 @@ mod tests {
     fn test_is_empty() {
         let mut file_vec: FileVec<String> = FileVec::new();
         assert!(file_vec.is_empty());
-        file_vec.push("a".to_string());
+        file_vec.push("a".to_string()).unwrap();
         assert!(!file_vec.is_empty());
     }
 
@@ -295,16 +314,16 @@ mod tests {
     fn test_len() {
         let mut file_vec: FileVec<String> = FileVec::new();
         assert_eq!(file_vec.len(), 0);
-        file_vec.push("a".to_string());
+        file_vec.push("a".to_string()).unwrap();
         assert_eq!(file_vec.len(), 1);
     }
 
     #[test]
     fn test_remove() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         file_vec.remove(1);
         assert_eq!(file_vec.len(), 2);
         assert_eq!(file_vec.get(0).unwrap(), "a");
@@ -314,9 +333,9 @@ mod tests {
     #[test]
     fn test_remove_last() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         file_vec.remove(2);
         assert_eq!(file_vec.len(), 2);
         assert_eq!(file_vec.get(0).unwrap(), "a");
@@ -326,18 +345,18 @@ mod tests {
     #[test]
     fn test_remove_out_of_bounds() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         assert_eq!(file_vec.remove(3), None);
     }
 
     #[test]
     fn test_swap() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         file_vec.swap(0, 2).unwrap();
         assert_eq!(file_vec.len(), 3);
         assert_eq!(file_vec.get(0).unwrap(), "c");
@@ -354,9 +373,9 @@ mod tests {
     #[test]
     fn test_swap_same_index() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         file_vec.swap(0, 0).unwrap();
         assert_eq!(file_vec.len(), 3);
         assert_eq!(file_vec.get(0).unwrap(), "a");
@@ -373,9 +392,9 @@ mod tests {
     #[test]
     fn test_pop() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         assert_eq!(file_vec.pop().unwrap(), "c");
         assert_eq!(file_vec.len(), 2);
         assert_eq!(file_vec.pop().unwrap(), "b");
@@ -393,10 +412,10 @@ mod tests {
     #[test]
     fn test_retain() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
-        file_vec.retain(|x| x != "b");
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
+        file_vec.retain(|x| x != "b").unwrap();
         assert_eq!(file_vec.len(), 2);
         assert_eq!(file_vec.get(0).unwrap(), "a");
         assert_eq!(file_vec.get(1).unwrap(), "c");
@@ -405,9 +424,9 @@ mod tests {
     #[test]
     fn test_into_iter() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         let mut iter = file_vec.into_iter();
         assert_eq!(iter.next().unwrap(), "a");
         assert_eq!(iter.next().unwrap(), "b");
@@ -432,7 +451,7 @@ mod tests {
     #[test]
     fn test_into_iter_single() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
+        file_vec.push("a".to_string()).unwrap();
         let mut iter = file_vec.into_iter();
         assert_eq!(iter.next().unwrap(), "a");
         assert_eq!(iter.next(), None);
@@ -441,9 +460,9 @@ mod tests {
     #[test]
     fn test_into_iter_borrowed() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
         let mut iter = (&file_vec).into_iter();
         assert_eq!(iter.next().unwrap(), "a");
         assert_eq!(iter.next().unwrap(), "b");
@@ -468,7 +487,7 @@ mod tests {
     #[test]
     fn test_set_out_of_bounds() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
+        file_vec.push("a".to_string()).unwrap();
         // Exact length is out of bounds (valid indices are 0..len-1).
         assert!(file_vec.set(1, "x".to_string()).is_err());
         assert!(file_vec.set(99, "x".to_string()).is_err());
@@ -481,12 +500,12 @@ mod tests {
         // Push more than MAX_MEM_ENTRIES (5) items so the disk backend is engaged,
         // then verify sort_by still produces a correctly ordered result.
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("f".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("d".to_string());
-        file_vec.push("a".to_string());
-        file_vec.push("e".to_string());
-        file_vec.push("c".to_string()); // 6th element — flushes to disk
+        file_vec.push("f".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("d".to_string()).unwrap();
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("e".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap(); // 6th element — flushes to disk
         file_vec.sort_by(|a, b| a.cmp(b)).unwrap();
         assert_eq!(file_vec.len(), 6);
         assert_eq!(file_vec.get(0).unwrap(), "a");
@@ -500,7 +519,7 @@ mod tests {
     #[test]
     fn test_pop_single_element() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("only".to_string());
+        file_vec.push("only".to_string()).unwrap();
         assert_eq!(file_vec.pop().unwrap(), "only");
         assert_eq!(file_vec.len(), 0);
         assert!(file_vec.is_empty());
@@ -511,10 +530,10 @@ mod tests {
     #[test]
     fn test_reverse_even_length() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("a".to_string());
-        file_vec.push("b".to_string());
-        file_vec.push("c".to_string());
-        file_vec.push("d".to_string());
+        file_vec.push("a".to_string()).unwrap();
+        file_vec.push("b".to_string()).unwrap();
+        file_vec.push("c".to_string()).unwrap();
+        file_vec.push("d".to_string()).unwrap();
         file_vec.reverse().unwrap();
         assert_eq!(file_vec.len(), 4);
         assert_eq!(file_vec.get(0).unwrap(), "d");
@@ -526,7 +545,7 @@ mod tests {
     #[test]
     fn test_reverse_single_element() {
         let mut file_vec: FileVec<String> = FileVec::new();
-        file_vec.push("only".to_string());
+        file_vec.push("only".to_string()).unwrap();
         file_vec.reverse().unwrap();
         assert_eq!(file_vec.len(), 1);
         assert_eq!(file_vec.get(0).unwrap(), "only");

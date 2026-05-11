@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: build
+        run: cargo build --all-targets
+
+      - name: test (offline)
+        # Network-dependent tests are gated with #[ignore]; CI runs only the
+        # offline suite. To exercise the live-API tests, run locally with
+        #   cargo test -- --ignored
+        run: cargo test
+
+  msrv-check:
+    name: build on MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.80
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.80"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build

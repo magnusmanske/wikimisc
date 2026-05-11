@@ -371,6 +371,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires network access to wikidata.org"]
     async fn test_site_matrix() {
         let api = Api::new("https://www.wikidata.org/w/api.php")
             .await
@@ -440,6 +441,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires network access to wikidata.org"]
     async fn is_language_rtl() {
         let api = Api::new("https://www.wikidata.org/w/api.php")
             .await
@@ -491,6 +493,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires network access to wikidata.org"]
     async fn test_site_matrix_zh_wikis() {
         let api = Api::new("https://www.wikidata.org/w/api.php")
             .await

@@ -1,4 +1,19 @@
 //! Useful functions to handle dates.
+//!
+//! # Range restrictions
+//!
+//! [`Date::from_str`] is intentionally conservative about what it accepts:
+//!
+//! - **Future years are rejected.** Any year strictly greater than the current
+//!   UTC year fails to parse. This catches typos like `3000` when the input
+//!   should have been `2000`. If you need to represent future dates, parse
+//!   them yourself.
+//! - **BCE years are not supported.** The regex always prepends `+` to the
+//!   captured year, so explicitly negative inputs like `-0500-01-01T00:00:00Z/11`
+//!   produce a malformed timestamp and fail. Wikidata represents BCE years
+//!   via Julian-calendar items rather than negative years anyway.
+//! - **Two-digit years are rejected.** The patterns require `\d{3,}`, so a
+//!   bare `99` will not parse. This avoids ambiguity between, e.g., 1999 and 99.
 
 use anyhow::{anyhow, Result};
 use chrono::Datelike;

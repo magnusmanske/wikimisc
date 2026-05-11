@@ -1,11 +1,17 @@
 //! Cache a lot of JSON-(de)serializable items on disk.
+//!
+//! `FileHash` is `Send + Sync`: the backing file is guarded by a `Mutex` so
+//! concurrent `&self` reads serialise on the file position rather than racing.
+//! Mutating operations still require `&mut self`, so most callers will wrap a
+//! `FileHash` in `Mutex` or `RwLock` themselves anyway.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::SeekFrom;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tempfile::tempfile;
 
 use crate::disk_free::DiskFree;
@@ -20,11 +26,17 @@ const MAX_MEM_ENTRIES: usize = 5;
 #[derive(Clone, Debug)]
 pub struct FileHash<KeyType, ValueType> {
     id2pos: HashMap<KeyType, PositionLength>, // Position, length
-    file_handle: Option<Arc<File>>,
+    file_handle: Option<Arc<Mutex<File>>>,
     in_memory: HashMap<KeyType, ValueType>,
     disk_free: DiskFree,
     max_mem_entries: usize,
     using_disk: bool,
+}
+
+/// Lock a `Mutex<File>` and convert a poisoned lock into an `anyhow` error.
+fn lock_file(fh: &Arc<Mutex<File>>) -> Result<MutexGuard<'_, File>> {
+    fh.lock()
+        .map_err(|_| anyhow!("FileHash file mutex is poisoned"))
 }
 
 impl<
@@ -54,8 +66,8 @@ impl<
     pub fn clear(&mut self) -> Result<()> {
         self.id2pos.clear();
         self.in_memory.clear();
-        if let Some(fh_lock) = &self.file_handle {
-            fh_lock.set_len(0)?;
+        if let Some(fh) = &self.file_handle {
+            lock_file(fh)?.set_len(0)?;
         }
         Ok(())
     }
@@ -133,15 +145,6 @@ impl<
     }
 
     // Only used when `using_disk` is true
-    fn get_file_pos_to_write(&mut self, fh: &File, size: u64) -> Result<u64> {
-        let position = self
-            .disk_free
-            .find_free(size)
-            .unwrap_or(fh.metadata()?.len());
-        Ok(position)
-    }
-
-    // Only used when `using_disk` is true
     fn release_storage(&mut self, key: &KeyType) {
         if let Some(pl) = self.id2pos.remove(key) {
             self.disk_free.add(pl);
@@ -149,15 +152,24 @@ impl<
     }
 
     fn insert_disk(&mut self, key: KeyType, value: ValueType) -> Result<()> {
-        let mut fh = self.get_or_create_file_handle()?;
+        let fh = self.get_or_create_file_handle()?;
         self.release_storage(&key);
 
         let json = serde_json::to_string(&value)?;
         let bytes = json.as_bytes();
         let size = bytes.len() as u64;
-        let position_in_file = self.get_file_pos_to_write(&fh, size)?;
-        fh.seek(SeekFrom::Start(position_in_file))?;
-        fh.write_all(bytes)?;
+
+        // Acquire the file lock for the seek+write — do it after we know the
+        // free-list position so the lock window stays as short as possible.
+        let position_in_file = match self.disk_free.find_free(size) {
+            Some(pos) => pos,
+            None => lock_file(&fh)?.metadata()?.len(),
+        };
+        {
+            let mut file = lock_file(&fh)?;
+            file.seek(SeekFrom::Start(position_in_file))?;
+            file.write_all(bytes)?;
+        }
         self.id2pos
             .insert(key, PositionLength::new(position_in_file, size));
         Ok(())
@@ -195,12 +207,31 @@ impl<
         }
     }
 
+    /// Apply `f` to the value for `key` without cloning it (in the in-memory
+    /// case) or with a single deserialize (in the disk case), returning `f`'s
+    /// result. Prefer this over [`get`](Self::get) when you only need to read
+    /// the value, since it avoids the clone of the in-memory path.
+    pub fn with_value<K, F, R>(&self, key: K, f: F) -> Option<R>
+    where
+        K: Into<KeyType>,
+        F: FnOnce(&ValueType) -> R,
+    {
+        let key = key.into();
+        if self.using_disk {
+            let value = self.get_disk(key)?;
+            Some(f(&value))
+        } else {
+            self.in_memory.get(&key).map(f)
+        }
+    }
+
     fn get_disk(&self, key: KeyType) -> Option<ValueType> {
-        let mut fh = self.file_handle.clone()?;
         let pl = self.id2pos.get(&key)?;
-        fh.seek(SeekFrom::Start(pl.position())).ok()?;
+        let fh = self.file_handle.as_ref()?;
+        let mut file = fh.lock().ok()?;
+        file.seek(SeekFrom::Start(pl.position())).ok()?;
         let mut buffer: Vec<u8> = vec![0; pl.length() as usize];
-        fh.read_exact(&mut buffer).ok()?;
+        file.read_exact(&mut buffer).ok()?;
         let s: String = String::from_utf8(buffer).ok()?;
         serde_json::from_str(&s).ok()
     }
@@ -228,14 +259,13 @@ impl<
         }
     }
 
-    fn get_or_create_file_handle(&mut self) -> Result<Arc<File>> {
+    fn get_or_create_file_handle(&mut self) -> Result<Arc<Mutex<File>>> {
         if let Some(fh) = &self.file_handle {
             return Ok(fh.clone());
         }
-        let fh = tempfile()?;
-        let arc_fh = Arc::new(fh);
-        self.file_handle = Some(arc_fh.clone());
-        Ok(arc_fh)
+        let fh = Arc::new(Mutex::new(tempfile()?));
+        self.file_handle = Some(fh.clone());
+        Ok(fh)
     }
 
     pub fn set_max_mem_entries(&mut self, max_mem_entries: usize) {
@@ -444,7 +474,17 @@ mod tests {
         efc.insert("Q456", "Bar").unwrap();
 
         // Record the file size before the remove.
-        let size_before = efc.file_handle.as_ref().unwrap().metadata().unwrap().len();
+        let file_len = |fh: &FileHash<String, String>| -> u64 {
+            fh.file_handle
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .len()
+        };
+        let size_before = file_len(&efc);
 
         // Remove one entry — its slot should go back to disk_free.
         assert_eq!(efc.remove("Q456").unwrap(), "Bar");
@@ -452,7 +492,7 @@ mod tests {
         // Insert a value of the same length as "Bar" — it should reuse the freed slot,
         // so the file must not grow beyond its pre-remove size.
         efc.insert("Q999", "Baz").unwrap();
-        let size_after = efc.file_handle.as_ref().unwrap().metadata().unwrap().len();
+        let size_after = file_len(&efc);
 
         assert_eq!(
             size_after, size_before,
@@ -518,6 +558,77 @@ mod tests {
         assert_eq!(efc.get("Q456").unwrap(), "Bar");
         assert_eq!(efc.get("Q789"), None);
         assert_eq!(efc.len(), 1);
+    }
+
+    #[test]
+    fn test_file_hash_is_send_and_sync() {
+        // The Mutex<File> guarantee: FileHash with Send+Sync key and value types
+        // must itself be Send + Sync, so it can be shared across threads.
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<FileHash<String, String>>();
+        assert_sync::<FileHash<String, String>>();
+    }
+
+    #[test]
+    fn test_with_value_memory_backend() {
+        // Borrowing via `with_value` must work for in-memory entries and avoid
+        // the clone that `get` would perform.
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.insert("k", "hello").unwrap();
+        let len = efc.with_value("k", |v| v.len());
+        assert_eq!(len, Some(5));
+        // Missing key returns None without invoking the closure.
+        let mut called = false;
+        let _ = efc.with_value("missing", |_| {
+            called = true;
+            0
+        });
+        assert!(!called);
+    }
+
+    #[test]
+    fn test_with_value_disk_backend() {
+        // On the disk backend the closure receives the deserialised value.
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(0);
+        efc.insert("k", "hello world").unwrap();
+        let len = efc.with_value("k", |v| v.len());
+        assert_eq!(len, Some(11));
+    }
+
+    #[test]
+    fn test_concurrent_reads_disk_backend() {
+        // With Arc<Mutex<File>>, reads across threads must serialise on the file
+        // position instead of racing.  This used to corrupt under Arc<File>.
+        use std::sync::Arc;
+        use std::thread;
+
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(0);
+        for i in 0..20 {
+            efc.insert(format!("K{i}"), format!("v{i}")).unwrap();
+        }
+
+        let efc = Arc::new(efc);
+        let mut handles = vec![];
+        for t in 0..4 {
+            let efc = efc.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..20 {
+                    let key = format!("K{i}");
+                    let expected = format!("v{i}");
+                    assert_eq!(
+                        efc.get(key),
+                        Some(expected.clone()),
+                        "thread {t} read wrong value for K{i}"
+                    );
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 
     #[test]

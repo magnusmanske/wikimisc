@@ -1,3 +1,10 @@
+//! Wire-format types for a SPARQL JSON API response (the body returned by
+//! WDQS and other endpoints when `Accept: application/sparql-results+json`).
+//!
+//! [`SparqlApiResult`] is the deserializable struct; [`SparqlRow`] is the
+//! row representation used by [`crate::sparql_table::SparqlTable`] after
+//! column-projection through the table's headers.
+
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -8,7 +15,7 @@ pub type SparqlResultRows = Vec<SparqlResultRow>;
 pub type SparqlRow = Vec<Option<SparqlValue>>;
 
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct SparqlApiResults {
+struct SparqlApiResults {
     bindings: SparqlResultRows,
 }
 

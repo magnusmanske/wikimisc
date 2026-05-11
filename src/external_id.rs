@@ -374,6 +374,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires network access to wikidata.org"]
     async fn test_get_item_for_external_id() {
         // Test OK
         let ext_id = ExternalId::new(214, "30701597");

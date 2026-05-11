@@ -21,6 +21,15 @@ impl MergeDiff {
         Self::default()
     }
 
+    /// Append every field of `other` onto `self`.
+    ///
+    /// **No dedup.** This is a raw concatenation: labels, aliases, descriptions,
+    /// sitelinks, and added/altered statements from `other` are appended in
+    /// order, and identical entries from a prior `extend` are kept duplicate.
+    /// This matches how `ItemMerger` accumulates per-call diffs that have
+    /// already been deduplicated against the merger's internal item state — so
+    /// the diff stream is duplicate-free *if* it comes from the same merger.
+    /// Hand-built diffs should be deduplicated by the caller before extending.
     pub fn extend(&mut self, other: &MergeDiff) {
         self.labels.extend(other.labels.iter().cloned());
         self.aliases.extend(other.aliases.iter().cloned());
@@ -466,7 +475,9 @@ mod tests {
         // contract that a no-op merge produces a no-op payload.
         let diff = MergeDiff::new();
         let serialized = serde_json::to_value(&diff).unwrap();
-        let obj = serialized.as_object().expect("MergeDiff serialises to object");
+        let obj = serialized
+            .as_object()
+            .expect("MergeDiff serialises to object");
         assert!(
             obj.is_empty(),
             "Empty MergeDiff must serialise to {{}}, got: {serialized}"
@@ -499,7 +510,10 @@ mod tests {
         // for fresh ItemEntity), diff sitelinks are silently dropped. This test locks
         // that behaviour in so any future change to it is intentional.
         let mut item = ItemEntity::new_empty();
-        assert!(item.sitelinks().is_none(), "fresh item must start with no sitelinks");
+        assert!(
+            item.sitelinks().is_none(),
+            "fresh item must start with no sitelinks"
+        );
 
         let mut diff = MergeDiff::new();
         diff.sitelinks.push(SiteLink::new("enwiki", "Test", vec![]));

@@ -1,21 +1,22 @@
-/// `DiskFree` manages disk-based storage layout
+//! Free-list of `(position, length)` slots in the temp file backing `FileHash`.
+//! Implementation detail; not part of the public API.
 
 #[derive(Clone, Debug)]
-pub struct PositionLength {
+pub(crate) struct PositionLength {
     position: u64,
     length: u64,
 }
 
 impl PositionLength {
-    pub fn new(position: u64, length: u64) -> Self {
+    pub(crate) fn new(position: u64, length: u64) -> Self {
         Self { position, length }
     }
 
-    pub fn position(&self) -> u64 {
+    pub(crate) fn position(&self) -> u64 {
         self.position
     }
 
-    pub fn length(&self) -> u64 {
+    pub(crate) fn length(&self) -> u64 {
         self.length
     }
 
@@ -25,16 +26,16 @@ impl PositionLength {
 }
 
 #[derive(Clone, Debug)]
-pub struct DiskFree {
+pub(crate) struct DiskFree {
     parts: Vec<PositionLength>,
 }
 
 impl DiskFree {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { parts: Vec::new() }
     }
 
-    pub fn add(&mut self, new_pl: PositionLength) {
+    pub(crate) fn add(&mut self, new_pl: PositionLength) {
         let new_end = new_pl.position + new_pl.length;
 
         // Find an existing part whose end touches the start of new_pl (new comes right after it).
@@ -79,7 +80,7 @@ impl DiskFree {
         }
     }
 
-    pub fn find_free(&mut self, size: u64) -> Option<u64> {
+    pub(crate) fn find_free(&mut self, size: u64) -> Option<u64> {
         // Single pass: prefer an exact-size match (no fragmentation) but record the
         // first slot that is large enough as a fallback.  If we find an exact match
         // during the scan we can return immediately; otherwise we use the fallback.

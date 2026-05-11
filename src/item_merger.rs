@@ -1,6 +1,26 @@
 //! `ItemMerger` takes an `ItemEntity` and merges another `ItemEntity` into it.
-//! It will return the differences as a `MergeDiff` object, which can be used with the `wbeditentity` API action.
-//! Note that currently, only added or altered statements will be generated for the diff. Removed statements will be ignored.
+//! It returns the differences as a [`MergeDiff`] object, which can be sent to
+//! the `wbeditentity` API action.
+//!
+//! Note that currently, only added or altered statements appear in the diff —
+//! removed statements are intentionally not emitted.
+//!
+//! # Stateful merger
+//!
+//! `ItemMerger` is a *stateful accumulator*: each call to [`ItemMerger::merge`]
+//! both mutates the internal item (so subsequent merges can dedup against the
+//! growing union of data) and returns a [`MergeDiff`] describing the changes
+//! produced by *that single call*. Typical usage:
+//!
+//! ```ignore
+//! let mut im = ItemMerger::new(target);
+//! let mut total = MergeDiff::new();
+//! for src in sources {
+//!     total.extend(&im.merge(src));
+//! }
+//! // `im.item()` is now the fully merged entity.
+//! // `total` is the cumulative wbeditentity payload.
+//! ```
 
 use crate::external_id::ExternalId;
 use crate::merge_diff::MergeDiff;
@@ -15,7 +35,7 @@ static MONTH_FIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-\d\dT").unwra
 
 #[derive(Debug, Clone)]
 pub struct ItemMerger {
-    pub item: ItemEntity,
+    item: ItemEntity,
     properties_ignore_qualifier_match: Vec<String>,
 }
 
@@ -27,6 +47,25 @@ impl ItemMerger {
         }
     }
 
+    /// Borrow the merged-so-far entity.
+    pub fn item(&self) -> &ItemEntity {
+        &self.item
+    }
+
+    /// Consume the merger and return the merged entity.
+    pub fn into_item(self) -> ItemEntity {
+        self.item
+    }
+
+    /// Merge `other` into the internal item.
+    ///
+    /// **Side effect:** mutates `self.item` by absorbing labels/aliases/etc.
+    /// from `other`. This intermediate state is what makes deduplication work
+    /// across subsequent `merge` calls.
+    ///
+    /// **Return value:** the diff for *this call only*. Callers that want a
+    /// cumulative diff across multiple merges should hold their own
+    /// [`MergeDiff`] and `extend` it on each call.
     pub fn merge(&mut self, other: &ItemEntity) -> MergeDiff {
         let mut diff = MergeDiff::new();
         let mut new_aliases =
@@ -674,13 +713,13 @@ mod tests {
 
         // Should still be only ONE statement (not two)
         assert_eq!(
-            im.item.claims().len(),
+            im.item().claims().len(),
             1,
             "Should have exactly one statement after merging identical statements"
         );
 
         // That one statement should have BOTH references
-        let merged_stmt = &im.item.claims()[0];
+        let merged_stmt = &im.item().claims()[0];
         assert_eq!(
             merged_stmt.references().len(),
             2,
@@ -714,9 +753,9 @@ mod tests {
         let _diff = im.merge(&new_item);
 
         // Should still be only ONE statement
-        assert_eq!(im.item.claims().len(), 1);
+        assert_eq!(im.item().claims().len(), 1);
         // Reference should not be duplicated
-        assert_eq!(im.item.claims()[0].references().len(), 1);
+        assert_eq!(im.item().claims()[0].references().len(), 1);
     }
 
     // ── merge() orchestration edge cases ────────────────────────────────────
@@ -747,7 +786,7 @@ mod tests {
         assert_eq!(diff.labels.len(), 1);
         assert_eq!(diff.labels[0], LocaleString::new("de", "Deutsch"));
         // Merged into the item
-        assert_eq!(im.item.labels().len(), 2);
+        assert_eq!(im.item().labels().len(), 2);
     }
 
     #[test]
@@ -900,7 +939,7 @@ mod tests {
 
         assert!(diff.added_statements.is_empty());
         assert!(diff.altered_statements.is_empty());
-        assert_eq!(im.item.claims().len(), 1);
+        assert_eq!(im.item().claims().len(), 1);
     }
 
     #[test]
@@ -1040,8 +1079,8 @@ mod tests {
             result.is_none(),
             "Existing external-ID claim must not be altered"
         );
-        assert_eq!(im.item.claims().len(), 1);
-        assert!(im.item.claims()[0].references().is_empty());
+        assert_eq!(im.item().claims().len(), 1);
+        assert!(im.item().claims()[0].references().is_empty());
     }
 
     // ── Regression test: plain-snak references (no ext ID, no URL) should be deduplicated correctly
@@ -1069,9 +1108,9 @@ mod tests {
         let _diff = im.merge(&new_item);
 
         // Should be ONE statement, and the reference should NOT be duplicated
-        assert_eq!(im.item.claims().len(), 1);
+        assert_eq!(im.item().claims().len(), 1);
         assert_eq!(
-            im.item.claims()[0].references().len(),
+            im.item().claims()[0].references().len(),
             1,
             "Identical plain-snak reference should not be duplicated"
         );
@@ -1097,9 +1136,9 @@ mod tests {
 
         assert_eq!(diff.sitelinks.len(), 1);
         assert_eq!(diff.sitelinks[0].site(), "enwiki");
-        assert_eq!(im.item.sitelinks().clone().unwrap().len(), 1);
+        assert_eq!(im.item().sitelinks().clone().unwrap().len(), 1);
         assert_eq!(
-            im.item.sitelinks().clone().unwrap()[0].title(),
+            im.item().sitelinks().clone().unwrap()[0].title(),
             "Test article"
         );
     }
@@ -1125,7 +1164,7 @@ mod tests {
             diff.sitelinks.is_empty(),
             "duplicate sitelink must not appear in diff"
         );
-        assert_eq!(im.item.sitelinks().clone().unwrap().len(), 1);
+        assert_eq!(im.item().sitelinks().clone().unwrap().len(), 1);
     }
 
     #[test]
@@ -1146,7 +1185,7 @@ mod tests {
 
         assert_eq!(diff.sitelinks.len(), 1);
         assert_eq!(diff.sitelinks[0].site(), "dewiki");
-        assert_eq!(im.item.sitelinks().clone().unwrap().len(), 2);
+        assert_eq!(im.item().sitelinks().clone().unwrap().len(), 2);
     }
 
     // ── description filters ───────────────────────────────────────────────
@@ -1171,7 +1210,7 @@ mod tests {
             diff.descriptions.is_empty(),
             "description matching an existing alias must not be added"
         );
-        assert!(im.item.descriptions().is_empty());
+        assert!(im.item().descriptions().is_empty());
     }
 
     // ── qualifier helpers ─────────────────────────────────────────────────
@@ -1236,7 +1275,7 @@ mod tests {
             1,
             "different external ID must be added"
         );
-        assert_eq!(im.item.claims().len(), 2);
+        assert_eq!(im.item().claims().len(), 2);
     }
 
     #[test]
@@ -1275,7 +1314,7 @@ mod tests {
             "statement must appear in diff when a new qualifier is merged in"
         );
         assert_eq!(
-            im.item.claims()[0].qualifiers().len(),
+            im.item().claims()[0].qualifiers().len(),
             2,
             "both qualifiers must be present after merge"
         );
@@ -1307,6 +1346,23 @@ mod tests {
             1,
             "claim with different qualifiers must be added as a new statement"
         );
-        assert_eq!(im.item.claims().len(), 2);
+        assert_eq!(im.item().claims().len(), 2);
+    }
+
+    #[test]
+    fn test_into_item_consumes_merger_and_returns_merged_entity() {
+        let mut base = ItemEntity::new_empty();
+        base.labels_mut().push(LocaleString::new("en", "kept"));
+
+        let mut other = ItemEntity::new_empty();
+        other.labels_mut().push(LocaleString::new("de", "neu"));
+
+        let mut im = ItemMerger::new(base);
+        let _ = im.merge(&other);
+
+        let merged = im.into_item();
+        assert_eq!(merged.labels().len(), 2);
+        assert!(merged.labels().iter().any(|l| l.language() == "en"));
+        assert!(merged.labels().iter().any(|l| l.language() == "de"));
     }
 }
