@@ -48,4 +48,42 @@ mod tests {
             SparqlValue::Literal("GB-ENG".to_string())
         );
     }
+
+    #[test]
+    fn test_sparql_api_result_default_is_empty() {
+        let r = SparqlApiResult::default();
+        assert!(r.head().is_empty());
+        assert!(r.bindings().is_empty());
+    }
+
+    #[test]
+    fn test_sparql_api_result_accessors() {
+        // Verify head() and bindings() return references to the parsed data,
+        // not a fresh allocation, by checking values match deserialised input.
+        let j = json!({
+            "head": {"vars": ["item"]},
+            "results": {"bindings": [
+                {"item": {"type": "uri", "value": "http://www.wikidata.org/entity/Q42"}}
+            ]}
+        });
+        let r = SparqlApiResult::deserialize(j).unwrap();
+        assert_eq!(r.head().get("vars").map(|v| v.len()), Some(1));
+        assert_eq!(r.bindings().len(), 1);
+        assert_eq!(
+            r.bindings()[0].get("item"),
+            Some(&SparqlValue::Entity("Q42".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_sparql_api_result_empty_bindings() {
+        // Empty bindings is a valid SPARQL response and must deserialize cleanly.
+        let j = json!({
+            "head": {"vars": ["x"]},
+            "results": {"bindings": []}
+        });
+        let r = SparqlApiResult::deserialize(j).unwrap();
+        assert_eq!(r.head().get("vars"), Some(&vec!["x".to_string()]));
+        assert!(r.bindings().is_empty());
+    }
 }

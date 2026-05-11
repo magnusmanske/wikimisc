@@ -460,6 +460,58 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_diff_serialize_empty_emits_no_fields() {
+        // An empty MergeDiff must serialise to an object with no fields, since every
+        // sub-serializer returns None for empty input. This locks in the wbeditentity
+        // contract that a no-op merge produces a no-op payload.
+        let diff = MergeDiff::new();
+        let serialized = serde_json::to_value(&diff).unwrap();
+        let obj = serialized.as_object().expect("MergeDiff serialises to object");
+        assert!(
+            obj.is_empty(),
+            "Empty MergeDiff must serialise to {{}}, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn test_merge_diff_apply_empty_diff_is_noop() {
+        // Applying an empty diff must not change the item.
+        let mut item = ItemEntity::new_empty();
+        item.labels_mut().push(LocaleString::new("en", "kept"));
+        item.add_claim(Statement::new_normal(
+            Snak::new_string("P1", "kept"),
+            vec![],
+            vec![],
+        ));
+
+        let diff = MergeDiff::new();
+        diff.apply(&mut item);
+
+        assert_eq!(item.labels().len(), 1);
+        assert_eq!(item.labels()[0].value(), "kept");
+        assert_eq!(item.claims().len(), 1);
+    }
+
+    #[test]
+    fn test_merge_diff_apply_sitelinks_dropped_when_item_has_none() {
+        // Current behaviour: apply() only extends sitelinks when the item already has
+        // Some(Vec<SiteLink>). If the item's sitelinks are None (the wikibase default
+        // for fresh ItemEntity), diff sitelinks are silently dropped. This test locks
+        // that behaviour in so any future change to it is intentional.
+        let mut item = ItemEntity::new_empty();
+        assert!(item.sitelinks().is_none(), "fresh item must start with no sitelinks");
+
+        let mut diff = MergeDiff::new();
+        diff.sitelinks.push(SiteLink::new("enwiki", "Test", vec![]));
+
+        diff.apply(&mut item);
+        assert!(
+            item.sitelinks().is_none(),
+            "sitelinks must remain None when item had no prior sitelinks"
+        );
+    }
+
+    #[test]
     fn test_merge_diff_apply_aliases_and_descriptions() {
         let mut item = ItemEntity::new_empty();
 

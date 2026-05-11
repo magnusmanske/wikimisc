@@ -109,4 +109,38 @@ mod tests {
         let after = *seppuku.last_activity.lock().unwrap();
         assert!(after > before);
     }
+
+    #[tokio::test]
+    async fn test_seppuku_arm_sets_flags() {
+        // arm() must set both `armed` and `timer_running` to true. Use a long
+        // timeout so the spawned task does not actually fire during the test.
+        let seppuku = Seppuku::new(3600);
+        seppuku.arm();
+        assert!(*seppuku.armed.lock().unwrap());
+        assert!(*seppuku.timer_running.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_seppuku_arm_is_idempotent() {
+        // Calling arm() twice must not panic, restart the timer, or change state.
+        let seppuku = Seppuku::new(3600);
+        seppuku.arm();
+        // Snapshot state, then re-arm.
+        let armed_before = *seppuku.armed.lock().unwrap();
+        let timer_before = *seppuku.timer_running.lock().unwrap();
+        seppuku.arm();
+        assert_eq!(*seppuku.armed.lock().unwrap(), armed_before);
+        assert_eq!(*seppuku.timer_running.lock().unwrap(), timer_before);
+    }
+
+    #[tokio::test]
+    async fn test_seppuku_arm_then_disarm() {
+        // After arm() + disarm() the armed flag must clear. The timer task
+        // remains running but is gated by the armed flag, so disarm() prevents
+        // the process from exiting on inactivity.
+        let seppuku = Seppuku::new(3600);
+        seppuku.arm();
+        seppuku.disarm();
+        assert!(!*seppuku.armed.lock().unwrap());
+    }
 }

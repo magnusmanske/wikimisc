@@ -664,4 +664,110 @@ mod tests {
         let url = site_matrix.get_server_url_for_wiki("notfoundwiki");
         assert!(url.is_err());
     }
+
+    // ── get_wiki_for_server_url (reverse lookup, offline) ────────────────────
+
+    fn fixture_site_matrix() -> SiteMatrix {
+        SiteMatrix {
+            site_matrix: serde_json::json!({
+                "sitematrix": {
+                    "count": 2,
+                    "0": {
+                        "code": "en",
+                        "dir": "ltr",
+                        "site": [
+                            {"url": "https://en.wikipedia.org", "dbname": "enwiki", "code": "wiki"},
+                            {"url": "https://en.wiktionary.org", "dbname": "enwiktionary", "code": "wiktionary"}
+                        ]
+                    },
+                    "1": {
+                        "code": "ar",
+                        "dir": "rtl",
+                        "site": [
+                            {"url": "https://ar.wikipedia.org", "dbname": "arwiki", "code": "wiki"}
+                        ]
+                    },
+                    "specials": [
+                        {"url": "https://www.wikidata.org", "dbname": "wikidatawiki"},
+                        {"url": "https://meta.wikimedia.org", "dbname": "metawiki"}
+                    ]
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn test_get_wiki_for_server_url_in_specials() {
+        let site_matrix = fixture_site_matrix();
+        assert_eq!(
+            site_matrix.get_wiki_for_server_url("https://www.wikidata.org"),
+            Some("wikidatawiki".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_wiki_for_server_url_in_regular_site() {
+        let site_matrix = fixture_site_matrix();
+        assert_eq!(
+            site_matrix.get_wiki_for_server_url("https://en.wikipedia.org"),
+            Some("enwiki".to_string())
+        );
+        assert_eq!(
+            site_matrix.get_wiki_for_server_url("https://ar.wikipedia.org"),
+            Some("arwiki".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_wiki_for_server_url_not_found() {
+        let site_matrix = fixture_site_matrix();
+        assert_eq!(
+            site_matrix.get_wiki_for_server_url("https://no-such-site.example"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_get_wiki_for_server_url_skips_closed_sites() {
+        // A site flagged "closed" must be skipped during the reverse lookup,
+        // matching the behaviour of get_value_from_site_matrix_entry.
+        let site_matrix = SiteMatrix {
+            site_matrix: serde_json::json!({
+                "sitematrix": {
+                    "count": 1,
+                    "0": {
+                        "code": "en",
+                        "site": [
+                            {"url": "https://example.org", "dbname": "examplewiki", "closed": "true"}
+                        ]
+                    },
+                    "specials": []
+                }
+            }),
+        };
+        assert_eq!(
+            site_matrix.get_wiki_for_server_url("https://example.org"),
+            None
+        );
+    }
+
+    // ── is_language_rtl (offline) ────────────────────────────────────────────
+
+    #[test]
+    fn test_is_language_rtl_offline() {
+        let site_matrix = fixture_site_matrix();
+        assert!(site_matrix.is_language_rtl("ar"));
+        assert!(!site_matrix.is_language_rtl("en"));
+        // Languages absent from the matrix must return false, not panic.
+        assert!(!site_matrix.is_language_rtl("xx"));
+    }
+
+    #[test]
+    fn test_is_language_rtl_empty_matrix() {
+        let site_matrix = SiteMatrix {
+            site_matrix: serde_json::json!({}),
+        };
+        // Without a "sitematrix" object the function returns false rather than panicking.
+        assert!(!site_matrix.is_language_rtl("ar"));
+    }
 }
