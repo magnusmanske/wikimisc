@@ -127,6 +127,9 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
     }
 
     pub fn reverse(&mut self) -> Result<()> {
+        if self.len < 2 {
+            return Ok(());
+        }
         let mut front = 0;
         let mut end = self.len - 1;
         while front < end {
@@ -527,5 +530,13 @@ mod tests {
         file_vec.reverse().unwrap();
         assert_eq!(file_vec.len(), 1);
         assert_eq!(file_vec.get(0).unwrap(), "only");
+    }
+
+    #[test]
+    fn test_reverse_empty() {
+        // Reversing an empty vec must be a no-op, not a subtract-overflow panic.
+        let mut file_vec: FileVec<String> = FileVec::new();
+        file_vec.reverse().unwrap();
+        assert!(file_vec.is_empty());
     }
 }

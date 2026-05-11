@@ -83,37 +83,29 @@ impl<
         }
 
         if self.using_disk {
-            let v1 = self.id2pos.remove(&idx1);
-            let v2 = self.id2pos.remove(&idx2);
-            match (v1, v2) {
-                (Some(value), None) => {
-                    self.id2pos.insert(idx2, value);
-                }
-                (None, Some(value)) => {
-                    self.id2pos.insert(idx1, value);
-                }
-                (Some(v1), Some(v2)) => {
-                    self.id2pos.insert(idx1, v2);
-                    self.id2pos.insert(idx2, v1);
-                }
-                (None, None) => {}
-            }
+            Self::swap_in_map(&mut self.id2pos, idx1, idx2);
         } else {
-            let v1 = self.in_memory.remove(&idx1);
-            let v2 = self.in_memory.remove(&idx2);
-            match (v1, v2) {
-                (Some(value), None) => {
-                    self.in_memory.insert(idx2, value);
-                }
-                (None, Some(value)) => {
-                    self.in_memory.insert(idx1, value);
-                }
-                (Some(v1), Some(v2)) => {
-                    self.in_memory.insert(idx1, v2);
-                    self.in_memory.insert(idx2, v1);
-                }
-                (None, None) => {}
+            Self::swap_in_map(&mut self.in_memory, idx1, idx2);
+        }
+    }
+
+    /// Swap the values for two keys in a HashMap. If only one of the keys is present,
+    /// its value moves to the other key. Missing-on-both is a no-op.
+    fn swap_in_map<V>(map: &mut HashMap<KeyType, V>, idx1: KeyType, idx2: KeyType) {
+        let v1 = map.remove(&idx1);
+        let v2 = map.remove(&idx2);
+        match (v1, v2) {
+            (Some(value), None) => {
+                map.insert(idx2, value);
             }
+            (None, Some(value)) => {
+                map.insert(idx1, value);
+            }
+            (Some(v1), Some(v2)) => {
+                map.insert(idx1, v2);
+                map.insert(idx2, v1);
+            }
+            (None, None) => {}
         }
     }
 

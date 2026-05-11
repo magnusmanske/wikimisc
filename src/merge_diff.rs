@@ -3,7 +3,6 @@
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use serde_json::json;
 use std::collections::HashMap;
-use std::vec::Vec;
 use wikibase::*;
 
 /// This contains the wbeditentiry payload to ADD data to a base item, generated from a merge
@@ -84,21 +83,6 @@ impl MergeDiff {
         Some(json!(labels))
     }
 
-    fn _serialize_aliases(&self) -> Option<serde_json::Value> {
-        if self.aliases.is_empty() {
-            return None;
-        }
-
-        let mut ret: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-        for alias in &self.aliases {
-            let v = json!({"language":alias.language(),"value":alias.value(), "add": ""});
-            ret.entry(alias.language().into())
-                .and_modify(|vec| vec.push(v.to_owned()))
-                .or_insert_with(|| vec![v]);
-        }
-        Some(json!(ret))
-    }
-
     fn serialize_sitelinks(&self) -> Option<serde_json::Value> {
         if self.sitelinks.is_empty() {
             return None;
@@ -169,7 +153,6 @@ impl Serialize for MergeDiff {
         let fields: Vec<(&str, serde_json::Value)> = [
             ("label", self.serialize_labels(&self.labels)),
             ("descriptions", self.serialize_labels(&self.descriptions)),
-            //("aliases", self.serialize_aliases()), // DEACTIVATED too much noise
             ("sitelinks", self.serialize_sitelinks()),
             ("claims", self.serialize_claims()),
         ]

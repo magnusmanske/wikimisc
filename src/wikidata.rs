@@ -11,10 +11,16 @@ use wikibase::{mediawiki::Api, EntityTrait, ItemEntity, SnakType};
 const WIKIDATA_USER_AGENT: &str = "wikimisc-wikidata/0.1.0";
 const WIKIDATA_SPARQL_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Wikidata {
     user_agent: String,
     timeout: Duration,
+}
+
+impl Default for Wikidata {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Wikidata {

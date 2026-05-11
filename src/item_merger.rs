@@ -101,7 +101,7 @@ impl ItemMerger {
     /// Adds a new claim to the item claims.
     /// If a claim with the same value and qualifiers (TBD) already exists, it will try and add any new references.
     /// Returns `Some(claim)` if the claim was added or changed, `None` otherwise.
-    pub fn add_claim(&mut self, new_claim: Statement) -> Option<Statement> {
+    pub fn add_claim(&mut self, mut new_claim: Statement) -> Option<Statement> {
         let mut existing_claims_iter = self
             .item
             .claims_mut()
@@ -142,7 +142,6 @@ impl ItemMerger {
             return None; // Claim already exists, including references
         }
 
-        let mut new_claim = new_claim.clone();
         self.check_new_claim_for_dates(&mut new_claim);
 
         // Claim does not exist, adding

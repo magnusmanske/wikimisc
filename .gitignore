@@ -1,3 +1,5 @@
 # Cargo folder
 target/
 Cargo.lock
+.claude
+CLAUDE.md
