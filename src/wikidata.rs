@@ -21,11 +21,15 @@ use wikibase::{mediawiki::Api, EntityTrait, ItemEntity, SnakType};
 
 const WIKIDATA_USER_AGENT: &str = "wikimisc-wikidata/0.1.0";
 const WIKIDATA_SPARQL_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_API_URL: &str = "https://www.wikidata.org/w/api.php";
+const DEFAULT_SPARQL_URL: &str = "https://query.wikidata.org/sparql";
 
 #[derive(Debug, Clone)]
 pub struct Wikidata {
     user_agent: String,
     timeout: Duration,
+    api_url: String,
+    sparql_url: String,
 }
 
 impl Default for Wikidata {
@@ -39,12 +43,13 @@ impl Wikidata {
         Wikidata {
             user_agent: WIKIDATA_USER_AGENT.to_string(),
             timeout: WIKIDATA_SPARQL_TIMEOUT,
+            api_url: DEFAULT_API_URL.to_string(),
+            sparql_url: DEFAULT_SPARQL_URL.to_string(),
         }
     }
 
     pub async fn api(&self) -> Result<Api> {
-        let api_url = "https://www.wikidata.org/w/api.php";
-        let api = Api::new_from_builder(api_url, self.client_builder()).await?;
+        let api = Api::new_from_builder(&self.api_url, self.client_builder()).await?;
         Ok(api)
     }
 
@@ -72,7 +77,7 @@ impl Wikidata {
         let mut f = tempfile()?;
         let mut res = self
             .reqwest_client()?
-            .get("https://query.wikidata.org/sparql")
+            .get(&self.sparql_url)
             .query(&[("query", sparql)])
             .header(
                 reqwest::header::ACCEPT,
@@ -97,6 +102,28 @@ impl Wikidata {
 
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
+    }
+
+    /// Overrides the MediaWiki Action API endpoint used by [`Self::api`].
+    /// Default: `https://www.wikidata.org/w/api.php`. Primarily a test seam
+    /// for pointing at a local mock server.
+    pub fn set_api_url(&mut self, api_url: &str) {
+        self.api_url = api_url.to_string();
+    }
+
+    /// Overrides the SPARQL endpoint used by [`Self::load_sparql_csv`].
+    /// Default: `https://query.wikidata.org/sparql`. Primarily a test seam
+    /// for pointing at a local mock server.
+    pub fn set_sparql_url(&mut self, sparql_url: &str) {
+        self.sparql_url = sparql_url.to_string();
+    }
+
+    pub fn api_url(&self) -> &str {
+        &self.api_url
+    }
+
+    pub fn sparql_url(&self) -> &str {
+        &self.sparql_url
     }
 
     pub fn item2qs(item: &ItemEntity) -> Result<Vec<String>> {
@@ -211,18 +238,53 @@ mod tests {
     use wikibase::*;
 
     #[tokio::test]
-    #[ignore = "requires network access to query.wikidata.org"]
     async fn test_load_sparql_csv() {
-        let wd = Wikidata::new();
-        let sparql = "SELECT ?item ?itemLabel WHERE { ?item wdt:P31 wd:Q34038. SERVICE wikibase:label { bd:serviceParam wikibase:language 'en'. }} LIMIT 5";
+        use crate::test_support::{mount_sparql_csv, wikidata_for};
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        // Five data rows — the test counts rows excluding the CSV header.
+        let csv = "\
+item,itemLabel\r\n\
+http://www.wikidata.org/entity/Q1,one\r\n\
+http://www.wikidata.org/entity/Q2,two\r\n\
+http://www.wikidata.org/entity/Q3,three\r\n\
+http://www.wikidata.org/entity/Q4,four\r\n\
+http://www.wikidata.org/entity/Q5,five\r\n";
+        mount_sparql_csv(&server, csv).await;
+
+        let wd = wikidata_for(&server);
+        let sparql = "SELECT ?item ?itemLabel WHERE { ?item wdt:P31 wd:Q34038. } LIMIT 5";
         let mut reader = wd.load_sparql_csv(sparql).await.unwrap();
-        let mut count = 0;
-        for _result in reader.records() {
-            // let record = result.unwrap();
-            // println!("{:?}", record);
-            count += 1;
-        }
+        let count = reader.records().count();
         assert_eq!(count, 5);
+    }
+
+    #[tokio::test]
+    async fn test_load_sparql_csv_sends_query_param_and_accept_header() {
+        // Verify wire-level contract: the query string is sent as `query=…` and
+        // the request advertises `Accept: text/csv`. We do this by mounting a
+        // mock that requires both, with `expect(1)` to enforce a single hit.
+        use crate::test_support::{API_PATH, SPARQL_PATH};
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let sparql = "SELECT ?x WHERE { ?x ?y ?z } LIMIT 1";
+        Mock::given(method("GET"))
+            .and(path(SPARQL_PATH))
+            .and(query_param("query", sparql))
+            .and(header("accept", "text/csv"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x\r\nv\r\n"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut wd = Wikidata::new();
+        wd.set_sparql_url(&format!("{}{}", server.uri(), SPARQL_PATH));
+        wd.set_api_url(&format!("{}{}", server.uri(), API_PATH));
+        let _ = wd.load_sparql_csv(sparql).await.unwrap();
+        // expect(1) + drop runs the verifier and panics if the request did not arrive.
     }
 
     #[test]

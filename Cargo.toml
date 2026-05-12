@@ -25,3 +25,6 @@ tempfile = "3"
 toolforge = "5"
 urlencoding = "^2"
 wikibase = "^0.7"
+
+[dev-dependencies]
+wiremock = "0.6"

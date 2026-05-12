@@ -21,6 +21,9 @@ pub mod toolforge_app;
 pub mod toolforge_db;
 pub mod wikidata;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use mysql_async;
 pub use toolforge;
 pub use wikibase;

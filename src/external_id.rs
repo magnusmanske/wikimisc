@@ -77,7 +77,18 @@ impl ExternalId {
     /// Searches Wikidata for a single item with the given query.
     /// Returns None if none or multiple items are found.
     pub async fn search_wikidata_single_item(&self, query: &str) -> Option<String> {
-        let wd = Wikidata::new();
+        self.search_wikidata_single_item_with(&Wikidata::new(), query)
+            .await
+    }
+
+    /// Searches Wikidata for a single item with the given query using the supplied
+    /// [`Wikidata`] client. Useful for tests that need to point at a mock server.
+    /// Returns None if none or multiple items are found.
+    pub async fn search_wikidata_single_item_with(
+        &self,
+        wd: &Wikidata,
+        query: &str,
+    ) -> Option<String> {
         let api = wd.api().await.ok()?;
         let j = ActionApiList::search()
             .srnamespace(&[0])
@@ -95,15 +106,33 @@ impl ExternalId {
     /// Searches Wikidata for a single item with the given property/value.
     /// Returns None if none or multiple items are found.
     pub async fn get_item_for_external_id_value(&self) -> Option<String> {
+        self.get_item_for_external_id_value_with(&Wikidata::new())
+            .await
+    }
+
+    /// Variant of [`Self::get_item_for_external_id_value`] that uses the supplied
+    /// [`Wikidata`] client (e.g. one pointed at a mock server).
+    pub async fn get_item_for_external_id_value_with(&self, wd: &Wikidata) -> Option<String> {
         let query = format!("haswbstatement:\"P{}={}\"", self.property, self.id);
-        self.search_wikidata_single_item(&query).await
+        self.search_wikidata_single_item_with(wd, &query).await
     }
 
     /// Searches Wikidata for a single item with the given property/value and string.
     /// Returns None if none or multiple items are found.
     pub async fn get_item_for_string_external_id_value(&self, s: &str) -> Option<String> {
+        self.get_item_for_string_external_id_value_with(&Wikidata::new(), s)
+            .await
+    }
+
+    /// Variant of [`Self::get_item_for_string_external_id_value`] that uses the
+    /// supplied [`Wikidata`] client.
+    pub async fn get_item_for_string_external_id_value_with(
+        &self,
+        wd: &Wikidata,
+        s: &str,
+    ) -> Option<String> {
         let query = format!("{s} haswbstatement:\"P{}={}\"", self.property, &self.id);
-        self.search_wikidata_single_item(&query).await
+        self.search_wikidata_single_item_with(wd, &query).await
     }
 
     /// Returns the property number.
@@ -374,34 +403,106 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network access to wikidata.org"]
     async fn test_get_item_for_external_id() {
-        // Test OK
+        use crate::test_support::{mount_siteinfo, wikidata_for, API_PATH};
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_siteinfo(&server).await;
+
+        // wiremock-rs scans mocks in registration order and uses the *first*
+        // match, so the specific 1-hit mocks must be registered before the
+        // catch-all zero-hit fallback.
+        let one_hit = serde_json::json!({
+            "batchcomplete": "",
+            "query": {
+                "searchinfo": { "totalhits": 1 },
+                "search": [ { "title": "Q13520818", "ns": 0 } ]
+            }
+        });
+        for srsearch in [
+            "haswbstatement:\"P214=30701597\"",
+            "Magnus haswbstatement:\"P214=30701597\"",
+        ] {
+            Mock::given(method("GET"))
+                .and(path(API_PATH))
+                .and(query_param("list", "search"))
+                .and(query_param("srsearch", srsearch))
+                .respond_with(ResponseTemplate::new(200).set_body_json(one_hit.clone()))
+                .mount(&server)
+                .await;
+        }
+
+        // Fallback: any other `list=search` request returns zero hits.
+        Mock::given(method("GET"))
+            .and(path(API_PATH))
+            .and(query_param("list", "search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "batchcomplete": "",
+                "query": { "searchinfo": { "totalhits": 0 }, "search": [] }
+            })))
+            .mount(&server)
+            .await;
+
+        let wd = wikidata_for(&server);
+
+        // Test OK — bare external-ID lookup
         let ext_id = ExternalId::new(214, "30701597");
         assert_eq!(
-            ext_id.get_item_for_external_id_value().await,
+            ext_id.get_item_for_external_id_value_with(&wd).await,
             Some("Q13520818".to_string())
         );
 
-        // Test OK
-        assert_eq!(
-            ext_id.get_item_for_string_external_id_value("Magnus").await,
-            Some("Q13520818".to_string())
-        );
-
-        // Test wrong string
+        // Test OK — combined string + external-ID lookup
         assert_eq!(
             ext_id
-                .get_item_for_string_external_id_value("ocshs87gvdsu6gsdi7vchkuchs")
+                .get_item_for_string_external_id_value_with(&wd, "Magnus")
+                .await,
+            Some("Q13520818".to_string())
+        );
+
+        // Test wrong string — falls through to the zero-hit fallback
+        assert_eq!(
+            ext_id
+                .get_item_for_string_external_id_value_with(&wd, "ocshs87gvdsu6gsdi7vchkuchs")
                 .await,
             None
         );
 
-        // Test wrong ID
+        // Test wrong ID — also falls through to the zero-hit fallback
         let ext_id = ExternalId::new(214, "3070159777777");
-        assert_eq!(ext_id.get_item_for_external_id_value().await, None);
+        assert_eq!(ext_id.get_item_for_external_id_value_with(&wd).await, None);
+    }
 
-        // TODOO multiple items
+    #[tokio::test]
+    async fn test_get_item_for_external_id_returns_none_on_multiple_hits() {
+        // Exercises the `totalhits != 1` branch: when search returns more than
+        // one item, the helper must yield None rather than picking the first.
+        use crate::test_support::{mount_list, mount_siteinfo, wikidata_for};
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        mount_siteinfo(&server).await;
+        mount_list(
+            &server,
+            "search",
+            serde_json::json!({
+                "batchcomplete": "",
+                "query": {
+                    "searchinfo": { "totalhits": 2 },
+                    "search": [
+                        { "title": "Q1", "ns": 0 },
+                        { "title": "Q2", "ns": 0 }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+        let wd = wikidata_for(&server);
+        let ext_id = ExternalId::new(214, "12345");
+        assert_eq!(ext_id.get_item_for_external_id_value_with(&wd).await, None);
     }
 
     #[test]

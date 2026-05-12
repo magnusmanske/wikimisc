@@ -370,13 +370,95 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // wiremock-backed end-to-end tests for SiteMatrix::new
+    // -----------------------------------------------------------------------
+
+    /// A canned sitematrix response that covers every wiki/language flavour
+    /// the integration-style tests below exercise. Returning it from a single
+    /// helper keeps the mocked corpus consistent across tests.
+    fn fake_sitematrix_response() -> serde_json::Value {
+        serde_json::json!({
+            "batchcomplete": "",
+            "sitematrix": {
+                "count": 4,
+                "0": {
+                    "code": "en", "name": "English", "dir": "ltr",
+                    "site": [
+                        {"url": "https://en.wikipedia.org",   "dbname": "enwiki",         "code": "wiki"},
+                        {"url": "https://en.wiktionary.org",  "dbname": "enwiktionary",   "code": "wiktionary"},
+                        {"url": "https://en.wikibooks.org",   "dbname": "enwikibooks",    "code": "wikibooks"},
+                        {"url": "https://en.wikiquote.org",   "dbname": "enwikiquote",    "code": "wikiquote"},
+                        {"url": "https://en.wikinews.org",    "dbname": "enwikinews",     "code": "wikinews"},
+                        {"url": "https://en.wikisource.org",  "dbname": "enwikisource",   "code": "wikisource"},
+                        {"url": "https://en.wikiversity.org", "dbname": "enwikiversity",  "code": "wikiversity"},
+                        {"url": "https://en.wikivoyage.org",  "dbname": "enwikivoyage",   "code": "wikivoyage"}
+                    ]
+                },
+                "1": {
+                    "code": "ar", "name": "Arabic", "dir": "rtl",
+                    "site": [
+                        {"url": "https://ar.wikipedia.org", "dbname": "arwiki", "code": "wiki"}
+                    ]
+                },
+                "2": {
+                    "code": "he", "name": "Hebrew", "dir": "rtl",
+                    "site": [
+                        {"url": "https://he.wikipedia.org", "dbname": "hewiki", "code": "wiki"}
+                    ]
+                },
+                "3": {
+                    "code": "de", "name": "German", "dir": "ltr",
+                    "site": [
+                        {"url": "https://de.wikipedia.org", "dbname": "dewiki", "code": "wiki"}
+                    ]
+                },
+                "specials": [
+                    {"url": "https://www.wikidata.org",  "dbname": "wikidatawiki"},
+                    {"url": "https://meta.wikimedia.org","dbname": "metawiki"}
+                ]
+            }
+        })
+    }
+
+    /// As above, but with the Chinese-variant wikis that store dbnames with
+    /// underscores. Kept in its own fixture so the underscore/hyphen handling
+    /// stays a focused assertion.
+    fn fake_sitematrix_zh_response() -> serde_json::Value {
+        serde_json::json!({
+            "batchcomplete": "",
+            "sitematrix": {
+                "count": 3,
+                "0": {
+                    "code": "lzh",
+                    "site": [{"url": "https://zh-classical.wikipedia.org", "dbname": "zh_classicalwiki"}]
+                },
+                "1": {
+                    "code": "yue",
+                    "site": [{"url": "https://zh-yue.wikipedia.org", "dbname": "zh_yuewiki"}]
+                },
+                "2": {
+                    "code": "nan",
+                    "site": [{"url": "https://zh-min-nan.wikipedia.org", "dbname": "zh_min_nanwiki"}]
+                },
+                "specials": []
+            }
+        })
+    }
+
+    async fn build_site_matrix(body: serde_json::Value) -> SiteMatrix {
+        use crate::test_support::{api_url, mount_action, mount_siteinfo};
+        use wiremock::MockServer;
+        let server = MockServer::start().await;
+        mount_siteinfo(&server).await;
+        mount_action(&server, "sitematrix", body).await;
+        let api = Api::new(&api_url(&server)).await.unwrap();
+        SiteMatrix::new(&api).await.unwrap()
+    }
+
     #[tokio::test]
-    #[ignore = "requires network access to wikidata.org"]
     async fn test_site_matrix() {
-        let api = Api::new("https://www.wikidata.org/w/api.php")
-            .await
-            .unwrap();
-        let site_matrix = SiteMatrix::new(&api).await.unwrap();
+        let site_matrix = build_site_matrix(fake_sitematrix_response()).await;
         assert_eq!(
             site_matrix.get_server_url_for_wiki("wikidatawiki").unwrap(),
             "https://www.wikidata.org"
@@ -441,12 +523,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network access to wikidata.org"]
     async fn is_language_rtl() {
-        let api = Api::new("https://www.wikidata.org/w/api.php")
-            .await
-            .unwrap();
-        let site_matrix = SiteMatrix::new(&api).await.unwrap();
+        let site_matrix = build_site_matrix(fake_sitematrix_response()).await;
         assert!(!site_matrix.is_language_rtl("en"));
         assert!(site_matrix.is_language_rtl("ar"));
         assert!(!site_matrix.is_language_rtl("de"));
@@ -493,12 +571,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network access to wikidata.org"]
     async fn test_site_matrix_zh_wikis() {
-        let api = Api::new("https://www.wikidata.org/w/api.php")
-            .await
-            .unwrap();
-        let site_matrix = SiteMatrix::new(&api).await.unwrap();
+        let site_matrix = build_site_matrix(fake_sitematrix_zh_response()).await;
         assert_eq!(
             site_matrix
                 .get_server_url_for_wiki("zh-classicalwiki")
