@@ -127,7 +127,7 @@ impl MergeDiff {
                     self.clean_snak(snak);
                 }
 
-                if let Some(references) = c["references"].as_array_mut() {
+                if let Some(references) = c.get_mut("references").and_then(|r| r.as_array_mut()) {
                     for refgroup in references {
                         if let Some(prop_snaks_map) = refgroup["snaks"].as_object_mut() {
                             for (_, snaks) in prop_snaks_map.iter_mut() {
@@ -309,8 +309,11 @@ mod tests {
 
     #[test]
     fn test_serialize_claims_no_references_not_removed() {
-        // A statement with no references must serialize without a "references" key —
-        // the old else-if branch would remove it even when it was already absent.
+        // A statement with no references must serialize WITHOUT a "references" key.
+        // Regression: `c["references"].as_array_mut()` uses serde_json's IndexMut, which
+        // inserts `"references": null` for the missing key before `as_array_mut()` returns
+        // None. The wbeditentity API rejects that with "The ReferenceList serialization
+        // should be an array", so the key must be entirely absent (not present-and-null).
         let mut diff = MergeDiff::new();
         diff.added_statements.push(Statement::new_normal(
             Snak::new_string("P1476", "hello"),
@@ -320,11 +323,11 @@ mod tests {
         let serialized = serde_json::to_value(&diff).unwrap();
         let claims = serialized["claims"].as_array().unwrap();
         assert_eq!(claims.len(), 1);
-        // "references" key must either be absent or be an empty array — never null or garbage
-        let refs = &claims[0]["references"];
+        let claim = claims[0].as_object().unwrap();
         assert!(
-            refs.is_null() || refs.as_array().map(|a| a.is_empty()).unwrap_or(false),
-            "Expected absent or empty references, got: {refs}"
+            !claim.contains_key("references"),
+            "A reference-less statement must not contain a \"references\" key at all, got: {}",
+            claims[0]
         );
     }
 
