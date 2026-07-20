@@ -151,7 +151,7 @@ impl ItemMerger {
             .filter(|existing_claim| {
                 let property = existing_claim.main_snak().property().to_string();
                 self.properties_ignore_qualifier_match.contains(&property)
-                    || Self::are_qualifiers_identical(
+                    || Self::are_qualifiers_compatible(
                         new_claim.qualifiers(),
                         existing_claim.qualifiers(),
                     )
@@ -313,6 +313,20 @@ impl ItemMerger {
             }
             _ => *t1 == *t2,
         }
+    }
+
+    /// Two qualifier lists are compatible if one is a subset of the other. This prevents adding
+    /// a bare statement (e.g. an external ID with no qualifiers) as a duplicate of an existing
+    /// statement that merely carries an extra qualifier such as P1810 ("subject named as").
+    /// See <https://github.com/magnusmanske/auth2wd/issues/10>.
+    pub fn are_qualifiers_compatible(q1: &[Snak], q2: &[Snak]) -> bool {
+        Self::is_qualifier_subset(q1, q2) || Self::is_qualifier_subset(q2, q1)
+    }
+
+    /// Returns `true` if every snak in `sub` has an identical snak in `sup`.
+    fn is_qualifier_subset(sub: &[Snak], sup: &[Snak]) -> bool {
+        sub.iter()
+            .all(|q| sup.iter().any(|e| Self::is_snak_identical(q, e)))
     }
 
     pub fn are_qualifiers_identical(q1: &[Snak], q2: &[Snak]) -> bool {
@@ -1347,6 +1361,54 @@ mod tests {
             "claim with different qualifiers must be added as a new statement"
         );
         assert_eq!(im.item().claims().len(), 2);
+    }
+
+    #[test]
+    fn test_add_claim_bare_not_duplicated_against_qualified() {
+        // Regression test for https://github.com/magnusmanske/auth2wd/issues/10 :
+        // an existing statement carrying an extra qualifier (e.g. P1810) must not gain a
+        // duplicate when a source supplies the same value with no qualifiers.
+        let mut base = ItemEntity::new_empty();
+        let mut stmt = Statement::new_normal(
+            Snak::new_external_id("P691", "jn19990210001"),
+            vec![Snak::new_string("P1810", "Some Name")],
+            vec![],
+        );
+        stmt.set_id("Q234888$existing");
+        base.add_claim(stmt);
+
+        let mut other = ItemEntity::new_empty();
+        other.add_claim(Statement::new_normal(
+            Snak::new_external_id("P691", "jn19990210001"),
+            vec![],
+            vec![],
+        ));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert!(
+            diff.added_statements.is_empty(),
+            "bare statement must not be added as a duplicate"
+        );
+        assert_eq!(im.item().claims().len(), 1);
+        assert_eq!(im.item().claims()[0].qualifiers().len(), 1);
+    }
+
+    #[test]
+    fn test_are_qualifiers_compatible() {
+        let a = vec![Snak::new_string("P1", "a")];
+        let ab = vec![Snak::new_string("P1", "a"), Snak::new_string("P2", "b")];
+        let empty: Vec<Snak> = vec![];
+        // empty is a subset of anything
+        assert!(ItemMerger::are_qualifiers_compatible(&empty, &a));
+        assert!(ItemMerger::are_qualifiers_compatible(&a, &empty));
+        // subset in either direction is compatible
+        assert!(ItemMerger::are_qualifiers_compatible(&a, &ab));
+        assert!(ItemMerger::are_qualifiers_compatible(&ab, &a));
+        // non-overlapping qualifiers are not compatible
+        let c = vec![Snak::new_string("P1", "c")];
+        assert!(!ItemMerger::are_qualifiers_compatible(&a, &c));
     }
 
     #[test]
