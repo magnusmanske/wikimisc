@@ -131,7 +131,7 @@ impl ExternalId {
         wd: &Wikidata,
         s: &str,
     ) -> Option<String> {
-        let query = format!("{s} haswbstatement:\"P{}={}\"", self.property, &self.id);
+        let query = format!("{s} haswbstatement:\"P{}={}\"", self.property, self.id);
         self.search_wikidata_single_item_with(wd, &query).await
     }
 
