@@ -3,7 +3,7 @@ name = "wikimisc"
 version = "0.1.0"
 edition = "2021"
 # `std::sync::LazyLock` (used in several modules) was stabilised in 1.80.
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Magnus Manske <magnusmanske@googlemail.com>"]
 keywords = ["wikibase", "wikidata", "mediawiki"]
 repository = "https://github.com/magnusmanske/wikimisc"
