@@ -254,7 +254,14 @@ impl<
         for key in self.keys() {
             let value = match self.get(key.clone()) {
                 Some(v) => v,
-                None => continue, // TODO continue if key not found? This should never happen but...
+                // Unreachable in practice: `keys()` and `get()` read the same map
+                // (`id2pos` or `in_memory`, per `using_disk`) and `&mut self` is
+                // held throughout, so a key cannot vanish in between. A `None`
+                // here would mean the `DiskFree`/`id2pos` invariant was already
+                // broken. Skipping keeps the entry, which is the conservative
+                // choice -- removing it would free a file range that may still
+                // be in use.
+                None => continue,
             };
             if !f(&key, &value) {
                 self.remove(key);

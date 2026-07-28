@@ -79,7 +79,12 @@ impl ExternalId {
             Value::StringValue(id) => id,
             _ => return None,
         };
-        // TODO change value eg P213(ISNI) from Wikidata format to external format
+        // NOTE: the value is stored as Wikidata holds it. Rendering it in each
+        // property's external display format (e.g. P213/ISNI
+        // "0000000121849233" -> "0000 0001 2184 9233") is not implemented: it
+        // needs a per-property spec, and it is the inverse of
+        // `fix_property_value`, so the two would have to be introduced together
+        // to keep `from_external_id_claim` -> `new` round-tripping.
         Some(Self::new(prop_numeric, id))
     }
 

@@ -139,15 +139,20 @@ impl ItemMerger {
             }
         }
 
-        // self.prop_text.append(&mut other.prop_text.clone());
-        // self.prop_text.sort();
-        // self.prop_text.dedup();
         diff
     }
 
-    /// Adds a new claim to the item claims.
-    /// If a claim with the same value and qualifiers (TBD) already exists, it will try and add any new references.
-    /// Returns `Some(claim)` if the claim was added or changed, `None` otherwise.
+    /// Adds a new claim to the item's claims.
+    ///
+    /// If a claim with an identical main snak already exists *and* the two
+    /// qualifier lists are compatible — see [`Self::are_qualifiers_compatible`],
+    /// or the property being listed via
+    /// [`Self::set_properties_ignore_qualifier_match`] — the new claim is folded
+    /// into the existing one instead of being added: any references and
+    /// qualifiers it contributes are merged in. External-ID claims are never
+    /// merged this way; a duplicate is simply dropped.
+    ///
+    /// Returns `Some(claim)` if a claim was added or changed, `None` otherwise.
     pub fn add_claim(&mut self, mut new_claim: Statement) -> Option<Statement> {
         let mut existing_claims_iter = self
             .item
