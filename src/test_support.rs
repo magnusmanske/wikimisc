@@ -4,8 +4,12 @@
 //!
 //! Lets the suite cover HTTP-driven paths (`SiteMatrix::new`, `Wikidata::api`,
 //! `Wikidata::load_sparql_csv`, `ExternalId::*`) deterministically and offline.
+//!
+//! Which helpers are actually reachable depends on the enabled features, so the
+//! module tolerates unused ones rather than gating each on a feature list that
+//! would need updating whenever a test moves.
+#![allow(dead_code)]
 
-use crate::wikidata::Wikidata;
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -13,8 +17,12 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 pub const API_PATH: &str = "/w/api.php";
 pub const SPARQL_PATH: &str = "/sparql";
 
-/// Build a [`Wikidata`] whose API and SPARQL endpoints point at `server`.
-pub fn wikidata_for(server: &MockServer) -> Wikidata {
+/// Build a [`crate::wikidata::Wikidata`] whose API and SPARQL endpoints point
+/// at `server`.
+#[cfg(feature = "wikidata")]
+pub fn wikidata_for(server: &MockServer) -> crate::wikidata::Wikidata {
+    use crate::wikidata::Wikidata;
+
     let mut wd = Wikidata::new();
     wd.set_api_url(&format!("{}{}", server.uri(), API_PATH));
     wd.set_sparql_url(&format!("{}{}", server.uri(), SPARQL_PATH));

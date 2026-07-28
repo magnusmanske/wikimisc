@@ -29,16 +29,54 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: build
-        run: cargo build --all-targets
+        run: cargo build --all-targets --all-features
+
+      - name: build with no features at all
+        run: cargo build --no-default-features
 
       - name: test (offline)
         # Network-dependent tests are gated with #[ignore]; CI runs only the
         # offline suite. To exercise the live-API tests, run locally with
-        #   cargo test -- --ignored
-        run: cargo test
+        #   cargo test --all-features -- --ignored
+        run: cargo test --all-features
+
+  features:
+    # The crate has no default features, so `--all-features` alone would not
+    # catch a module that fails to compile without its neighbours. Build each
+    # feature on its own to keep the `#[cfg(feature = …)]` gating honest.
+    name: feature ${{ matrix.feature }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature:
+          - database
+          - date
+          - external-id
+          - file-storage
+          - item-merger
+          - lat-lon
+          - seppuku
+          - site-matrix
+          - sparql
+          - sparql-table
+          - toolforge
+          - wikibase
+          - wikidata
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy + test
+        run: |
+          cargo clippy --all-targets --no-default-features \
+            --features ${{ matrix.feature }} -- -D warnings
+          cargo test --no-default-features --features ${{ matrix.feature }}
 
   msrv-check:
     name: build on MSRV
@@ -50,4 +88,4 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build
+      - run: cargo build --all-features

@@ -1,13 +1,16 @@
 //! Useful functionality for dealing with external identifiers in Wikidata.
 
-use crate::wikidata::Wikidata;
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::LazyLock;
-use wikibase::mediawiki::prelude::*;
 use wikibase::*;
+
+#[cfg(feature = "wikidata")]
+use crate::wikidata::Wikidata;
+#[cfg(feature = "wikidata")]
+use wikibase::mediawiki::prelude::*;
 
 static RE_PROPERTY_NUMERIC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^\s*[Pp](\d+)\s*$"#).expect("Regexp error"));
@@ -74,6 +77,66 @@ impl ExternalId {
         Some(Self::new(prop_numeric, id))
     }
 
+    /// Returns the property number.
+    pub fn property(&self) -> usize {
+        self.property
+    }
+
+    /// Returns the ID string.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Returns a Reference object for this ExternalId.
+    pub fn as_reference(&self, stated_in: &str, use_current_date: bool) -> Reference {
+        let time = Utc::now();
+        let time = time.format("+%Y-%m-%dT00:00:00Z").to_string();
+        let mut reference = vec![
+            Snak::new(
+                SnakDataType::WikibaseItem,
+                "P248",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::EntityId,
+                    Value::Entity(EntityValue::new(EntityType::Item, stated_in)),
+                )),
+            ),
+            Snak::new(
+                SnakDataType::ExternalId,
+                format!("P{}", self.property),
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::StringType,
+                    Value::StringValue(self.id.to_owned()),
+                )),
+            ),
+        ];
+        if use_current_date {
+            reference.push(Snak::new(
+                SnakDataType::Time,
+                "P813",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::Time,
+                    Value::Time(TimeValue::new(
+                        0,
+                        0,
+                        "http://www.wikidata.org/entity/Q1985727",
+                        11,
+                        &time,
+                        0,
+                    )),
+                )),
+            ));
+        }
+        Reference::new(reference)
+    }
+}
+
+/// Lookups that hit the live Wikidata Action API, and so require the
+/// `wikidata` feature for the [`Wikidata`] client.
+#[cfg(feature = "wikidata")]
+impl ExternalId {
     /// Searches Wikidata for a single item with the given query.
     /// Returns None if none or multiple items are found.
     pub async fn search_wikidata_single_item(&self, query: &str) -> Option<String> {
@@ -133,61 +196,6 @@ impl ExternalId {
     ) -> Option<String> {
         let query = format!("{s} haswbstatement:\"P{}={}\"", self.property, self.id);
         self.search_wikidata_single_item_with(wd, &query).await
-    }
-
-    /// Returns the property number.
-    pub fn property(&self) -> usize {
-        self.property
-    }
-
-    /// Returns the ID string.
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// Returns a Reference object for this ExternalId.
-    pub fn as_reference(&self, stated_in: &str, use_current_date: bool) -> Reference {
-        let time = Utc::now();
-        let time = time.format("+%Y-%m-%dT00:00:00Z").to_string();
-        let mut reference = vec![
-            Snak::new(
-                SnakDataType::WikibaseItem,
-                "P248",
-                SnakType::Value,
-                Some(DataValue::new(
-                    DataValueType::EntityId,
-                    Value::Entity(EntityValue::new(EntityType::Item, stated_in)),
-                )),
-            ),
-            Snak::new(
-                SnakDataType::ExternalId,
-                format!("P{}", self.property),
-                SnakType::Value,
-                Some(DataValue::new(
-                    DataValueType::StringType,
-                    Value::StringValue(self.id.to_owned()),
-                )),
-            ),
-        ];
-        if use_current_date {
-            reference.push(Snak::new(
-                SnakDataType::Time,
-                "P813",
-                SnakType::Value,
-                Some(DataValue::new(
-                    DataValueType::Time,
-                    Value::Time(TimeValue::new(
-                        0,
-                        0,
-                        "http://www.wikidata.org/entity/Q1985727",
-                        11,
-                        &time,
-                        0,
-                    )),
-                )),
-            ));
-        }
-        Reference::new(reference)
     }
 }
 
@@ -402,6 +410,7 @@ mod tests {
         assert_eq!(ext.id(), "0000000121849233");
     }
 
+    #[cfg(feature = "wikidata")]
     #[tokio::test]
     async fn test_get_item_for_external_id() {
         use crate::test_support::{mount_siteinfo, wikidata_for, API_PATH};
@@ -475,6 +484,7 @@ mod tests {
         assert_eq!(ext_id.get_item_for_external_id_value_with(&wd).await, None);
     }
 
+    #[cfg(feature = "wikidata")]
     #[tokio::test]
     async fn test_get_item_for_external_id_returns_none_on_multiple_hits() {
         // Exercises the `totalhits != 1` branch: when search returns more than
