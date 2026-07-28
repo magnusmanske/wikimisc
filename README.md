@@ -15,13 +15,12 @@ wikimisc = { version = "0.1", default-features = false, features = ["item-merger
 | Feature | Modules | Enables | Extra dependencies |
 | --- | --- | --- | --- |
 | `date` | `date`, `timestamp` | | `chrono`, `regex`, `thiserror` |
-| `file-storage` | `file_hash`, `file_vec`, `file_error` | | `serde`, `serde_json`, `tempfile`, `thiserror` |
 | `lat-lon` | `lat_lon` | | `serde`, `thiserror` |
 | `seppuku` | `seppuku` | | `tokio` |
 | `toolforge` | `toolforge_app`, re-export of `toolforge` | | `toolforge` |
 | `wikibase` | re-exports of `wikibase` and `wikibase::mediawiki` | | `wikibase` |
 | `sparql` | `sparql_value`, `sparql_results` | `lat-lon` | `regex`, `serde`, `serde_json`, `urlencoding` |
-| `sparql-table` | `sparql_table`, `sparql_table_trait`, `sparql_table_vec` | `sparql`, `file-storage` | `thiserror` |
+| `sparql-table` | `sparql_table`, `sparql_table_trait`, `sparql_table_vec` | `sparql` | `thiserror` |
 | `site-matrix` | `site_matrix` | `wikibase` | `serde_json`, `thiserror` |
 | `wikidata` | `wikidata` | `wikibase` | `csv`, `reqwest`, `tempfile`, `thiserror` |
 | `external-id` | `external_id` | `wikibase` | `chrono`, `regex`, `serde` |
@@ -45,14 +44,10 @@ the shape of another feature's error type:
 | --- | --- |
 | `date` | `date::DateError` |
 | `lat-lon` | `lat_lon::LatLonError` |
-| `file-storage` | `file_error::FileError` (shared by `FileHash` and `FileVec`) |
 | `sparql-table` | `sparql_table::SparqlTableError` |
 | `site-matrix` | `site_matrix::SiteMatrixError` |
 | `wikidata` | `wikidata::WikidataError` |
 | `database` | `toolforge_db::DatabaseError` |
-
-There is one bridge between them: `SparqlTableError::Storage` wraps a `FileError`,
-because the disk-backed `SparqlTable` pushes rows through `FileVec`.
 
 All of these implement `std::error::Error`, so a downstream crate that uses
 several features can fold them into its own error type with

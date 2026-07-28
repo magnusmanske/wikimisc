@@ -1,16 +1,11 @@
 //! Tabular SPARQL results.
 //!
-//! [`SparqlTable`] is generic over its row container. The default backend is
-//! disk-spilling ([`FileVec<SparqlRow>`]); for fully in-memory tables use the
-//! [`SparqlTableVec`] type alias.
-//!
-//! Choose [`SparqlTableVec`] when results fit comfortably in memory and the
-//! per-row allocation cost matters; choose [`SparqlTable`] (disk-backed) when
-//! the result set could grow large enough to exhaust RAM.
+//! [`SparqlTable`] is generic over its row container via [`RowStorage`],
+//! implemented here for `Vec<SparqlRow>`. [`SparqlTableVec`] is the
+//! ready-to-use in-memory alias; other backends can implement [`RowStorage`]
+//! without changing [`SparqlTable`] itself.
 
 use crate::{
-    file_error::FileError,
-    file_vec::FileVec,
     sparql_results::{SparqlApiResult, SparqlRow},
     sparql_table_trait::SparqlTableTrait,
     sparql_value::SparqlValue,
@@ -25,19 +20,14 @@ pub enum SparqlTableError {
     /// cannot be assigned to columns.
     #[error("header not set")]
     HeaderNotSet,
-
-    /// The disk-backed row storage failed. Only reachable for the `FileVec`
-    /// backend; the in-memory `Vec` backend never produces this.
-    #[error(transparent)]
-    Storage(#[from] FileError),
 }
 
-/// Row-container abstraction shared by the in-memory and disk-spilling
-/// [`SparqlTable`] backends. Implemented for `Vec<SparqlRow>` and
-/// `FileVec<SparqlRow>`.
+/// Row-container abstraction used by [`SparqlTable`]. Implemented here for
+/// `Vec<SparqlRow>`; other backends can implement it without changing
+/// [`SparqlTable`] itself.
 ///
-/// `push` returns `Result` because disk-backed implementations may fail on I/O.
-/// The in-memory `Vec` impl always returns `Ok(())`.
+/// `push` returns `Result` so backends that can fail (e.g. on I/O) are
+/// supported. The in-memory `Vec` impl always returns `Ok(())`.
 pub trait RowStorage: Default {
     fn push(&mut self, row: SparqlRow) -> Result<(), SparqlTableError>;
     fn get(&self, idx: usize) -> Option<SparqlRow>;
@@ -60,21 +50,9 @@ impl RowStorage for Vec<SparqlRow> {
     }
 }
 
-impl RowStorage for FileVec<SparqlRow> {
-    fn push(&mut self, row: SparqlRow) -> Result<(), SparqlTableError> {
-        Ok(FileVec::push(self, row)?)
-    }
-    fn get(&self, idx: usize) -> Option<SparqlRow> {
-        FileVec::get(self, idx)
-    }
-    fn len(&self) -> usize {
-        FileVec::len(self)
-    }
-}
-
 /// Tabular SPARQL result set. Generic over the row container.
 #[derive(Debug, Clone)]
-pub struct SparqlTable<S: RowStorage = FileVec<SparqlRow>> {
+pub struct SparqlTable<S: RowStorage> {
     headers: Vec<String>,
     rows: S,
     main_variable: Option<String>,
@@ -277,11 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn test_table_behaviour_filevec_backend() {
-        assert_table_behaviour::<FileVec<SparqlRow>>();
-    }
-
-    #[test]
     fn test_table_behaviour_vec_backend() {
         assert_table_behaviour::<Vec<SparqlRow>>();
     }
@@ -325,17 +298,6 @@ mod tests {
         assert_eq!(copy.len(), 0);
     }
 
-    #[test]
-    fn test_from_table_cross_backend() {
-        // Headers/main_variable must copy even across backends.
-        let mut src: SparqlTableVec = SparqlTableVec::new();
-        src.set_headers(vec!["foo".to_string()]);
-        src.set_main_variable(Some("foo".to_string()));
-        let copy: SparqlTable = SparqlTable::from_table(&src);
-        assert_eq!(copy.main_variable(), Some(&"foo".to_string()));
-        assert_eq!(copy.get_var_index("foo"), Some(0));
-    }
-
     // ── from_api_result ──────────────────────────────────────────────────────
 
     fn make_api_result(json: serde_json::Value) -> SparqlApiResult {
@@ -354,7 +316,7 @@ mod tests {
             ]}
         }));
 
-        let table: SparqlTable = SparqlTable::from_api_result(result).unwrap();
+        let table: SparqlTableVec = SparqlTable::from_api_result(result).unwrap();
         assert_eq!(table.len(), 1);
         assert_eq!(table.get_var_index("item"), Some(0));
         assert_eq!(
@@ -364,19 +326,14 @@ mod tests {
     }
 
     #[test]
-    fn test_from_api_result_empty_bindings_both_backends() {
+    fn test_from_api_result_empty_bindings() {
         let json = serde_json::json!({
             "head": {"vars": ["x", "y"]},
             "results": {"bindings": []}
         });
-        let r1 = make_api_result(json.clone());
-        let r2 = make_api_result(json);
-        let t1: SparqlTable = SparqlTable::from_api_result(r1).unwrap();
-        let t2: SparqlTableVec = SparqlTable::from_api_result(r2).unwrap();
-        assert!(t1.is_empty());
-        assert!(t2.is_empty());
-        assert_eq!(t1.get_var_index("x"), Some(0));
-        assert_eq!(t2.get_var_index("x"), Some(0));
+        let table: SparqlTableVec = SparqlTable::from_api_result(make_api_result(json)).unwrap();
+        assert!(table.is_empty());
+        assert_eq!(table.get_var_index("x"), Some(0));
     }
 
     #[test]
@@ -387,7 +344,7 @@ mod tests {
                 {"x": {"type": "literal", "value": "v"}}
             ]}
         }));
-        assert!(SparqlTable::<FileVec<SparqlRow>>::from_api_result(result).is_err());
+        assert!(SparqlTableVec::from_api_result(result).is_err());
     }
 
     #[test]
@@ -409,14 +366,9 @@ mod tests {
 
     #[test]
     fn test_default_is_an_empty_table() {
-        // Both backends get their Default from the same blanket impl.
         let vec_table = SparqlTableVec::default();
         assert_eq!(vec_table.len(), 0);
         assert!(vec_table.is_empty());
         assert!(vec_table.main_variable().is_none());
-
-        let disk_table = SparqlTable::<FileVec<SparqlRow>>::default();
-        assert_eq!(disk_table.len(), 0);
-        assert!(disk_table.is_empty());
     }
 }

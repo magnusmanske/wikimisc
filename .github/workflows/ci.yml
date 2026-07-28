@@ -56,7 +56,6 @@ jobs:
           - database
           - date
           - external-id
-          - file-storage
           - item-merger
           - lat-lon
           - seppuku

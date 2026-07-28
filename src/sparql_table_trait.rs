@@ -1,17 +1,15 @@
-//! Shared trait for [`crate::sparql_table::SparqlTable`] and
-//! [`crate::sparql_table_vec::SparqlTableVec`], which are identical in interface
-//! but differ in their row-storage backend (disk-backed `FileVec` vs in-memory `Vec`).
+//! Shared trait implemented by [`crate::sparql_table::SparqlTable`] for every
+//! [`crate::sparql_table::RowStorage`] backend it is instantiated with.
 
 use crate::sparql_results::SparqlRow;
 use crate::sparql_table::SparqlTableError;
 use crate::sparql_value::SparqlValue;
 
-/// Common interface shared by [`crate::sparql_table::SparqlTable`] and
-/// [`crate::sparql_table_vec::SparqlTableVec`].
+/// Common interface implemented by [`crate::sparql_table::SparqlTable`]
+/// regardless of its [`crate::sparql_table::RowStorage`] backend.
 ///
-/// This trait exists to allow code to be generic over the two storage backends
-/// without duplicating logic. Use `SparqlTableVec` when all data fits in memory;
-/// use `SparqlTable` (backed by `FileVec`) for large result sets.
+/// This trait exists to allow code to be generic over storage backends without
+/// duplicating logic.
 pub trait SparqlTableTrait {
     /// Return the number of rows.
     fn len(&self) -> usize;
@@ -49,11 +47,10 @@ pub trait SparqlTableTrait {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sparql_table::SparqlTable;
     use crate::sparql_table_vec::SparqlTableVec;
 
     /// Runs the same assertions against any `SparqlTableTrait` implementation,
-    /// verifying both backends behave identically.
+    /// so every backend is held to identical behaviour.
     fn assert_table_behaviour(table: &mut dyn SparqlTableTrait) {
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
@@ -100,21 +97,12 @@ mod tests {
     }
 
     #[test]
-    fn test_sparql_table_trait_file_backend() {
-        let mut table: SparqlTable = SparqlTable::new();
-        assert_table_behaviour(&mut table);
-    }
-
-    #[test]
-    fn test_dyn_dispatch_works_for_both_backends() {
-        // The trait must remain object-safe so callers can hold a `&dyn SparqlTableTrait`
-        // pointing at either backend.
+    fn test_dyn_dispatch() {
+        // The trait must remain object-safe so callers can hold a `&dyn SparqlTableTrait`.
         fn count(t: &dyn SparqlTableTrait) -> usize {
             t.len()
         }
         let v = SparqlTableVec::new();
-        let f: SparqlTable = SparqlTable::new();
         assert_eq!(count(&v), 0);
-        assert_eq!(count(&f), 0);
     }
 }

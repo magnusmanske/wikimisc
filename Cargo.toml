@@ -23,15 +23,6 @@ readme = "README.md"
 # `date`, `timestamp`: Wikibase/MediaWiki date and timestamp parsing.
 date = ["dep:chrono", "dep:regex", "dep:thiserror"]
 
-# `disk_free`, `file_hash`, `file_vec`: disk-spilling collections. Spilled
-# records are stored as JSON blobs, hence `serde_json`.
-file-storage = [
-    "dep:serde",
-    "dep:serde_json",
-    "dep:tempfile",
-    "dep:thiserror",
-]
-
 # `lat_lon`: coordinate pair type.
 lat-lon = ["dep:serde", "dep:thiserror"]
 
@@ -57,8 +48,8 @@ sparql = [
 ]
 
 # `sparql_table`, `sparql_table_trait`, `sparql_table_vec`: tabular SPARQL
-# results, in-memory or spilling to disk.
-sparql-table = ["sparql", "file-storage", "dep:thiserror"]
+# results.
+sparql-table = ["sparql", "dep:thiserror"]
 
 # `site_matrix`: MediaWiki site matrix lookups.
 site-matrix = ["wikibase", "dep:serde_json", "dep:thiserror"]
@@ -96,19 +87,18 @@ database = [
 # Convenience umbrella enabling every feature above; also what the test suite
 # and `cargo doc` are run with.
 full = [
-    "database",
-    "date",
+    "database", # Actually used
+    "date", # Actually used
     "external-id",
-    "file-storage",
-    "item-merger",
-    "lat-lon",
-    "seppuku",
-    "site-matrix",
-    "sparql",
-    "sparql-table",
+    "item-merger", # Actually used
+    "lat-lon", # Actually used
+    "seppuku", # Actually used
+    "site-matrix", # Actually used
+    "sparql", # Actually used
+    "sparql-table", # Actually used
     "toolforge",
-    "wikibase",
-    "wikidata",
+    "wikibase", # Actually used
+    "wikidata", # Actually used
 ]
 
 [dependencies]
