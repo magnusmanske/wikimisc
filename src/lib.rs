@@ -5,6 +5,16 @@
 //! selects only the functionality — and dependency tree — it actually needs.
 //! See the feature table in `README.md`, or enable `full` to get everything.
 
+// A library must not take its caller's process down, so production code paths
+// do not panic: fallible operations return one of the per-feature error types
+// instead. The few unavoidable exceptions carry an explicit `#[allow]` plus a
+// comment justifying why there is no way to continue. Test code may panic
+// freely — that is what an assertion failure is — hence `not(test)`.
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 #[cfg(feature = "date")]
 pub mod date;
 #[cfg(feature = "file-storage")]

@@ -40,46 +40,62 @@ pub enum DateError {
     },
 }
 
+/// Pattern / replacement / precision triples, tried in order by [`Date::from_str`].
+///
+/// The patterns are literals, so `Regex::new` cannot fail in practice. Rather
+/// than panic if one somehow did, that entry is skipped — `from_str` already
+/// returns [`DateError::Unparsable`] for input it does not recognise, so the
+/// failure surfaces as an ordinary error instead of taking the caller down.
+/// `test_all_date_patterns_compile` makes sure CI catches a broken literal.
 static DATES: LazyLock<Vec<(Regex, String, u64)>> = LazyLock::new(|| {
     // NOTE: The pattern always needs to cover the whole string, so use ^$
-    vec![
+    const PATTERNS: &[(&str, &str, u64)] = &[
+        (r"^(\d{3,})$", "+${1}-00-00T00:00:00Z", 9),
+        (r"^(\d{3,})-(\d{2})$", "+${1}-${2}-00T00:00:00Z", 10),
         (
-            Regex::new(r"^(\d{3,})$").unwrap(),
-            "+${1}-00-00T00:00:00Z".to_string(),
+            r"^(\d{3,})-(\d{2})-(\d{2})$",
+            "+${1}-${2}-${3}T00:00:00Z",
+            11,
+        ),
+        // Why not?
+        (
+            r"^https?://data.bnf.fr/date/(\d+)/?$",
+            "+${1}-00-00T00:00:00Z",
             9,
         ),
         (
-            Regex::new(r"^(\d{3,})-(\d{2})$").unwrap(),
-            "+${1}-${2}-00T00:00:00Z".to_string(),
-            10,
-        ),
-        (
-            Regex::new(r"^(\d{3,})-(\d{2})-(\d{2})$").unwrap(),
-            "+${1}-${2}-${3}T00:00:00Z".to_string(),
+            r"^([+-]?\d{3,})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}Z/11$",
+            "+${1}-${2}-${3}T00:00:00Z",
             11,
         ),
         (
-            Regex::new(r"^https?://data.bnf.fr/date/(\d+)/?$").unwrap(),
-            "+${1}-00-00T00:00:00Z".to_string(),
-            9,
-        ), // Why not?
-        (
-            Regex::new(r"^([+-]?\d{3,})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}Z/11$").unwrap(),
-            "+${1}-${2}-${3}T00:00:00Z".to_string(),
-            11,
-        ),
-        (
-            Regex::new(r"^([+-]?\d{3,})-(\d{2})-0[01]T\d{2}:\d{2}:\d{2}Z/10$").unwrap(),
-            "+${1}-${2}-00T00:00:00Z".to_string(),
+            r"^([+-]?\d{3,})-(\d{2})-0[01]T\d{2}:\d{2}:\d{2}Z/10$",
+            "+${1}-${2}-00T00:00:00Z",
             10,
         ),
         (
-            Regex::new(r"^([+-]?\d{3,})-0[01]-0[01]T\d{2}:\d{2}:\d{2}Z/9$").unwrap(),
-            "+${1}-00-00T00:00:00Z".to_string(),
+            r"^([+-]?\d{3,})-0[01]-0[01]T\d{2}:\d{2}:\d{2}Z/9$",
+            "+${1}-00-00T00:00:00Z",
             9,
         ),
-    ]
+    ];
+
+    PATTERNS
+        .iter()
+        .filter_map(|(pattern, replacement, precision)| {
+            Some((
+                Regex::new(pattern).ok()?,
+                replacement.to_string(),
+                *precision,
+            ))
+        })
+        .collect()
 });
+
+/// Number of entries [`DATES`] is expected to hold; asserted by the tests so a
+/// pattern that stops compiling fails the build rather than degrading silently.
+#[cfg(test)]
+const DATE_PATTERN_COUNT: usize = 7;
 
 pub struct Date {
     time: String,
@@ -397,5 +413,12 @@ mod tests {
         let d = Date::from_str("1999-12").unwrap();
         assert_eq!(d.time(), "+1999-12-00T00:00:00Z");
         assert_eq!(d.precision(), 10);
+    }
+    #[test]
+    fn test_all_date_patterns_compile() {
+        // The patterns are skipped rather than panicked on if they fail to
+        // compile, so assert the expected count here: a broken literal must fail
+        // the build instead of silently disabling a date format.
+        assert_eq!(DATES.len(), DATE_PATTERN_COUNT);
     }
 }

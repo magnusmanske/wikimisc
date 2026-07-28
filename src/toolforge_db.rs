@@ -27,6 +27,10 @@ pub enum DatabaseError {
     #[error("no pool '{0}' found")]
     UnknownPool(String),
 
+    /// The config asks for more minimum than maximum connections.
+    #[error("invalid pool config: min_connections ({min}) exceeds max_connections ({max})")]
+    InvalidPoolConstraints { min: usize, max: usize },
+
     /// The configured `url` is not a valid MySQL connection URL.
     #[error(transparent)]
     Url(#[from] mysql_async::UrlError),
@@ -89,10 +93,16 @@ impl ToolforgeDB {
         let url = config["url"]
             .as_str()
             .ok_or(DatabaseError::MissingPoolUrl)?;
+        // `PoolConstraints::new` rejects min > max, and both values come straight
+        // from the caller's JSON, so this must be an error rather than a panic.
+        let constraints = PoolConstraints::new(min_connections, max_connections).ok_or(
+            DatabaseError::InvalidPoolConstraints {
+                min: min_connections,
+                max: max_connections,
+            },
+        )?;
         let pool_opts = PoolOpts::default()
-            .with_constraints(
-                PoolConstraints::new(min_connections, max_connections).expect("Constraints error"),
-            )
+            .with_constraints(constraints)
             .with_inactive_connection_ttl(Duration::from_secs(keep_sec));
         let wd_url = url;
         let wd_opts = Opts::from_url(wd_url)?;
@@ -329,5 +339,30 @@ mod tests {
             matches!(&err, DatabaseError::UnknownPool(name) if name == "nope"),
             "expected UnknownPool, got: {err:?}"
         );
+    }
+    #[test]
+    fn test_add_mysql_pool_min_above_max_returns_err() {
+        // min_connections > max_connections is rejected by PoolConstraints; since
+        // both come from caller-supplied JSON this must be an error, not a panic.
+        let mut db = ToolforgeDB::default();
+        let err = db
+            .add_mysql_pool(
+                "bad",
+                &json!({
+                    "url": "mysql://u@127.0.0.1:3306/d",
+                    "min_connections": 10,
+                    "max_connections": 2
+                }),
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                DatabaseError::InvalidPoolConstraints { min: 10, max: 2 }
+            ),
+            "expected InvalidPoolConstraints, got: {err:?}"
+        );
+        assert!(db.get_pool("bad").is_none());
     }
 }

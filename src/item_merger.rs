@@ -30,8 +30,11 @@ use std::cmp::Ordering;
 use std::sync::LazyLock;
 use wikibase::*;
 
-static YEAR_FIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-\d\d-\d\dT").unwrap());
-static MONTH_FIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-\d\dT").unwrap());
+// Literal patterns, held as `Option<Regex>` so a pattern that somehow failed to
+// compile degrades to exact timestamp comparison rather than panicking in a
+// library. `test_all_static_regexes_compile` makes sure CI catches that.
+static YEAR_FIX: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"-\d\d-\d\dT").ok());
+static MONTH_FIX: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"-\d\dT").ok());
 
 #[derive(Debug, Clone)]
 pub struct ItemMerger {
@@ -119,9 +122,14 @@ impl ItemMerger {
                 })
                 .cloned()
                 .collect();
-            if let Some(my_sitelinks) = self.item.sitelinks_mut() {
+            if !new_ones.is_empty() {
                 diff.sitelinks = new_ones.clone();
-                my_sitelinks.append(&mut new_ones);
+                // A fresh `ItemEntity` has no sitelink list at all, so create one
+                // rather than discarding the incoming links.
+                self.item
+                    .sitelinks_mut()
+                    .get_or_insert_with(Vec::new)
+                    .append(&mut new_ones);
             }
         }
 
@@ -301,17 +309,26 @@ impl ItemMerger {
             return false;
         }
         match t1.precision() {
-            9 => {
-                let t1s = YEAR_FIX.replace_all(t1.time(), "-00-00T");
-                let t2s = YEAR_FIX.replace_all(t2.time(), "-00-00T");
-                t1s == t2s
-            }
-            10 => {
-                let t1s = MONTH_FIX.replace_all(t1.time(), "-00T");
-                let t2s = MONTH_FIX.replace_all(t2.time(), "-00T");
-                t1s == t2s
-            }
+            9 => Self::times_match_blanking(YEAR_FIX.as_ref(), t1, t2, "-00-00T"),
+            10 => Self::times_match_blanking(MONTH_FIX.as_ref(), t1, t2, "-00T"),
             _ => *t1 == *t2,
+        }
+    }
+
+    /// Compare two timestamps after blanking the components the precision leaves
+    /// undefined. Falls back to exact comparison when `re` is unavailable, which
+    /// is conservative: it can only report fewer values as identical.
+    fn times_match_blanking(
+        re: Option<&Regex>,
+        t1: &TimeValue,
+        t2: &TimeValue,
+        replacement: &str,
+    ) -> bool {
+        match re {
+            Some(re) => {
+                re.replace_all(t1.time(), replacement) == re.replace_all(t2.time(), replacement)
+            }
+            None => *t1 == *t2,
         }
     }
 
@@ -1624,25 +1641,40 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_sitelinks_are_dropped_when_base_item_has_none() {
-        // KNOWN LIMITATION: `merge` only records sitelinks when the base item
-        // already has a sitelink list. With `sitelinks() == None` the incoming
-        // links are computed and then discarded, because the write-back is
-        // guarded by `if let Some(my_sitelinks) = self.item.sitelinks_mut()`.
-        // `MergeDiff::apply` skips a None list in the same way. This test pins
-        // the current behaviour so that changing it is a deliberate decision.
+    fn test_merge_creates_sitelink_list_when_base_item_has_none() {
+        // A fresh base item has `sitelinks() == None`; the incoming links must
+        // still reach both the diff and the merged item.
         let mut other = ItemEntity::new_empty();
-        other
-            .sitelinks_mut()
-            .replace(vec![SiteLink::new("enwiki", "Foo", vec![])]);
+        other.sitelinks_mut().replace(vec![
+            SiteLink::new("enwiki", "Foo", vec![]),
+            SiteLink::new("dewiki", "Foo", vec![]),
+        ]);
 
         let mut im = ItemMerger::new(ItemEntity::new_empty());
         let diff = im.merge(&other);
 
-        assert!(
-            diff.sitelinks.is_empty(),
-            "sitelinks are currently dropped when the base item has none"
-        );
+        assert_eq!(diff.sitelinks.len(), 2);
+        let merged = im
+            .item()
+            .sitelinks()
+            .as_ref()
+            .expect("list must be created");
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|s| s.site() == "enwiki"));
+        assert!(merged.iter().any(|s| s.site() == "dewiki"));
+    }
+
+    #[test]
+    fn test_merge_leaves_none_sitelinks_alone_when_other_has_none_to_add() {
+        // Merging an item that has an empty sitelink list must not materialise
+        // one on the base item.
+        let mut other = ItemEntity::new_empty();
+        other.sitelinks_mut().replace(vec![]);
+
+        let mut im = ItemMerger::new(ItemEntity::new_empty());
+        let diff = im.merge(&other);
+
+        assert!(diff.sitelinks.is_empty());
         assert!(im.item().sitelinks().is_none());
     }
 
@@ -1705,5 +1737,12 @@ mod tests {
 
         let urls = ItemMerger::get_reference_urls_from_reference(&reference);
         assert_eq!(urls, vec!["http://example.com".to_string()]);
+    }
+    #[test]
+    fn test_all_static_regexes_compile() {
+        // The statics degrade to exact comparison rather than panicking, so
+        // assert here that they are in fact available.
+        assert!(YEAR_FIX.is_some());
+        assert!(MONTH_FIX.is_some());
     }
 }

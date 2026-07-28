@@ -6,20 +6,25 @@ use serde::Deserializer;
 use serde_json::Value;
 use std::sync::LazyLock;
 
-static RE_ENTITY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^https{0,1}://[^/]+/entity/([A-Z]\d+)$"#).expect("RE_ENTITY does not parse")
-});
-static RE_FILE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^https{0,1}://[^/]+/wiki/Special:FilePath/(.+?)$"#)
-        .expect("RE_FILE does not parse")
-});
-static RE_POINT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^Point\((-{0,1}\d+[\.0-9]*) (-{0,1}\d+[\.0-9]*)\)$"#)
-        .expect("RE_POINT does not parse")
-});
-static RE_DATE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^([+-]{0,1}\d+-\d{2}-\d{2})T00:00:00Z$"#).expect("RE_DATE does not parse")
-});
+// The patterns below are literals and cannot fail to compile in practice. They
+// are still stored as `Option<Regex>` so that a pattern which somehow did fail
+// degrades to "never matches" instead of panicking in a library: a URI then
+// falls through to `SparqlValue::Uri`, and a typed literal keeps its raw value.
+// `test_all_static_regexes_compile` makes sure CI catches a broken literal.
+static RE_ENTITY: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"^https{0,1}://[^/]+/entity/([A-Z]\d+)$"#).ok());
+static RE_FILE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"^https{0,1}://[^/]+/wiki/Special:FilePath/(.+?)$"#).ok());
+static RE_POINT: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"^Point\((-{0,1}\d+[\.0-9]*) (-{0,1}\d+[\.0-9]*)\)$"#).ok());
+static RE_DATE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"^([+-]{0,1}\d+-\d{2}-\d{2})T00:00:00Z$"#).ok());
+
+/// Captures from one of the statics above, treating an unavailable regex as a
+/// plain non-match.
+fn captures<'t>(re: &Option<Regex>, text: &'t str) -> Option<regex::Captures<'t>> {
+    re.as_ref()?.captures(text)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SparqlValue {
@@ -35,11 +40,11 @@ impl SparqlValue {
     pub fn new_from_json(j: &Value) -> Option<Self> {
         let value = j["value"].as_str()?;
         match j["type"].as_str() {
-            Some("uri") => match RE_ENTITY.captures(value) {
+            Some("uri") => match captures(&RE_ENTITY, value) {
                 Some(caps) => caps
                     .get(1)
                     .map(|caps1| SparqlValue::Entity(caps1.as_str().to_string())),
-                None => match RE_FILE.captures(value) {
+                None => match captures(&RE_FILE, value) {
                     Some(caps) => match caps.get(1) {
                         Some(caps1) => {
                             let file = caps1.as_str().to_string();
@@ -54,7 +59,7 @@ impl SparqlValue {
             },
             Some("literal") => match j["datatype"].as_str() {
                 Some("http://www.opengis.net/ont/geosparql#wktLiteral") => {
-                    match RE_POINT.captures(value) {
+                    match captures(&RE_POINT, value) {
                         Some(caps) => {
                             let lat: f64 = caps.get(2)?.as_str().parse().ok()?;
                             let lon: f64 = caps.get(1)?.as_str().parse().ok()?;
@@ -65,7 +70,7 @@ impl SparqlValue {
                 }
                 Some("http://www.w3.org/2001/XMLSchema#dateTime") => {
                     let time = value.to_string();
-                    let time = match RE_DATE.captures(value) {
+                    let time = match captures(&RE_DATE, value) {
                         Some(caps) => {
                             let date: String = caps.get(1)?.as_str().to_string();
                             date
@@ -378,5 +383,14 @@ mod tests {
                        "value":"POLYGON((0 0, 1 0, 1 1, 0 0))"}"#;
         let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
         assert_eq!(value, None);
+    }
+    #[test]
+    fn test_all_static_regexes_compile() {
+        // The statics degrade to "never matches" rather than panicking, so
+        // assert here that they are in fact available.
+        assert!(RE_ENTITY.is_some());
+        assert!(RE_FILE.is_some());
+        assert!(RE_POINT.is_some());
+        assert!(RE_DATE.is_some());
     }
 }

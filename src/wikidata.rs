@@ -91,12 +91,13 @@ impl Wikidata {
     }
 
     #[cfg(not(doctest))]
-    /// Queries SPARQL and returns a filename with the result as CSV.
+    /// Queries SPARQL and returns the result as a CSV reader over a temp file.
     /// USAGE:
     /// ```rust
-    /// let mut reader = self.mnm.load_sparql_csv(&sparql).await?;
+    /// let mut reader = wikidata.load_sparql_csv(&sparql).await?;
     /// for result in reader.records() {
-    ///     let record = result.unwrap();
+    ///     let record = result?; // a malformed row is an error, not a panic
+    ///     // ...
     /// }
     /// ```
     pub async fn load_sparql_csv(&self, sparql: &str) -> Result<csv::Reader<File>, WikidataError> {

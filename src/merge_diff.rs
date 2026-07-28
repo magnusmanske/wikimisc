@@ -45,15 +45,20 @@ impl MergeDiff {
             .extend(other.added_statements.iter().cloned());
     }
 
-    // TODO tests
+    /// Fold this diff into `item`.
     pub fn apply(&self, item: &mut ItemEntity) {
         item.labels_mut().extend(self.labels.iter().cloned());
         item.aliases_mut().extend(self.aliases.iter().cloned());
         item.descriptions_mut()
             .extend(self.descriptions.iter().cloned());
-        if let Some(sitelinks) = item.sitelinks_mut() {
-            sitelinks.extend(self.sitelinks.iter().cloned());
-        };
+        if !self.sitelinks.is_empty() {
+            // A fresh `ItemEntity` has no sitelink list at all; create one rather
+            // than discarding the diff's links. Guarded on `is_empty` so a diff
+            // with no sitelinks leaves the item's `None` untouched.
+            item.sitelinks_mut()
+                .get_or_insert_with(Vec::new)
+                .extend(self.sitelinks.iter().cloned());
+        }
         for (id, statement) in self.altered_statements.iter() {
             let existing_statement = item
                 .claims_mut()
@@ -529,11 +534,9 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_diff_apply_sitelinks_dropped_when_item_has_none() {
-        // Current behaviour: apply() only extends sitelinks when the item already has
-        // Some(Vec<SiteLink>). If the item's sitelinks are None (the wikibase default
-        // for fresh ItemEntity), diff sitelinks are silently dropped. This test locks
-        // that behaviour in so any future change to it is intentional.
+    fn test_merge_diff_apply_creates_sitelink_list_when_item_has_none() {
+        // A fresh ItemEntity has `sitelinks() == None`. apply() must create the
+        // list rather than dropping the diff's sitelinks.
         let mut item = ItemEntity::new_empty();
         assert!(
             item.sitelinks().is_none(),
@@ -544,10 +547,23 @@ mod tests {
         diff.sitelinks.push(SiteLink::new("enwiki", "Test", vec![]));
 
         diff.apply(&mut item);
-        assert!(
-            item.sitelinks().is_none(),
-            "sitelinks must remain None when item had no prior sitelinks"
-        );
+
+        let sitelinks = item
+            .sitelinks()
+            .as_ref()
+            .expect("sitelinks must be created");
+        assert_eq!(sitelinks.len(), 1);
+        assert_eq!(sitelinks[0].site(), "enwiki");
+        assert_eq!(sitelinks[0].title(), "Test");
+    }
+
+    #[test]
+    fn test_merge_diff_apply_leaves_none_sitelinks_alone_when_diff_has_none() {
+        // The converse: an empty sitelink list in the diff must not materialise an
+        // empty Vec on the item.
+        let mut item = ItemEntity::new_empty();
+        MergeDiff::new().apply(&mut item);
+        assert!(item.sitelinks().is_none());
     }
 
     #[test]

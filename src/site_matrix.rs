@@ -100,9 +100,13 @@ impl SiteMatrix {
             "wikivoyagewiki",
         ];
         for suffix in SUFFIXES_WITH_EXTRA_WIKI {
+            // Every suffix above ends in "wiki"; strip that trailing occurrence.
+            // `strip_suffix` cannot panic, whereas slicing at `wiki.len() - 4`
+            // would underflow on a short name and could land mid-character.
             if wiki.ends_with(suffix) {
-                // Strip the trailing "wiki" (4 characters) and return an owned slice.
-                return Cow::Owned(wiki[..wiki.len() - 4].to_string());
+                if let Some(stripped) = wiki.strip_suffix("wiki") {
+                    return Cow::Owned(stripped.to_string());
+                }
             }
         }
         // Common case: nothing to strip — borrow the original string without allocating.
@@ -895,5 +899,29 @@ mod tests {
             site_matrix: serde_json::json!({ "sitematrix": { "count": 0 } }),
         };
         assert!(site_matrix.get_api_for_wiki("nosuchwiki").await.is_err());
+    }
+    #[test]
+    fn test_normalize_wiki_name_never_panics_on_odd_input() {
+        // The suffix strip used to slice at `len() - 4`, which would underflow on
+        // a short name and could land mid-character on a multibyte one.
+        assert_eq!(SiteMatrix::normalize_wiki_name(""), "");
+        assert_eq!(SiteMatrix::normalize_wiki_name("wi"), "wi");
+        assert_eq!(SiteMatrix::normalize_wiki_name("wiki"), "wiki");
+        // Exactly one suffix, nothing before it.
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("wikibookswiki"),
+            "wikibooks"
+        );
+        // Multibyte prefix.
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("日本語wiktionarywiki"),
+            "日本語wiktionary"
+        );
+        // Names that need no change are returned untouched.
+        assert_eq!(SiteMatrix::normalize_wiki_name("enwiki"), "enwiki");
+        assert_eq!(
+            SiteMatrix::normalize_wiki_name("enwiktionary"),
+            "enwiktionary"
+        );
     }
 }

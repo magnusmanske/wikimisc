@@ -58,6 +58,13 @@ All of these implement `std::error::Error`, so a downstream crate that uses
 several features can fold them into its own error type with
 `#[from]`/`#[source]`, or erase them behind `Box<dyn Error>` or `anyhow`.
 
+Nothing in this crate panics on a non-test code path: no `unwrap`, `expect`,
+`panic!`, out-of-bounds indexing, or arithmetic that can underflow. Fallible
+work returns the error types above, and operations with a sensible empty result
+return `Option`. This is enforced by
+`#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used, clippy::panic))]`
+plus `-D warnings` in CI.
+
 ## Development
 
 ```bash

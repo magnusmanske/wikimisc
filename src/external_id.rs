@@ -12,10 +12,13 @@ use crate::wikidata::Wikidata;
 #[cfg(feature = "wikidata")]
 use wikibase::mediawiki::prelude::*;
 
-static RE_PROPERTY_NUMERIC: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^\s*[Pp](\d+)\s*$"#).expect("Regexp error"));
-static RE_FROM_STRING: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^[Pp](\d+):(.+)$"#).expect("Regexp error"));
+// Literal patterns, held as `Option<Regex>` so a pattern that somehow failed to
+// compile degrades to a `None` return rather than panicking in a library.
+// `test_all_static_regexes_compile` makes sure CI catches a broken literal.
+static RE_PROPERTY_NUMERIC: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"^\s*[Pp](\d+)\s*$"#).ok());
+static RE_FROM_STRING: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"^[Pp](\d+):(.+)$"#).ok());
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Default)]
 pub struct ExternalId {
@@ -46,7 +49,7 @@ impl ExternalId {
 
     /// Returns a new ExternalId from a string like "P123:ABC456DEF".
     pub fn from_string(s: &str) -> Option<Self> {
-        let captures = RE_FROM_STRING.captures(s)?;
+        let captures = RE_FROM_STRING.as_ref()?.captures(s)?;
         // Group 1 is already `\d+` from the regex, so parse directly without
         // running the second RE_PROPERTY_NUMERIC regex that prop_numeric uses.
         let property = captures.get(1)?.as_str().parse::<usize>().ok()?;
@@ -56,10 +59,13 @@ impl ExternalId {
 
     /// Parses a property number from a string like "P123".
     pub fn prop_numeric(prop: &str) -> Option<usize> {
-        RE_PROPERTY_NUMERIC
-            .replace(prop, "${1}")
-            .parse::<usize>()
-            .ok()
+        let normalized = match RE_PROPERTY_NUMERIC.as_ref() {
+            Some(re) => re.replace(prop, "${1}"),
+            // Without the regex, parse the value as-is — exactly what `replace`
+            // does for input that does not match the pattern anyway.
+            None => std::borrow::Cow::Borrowed(prop),
+        };
+        normalized.parse::<usize>().ok()
     }
 
     /// Retrieves the ExternalId from a Wikidata claim (statement).
@@ -595,5 +601,12 @@ mod tests {
         assert!(a < b);
         assert!(b < c);
         assert!(a < c);
+    }
+    #[test]
+    fn test_all_static_regexes_compile() {
+        // The statics degrade to `None` rather than panicking, so assert here
+        // that they are in fact available.
+        assert!(RE_PROPERTY_NUMERIC.is_some());
+        assert!(RE_FROM_STRING.is_some());
     }
 }

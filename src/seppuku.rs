@@ -7,9 +7,22 @@
 //! task calls `std::process::exit(0)`.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
+
+/// Lock one of the watchdog's mutexes, recovering from a poisoned lock.
+///
+/// A panic anywhere else in the process must not turn every subsequent
+/// `alive()` call into a panic of its own — that would take down a web service
+/// on its next request. The guarded values are an `Instant` and two `bool`s;
+/// none can be left logically inconsistent by a panic part-way through an
+/// assignment, so reusing the poisoned value is both safe and correct.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Debug, Clone)]
 pub struct Seppuku {
@@ -35,7 +48,7 @@ impl Seppuku {
     /// Arms the seppuku timer.
     pub fn arm(&self) {
         {
-            let mut armed = self.armed.lock().unwrap();
+            let mut armed = lock(&self.armed);
             if *armed {
                 return;
             }
@@ -47,13 +60,13 @@ impl Seppuku {
 
     /// Disarms the seppuku timer.
     pub fn disarm(&self) {
-        *self.armed.lock().unwrap() = false;
+        *lock(&self.armed) = false;
     }
 
     /// Updates the last activity timestamp.
     /// Call this from your client code to indicate activity.
     pub fn alive(&self) {
-        *self.last_activity.lock().unwrap() = Instant::now();
+        *lock(&self.last_activity) = Instant::now();
     }
 
     /// Starts the seppuku timer.
@@ -64,7 +77,7 @@ impl Seppuku {
     /// late in the window could push the actual fire time out to nearly
     /// `2 * max_seconds` past the last activity.
     fn start_timer(&self) {
-        let mut timer_running = self.timer_running.lock().unwrap();
+        let mut timer_running = lock(&self.timer_running);
         if *timer_running {
             // Already running
             return;
@@ -76,8 +89,8 @@ impl Seppuku {
         *timer_running = true;
         tokio::spawn(async move {
             loop {
-                let elapsed = last_activity.lock().unwrap().elapsed();
-                if *armed.lock().unwrap() && elapsed >= max {
+                let elapsed = lock(&last_activity).elapsed();
+                if *lock(&armed) && elapsed >= max {
                     println!("Committing seppuku after {max_seconds} seconds of inactivity");
                     std::process::exit(0);
                 }
@@ -197,5 +210,30 @@ mod tests {
         // Reaching here at all means the watchdog did not terminate the process.
         assert!(*seppuku.armed.lock().unwrap());
         assert!(*seppuku.timer_running.lock().unwrap());
+    }
+    #[test]
+    fn test_poisoned_mutex_is_recovered_instead_of_panicking() {
+        // A panic elsewhere while holding one of the locks must not make every
+        // later call panic — `alive()` runs on every request of a web service.
+        // NOTE: this test intentionally panics a helper thread, so a
+        // "thread panicked" message in the test output here is expected.
+        let seppuku = Seppuku::new(60);
+        let poisoner = seppuku.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.armed.lock();
+            panic!("intentional panic to poison the mutex (expected in test output)");
+        })
+        .join();
+
+        assert!(
+            seppuku.armed.is_poisoned(),
+            "the lock must actually be poisoned for this test to mean anything"
+        );
+
+        // None of these may panic.
+        seppuku.alive();
+        seppuku.disarm();
+        assert!(!*lock(&seppuku.armed));
+        assert!(*lock(&seppuku.last_activity) <= Instant::now());
     }
 }
