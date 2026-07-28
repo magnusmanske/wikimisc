@@ -1,10 +1,28 @@
 //! Manages a site matrix for all sites in the WikiVerse.
 
-use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use thiserror::Error;
+use wikibase::mediawiki::media_wiki_error::MediaWikiError;
 use wikibase::mediawiki::prelude::*;
+
+/// Failure modes of [`SiteMatrix`].
+#[derive(Debug, Error)]
+pub enum SiteMatrixError {
+    /// The `sitematrix` key of the API response is not a JSON object, so the
+    /// site list cannot be walked.
+    #[error("sitematrix is not an object")]
+    NotAnObject,
+
+    /// No site in the matrix matches the requested wiki.
+    #[error("cannot find server for wiki '{0}'")]
+    UnknownWiki(String),
+
+    /// Talking to the MediaWiki API failed.
+    #[error(transparent)]
+    MediaWiki(#[from] MediaWikiError),
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct SiteMatrix {
@@ -13,7 +31,7 @@ pub struct SiteMatrix {
 
 impl SiteMatrix {
     /// Create a new SiteMatrix object
-    pub async fn new(api: &Api) -> Result<Self> {
+    pub async fn new(api: &Api) -> Result<Self, SiteMatrixError> {
         let site_matrix = ActionApi::sitematrix().run(api).await?;
         Ok(Self { site_matrix })
     }
@@ -92,7 +110,7 @@ impl SiteMatrix {
     }
 
     /// Get the server URL for a wiki
-    pub fn get_server_url_for_wiki(&self, wiki: &str) -> Result<String> {
+    pub fn get_server_url_for_wiki(&self, wiki: &str) -> Result<String, SiteMatrixError> {
         // Normalize the wiki name first: strip any spurious trailing "wiki" suffix
         // that may have been appended to project names like "wiktionary", "wikibooks", etc.
         let wiki = &Self::normalize_wiki_name(wiki);
@@ -108,9 +126,7 @@ impl SiteMatrix {
 
         self.site_matrix["sitematrix"]
             .as_object()
-            .ok_or_else(|| {
-                anyhow!("SiteMatrix::get_server_url_for_wiki: sitematrix not an object")
-            })?
+            .ok_or(SiteMatrixError::NotAnObject)?
             .iter()
             .find_map(|(id, data)| match id.as_str() {
                 "count" => None,
@@ -124,9 +140,7 @@ impl SiteMatrix {
                         .find_map(|site| self.get_url_for_wiki_from_site(wiki, site))
                 }),
             })
-            .ok_or_else(|| {
-                anyhow!("SiteMatrix::get_server_url_for_wiki: Cannot find server for wiki '{wiki}'")
-            })
+            .ok_or_else(|| SiteMatrixError::UnknownWiki(wiki.to_string()))
     }
 
     fn get_wiki_for_server_url_from_site(&self, url: &str, site: &Value) -> Option<String> {
@@ -163,9 +177,9 @@ impl SiteMatrix {
             })
     }
 
-    pub async fn get_api_for_wiki(&self, wiki: &str) -> Result<Api> {
+    pub async fn get_api_for_wiki(&self, wiki: &str) -> Result<Api, SiteMatrixError> {
         let url = self.get_server_url_for_wiki(wiki)? + "/w/api.php";
-        Api::new(&url).await.map_err(|e| anyhow!(e))
+        Ok(Api::new(&url).await?)
     }
 }
 

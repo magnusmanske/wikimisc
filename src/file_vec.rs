@@ -9,10 +9,10 @@
 //! Reach for `FileVec` when you have many rows whose memory footprint would
 //! exceed RAM but whose access pattern is sequential or random-access by index.
 
-use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
+use crate::file_error::FileError;
 use crate::file_hash::FileHash;
 
 #[derive(Debug, Clone)]
@@ -29,7 +29,7 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         }
     }
 
-    pub fn push(&mut self, row: ValueType) -> Result<()> {
+    pub fn push(&mut self, row: ValueType) -> Result<(), FileError> {
         self.file_hash.insert(self.len, row)?;
         self.len += 1;
         Ok(())
@@ -39,16 +39,19 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         self.file_hash.get(pos)
     }
 
-    pub fn set(&mut self, pos: usize, row: ValueType) -> Result<()> {
+    pub fn set(&mut self, pos: usize, row: ValueType) -> Result<(), FileError> {
         if pos < self.len {
             self.file_hash.insert(pos, row)?;
             Ok(())
         } else {
-            Err(anyhow!("Attempting to set out-of-bounds result {pos}"))
+            Err(FileError::OutOfBounds {
+                index: pos,
+                len: self.len,
+            })
         }
     }
 
-    pub fn clear(&mut self) -> Result<()> {
+    pub fn clear(&mut self) -> Result<(), FileError> {
         self.file_hash.clear()?;
         self.len = 0;
         Ok(())
@@ -82,7 +85,7 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         }
     }
 
-    pub fn retain<F>(&mut self, mut f: F) -> Result<()>
+    pub fn retain<F>(&mut self, mut f: F) -> Result<(), FileError>
     where
         F: FnMut(&ValueType) -> bool,
     {
@@ -90,7 +93,7 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         for read_pos in 0..self.len {
             let value = self
                 .get(read_pos)
-                .ok_or_else(|| anyhow!("FileVec::retain: row {read_pos} unreadable"))?;
+                .ok_or(FileError::UnreadableRow(read_pos))?;
             if f(&value) {
                 self.file_hash.swap(read_pos, write_pos);
                 write_pos += 1;
@@ -113,7 +116,7 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
     /// use case (sorting result sets after parsing) this is acceptable; if a
     /// caller needs to sort a dataset that exceeds available RAM, an external
     /// merge sort would be needed instead.
-    pub fn sort_by<F>(&mut self, mut f: F) -> Result<()>
+    pub fn sort_by<F>(&mut self, mut f: F) -> Result<(), FileError>
     where
         F: FnMut(&ValueType, &ValueType) -> Ordering,
     {
@@ -122,10 +125,7 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         }
         let mut buffered: Vec<ValueType> = Vec::with_capacity(self.len);
         for i in 0..self.len {
-            buffered.push(
-                self.get(i)
-                    .ok_or_else(|| anyhow!("FileVec::sort_by: row {i} unreadable"))?,
-            );
+            buffered.push(self.get(i).ok_or(FileError::UnreadableRow(i))?);
         }
         buffered.sort_by(|a, b| f(a, b));
         for (i, v) in buffered.into_iter().enumerate() {
@@ -134,9 +134,12 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         Ok(())
     }
 
-    fn swap(&mut self, idx1: usize, idx2: usize) -> Result<()> {
-        if idx1 >= self.len || idx2 >= self.len {
-            return Err(anyhow!("FileVec::swap: Attempting to swap out-of-bounds"));
+    fn swap(&mut self, idx1: usize, idx2: usize) -> Result<(), FileError> {
+        if let Some(index) = [idx1, idx2].into_iter().find(|i| *i >= self.len) {
+            return Err(FileError::OutOfBounds {
+                index,
+                len: self.len,
+            });
         }
         // Delegate to FileHash::swap, which only exchanges two PositionLength entries
         // in the in-memory HashMap — no disk I/O required.  The equal-index case is
@@ -145,7 +148,7 @@ impl<ValueType: Clone + Serialize + for<'a> Deserialize<'a>> FileVec<ValueType> 
         Ok(())
     }
 
-    pub fn reverse(&mut self) -> Result<()> {
+    pub fn reverse(&mut self) -> Result<(), FileError> {
         if self.len < 2 {
             return Ok(());
         }

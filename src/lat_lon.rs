@@ -1,8 +1,20 @@
 //! Stores latitude/longitude coordinates.
 
-use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use thiserror::Error;
+
+/// Failure modes of [`LatLon::from_str`].
+#[derive(Debug, Error)]
+pub enum LatLonError {
+    /// The latitude is absent or not a number.
+    #[error("cannot parse latitude from '{0}'")]
+    Latitude(String),
+
+    /// The longitude is absent or not a number.
+    #[error("cannot parse longitude from '{0}'")]
+    Longitude(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LatLon {
@@ -17,18 +29,25 @@ impl LatLon {
 }
 
 impl FromStr for LatLon {
-    type Err = anyhow::Error;
+    type Err = LatLonError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // A missing component and an unparseable one are the same failure as far
+        // as a caller is concerned, so both map to the per-component variant.
+        let latitude = || LatLonError::Latitude(s.to_string());
+        let longitude = || LatLonError::Longitude(s.to_string());
+
         let mut parts = s.split(',');
         let lat = parts
             .next()
-            .ok_or_else(|| anyhow!("Cannot parse latitude from '{s}'"))?
-            .parse::<f64>()?;
+            .ok_or_else(latitude)?
+            .parse::<f64>()
+            .map_err(|_| latitude())?;
         let lon = parts
             .next()
-            .ok_or_else(|| anyhow!("Cannot parse longitude from '{s}'"))?
-            .parse::<f64>()?;
+            .ok_or_else(longitude)?
+            .parse::<f64>()
+            .map_err(|_| longitude())?;
         Ok(Self { lat, lon })
     }
 }

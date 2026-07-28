@@ -21,14 +21,19 @@ readme = "README.md"
 # --- leaf features (no inter-feature dependencies) ---
 
 # `date`, `timestamp`: Wikibase/MediaWiki date and timestamp parsing.
-date = ["dep:anyhow", "dep:chrono", "dep:regex"]
+date = ["dep:chrono", "dep:regex", "dep:thiserror"]
 
 # `disk_free`, `file_hash`, `file_vec`: disk-spilling collections. Spilled
 # records are stored as JSON blobs, hence `serde_json`.
-file-storage = ["dep:anyhow", "dep:serde", "dep:serde_json", "dep:tempfile"]
+file-storage = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tempfile",
+    "dep:thiserror",
+]
 
 # `lat_lon`: coordinate pair type.
-lat-lon = ["dep:anyhow", "dep:serde"]
+lat-lon = ["dep:serde", "dep:thiserror"]
 
 # `seppuku`: inactivity watchdog that terminates the process when idle.
 seppuku = ["dep:tokio"]
@@ -53,13 +58,19 @@ sparql = [
 
 # `sparql_table`, `sparql_table_trait`, `sparql_table_vec`: tabular SPARQL
 # results, in-memory or spilling to disk.
-sparql-table = ["sparql", "file-storage", "dep:anyhow"]
+sparql-table = ["sparql", "file-storage", "dep:thiserror"]
 
 # `site_matrix`: MediaWiki site matrix lookups.
-site-matrix = ["wikibase", "dep:anyhow", "dep:serde_json"]
+site-matrix = ["wikibase", "dep:serde_json", "dep:thiserror"]
 
 # `wikidata`: Wikidata API/WDQS client with a fixed user agent and timeout.
-wikidata = ["wikibase", "dep:anyhow", "dep:csv", "dep:reqwest", "dep:tempfile"]
+wikidata = [
+    "wikibase",
+    "dep:csv",
+    "dep:reqwest",
+    "dep:tempfile",
+    "dep:thiserror",
+]
 
 # `external_id`: external-identifier property/value pairs. Enabling `wikidata`
 # additionally exposes the Wikidata-search methods on `ExternalId`.
@@ -75,7 +86,12 @@ item-merger = [
 ]
 
 # `toolforge_db` plus the `mysql_async` re-export: Toolforge database pools.
-database = ["toolforge", "dep:anyhow", "dep:mysql_async", "dep:serde_json"]
+database = [
+    "toolforge",
+    "dep:mysql_async",
+    "dep:serde_json",
+    "dep:thiserror",
+]
 
 # Convenience umbrella enabling every feature above; also what the test suite
 # and `cargo doc` are run with.
@@ -96,7 +112,6 @@ full = [
 ]
 
 [dependencies]
-anyhow = { version = "1", optional = true }
 chrono = { version = "0.4", optional = true }
 csv = { version = "1", optional = true }
 mysql_async = { version = "0.36", optional = true }
@@ -105,6 +120,7 @@ reqwest = { version = "0.13", features = ["json"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 tempfile = { version = "3", optional = true }
+thiserror = { version = "2", optional = true }
 tokio = { version = "1", features = ["rt", "time"], optional = true }
 toolforge = { version = "5", optional = true }
 urlencoding = { version = "^2", optional = true }

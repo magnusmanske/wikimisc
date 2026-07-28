@@ -10,14 +10,40 @@
 //! QuickStatements-compatible line list.
 
 use crate::mediawiki::reqwest::{Client, ClientBuilder};
-use anyhow::{anyhow, Result};
 use std::{
     fs::File,
     io::{Seek, Write},
     time::Duration,
 };
 use tempfile::tempfile;
+use thiserror::Error;
+use wikibase::mediawiki::media_wiki_error::MediaWikiError;
 use wikibase::{mediawiki::Api, EntityTrait, ItemEntity, SnakType};
+
+/// Failure modes of [`Wikidata`].
+#[derive(Debug, Error)]
+pub enum WikidataError {
+    /// [`Wikidata::item2qs`] was handed an item that already exists on Wikidata.
+    /// QuickStatements can only create new items, so the ID must be empty.
+    #[error("item2qs: item ID is not empty")]
+    ItemIdNotEmpty,
+
+    /// Buffering the SPARQL response to a temporary file failed.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    /// The HTTP request to the SPARQL endpoint failed.
+    #[error(transparent)]
+    Http(#[from] reqwest::Error),
+
+    /// The `Accept` header could not be constructed.
+    #[error(transparent)]
+    InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
+
+    /// Constructing the MediaWiki API client failed.
+    #[error(transparent)]
+    MediaWiki(#[from] MediaWikiError),
+}
 
 const WIKIDATA_USER_AGENT: &str = "wikimisc-wikidata/0.1.0";
 const WIKIDATA_SPARQL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -48,13 +74,13 @@ impl Wikidata {
         }
     }
 
-    pub async fn api(&self) -> Result<Api> {
+    pub async fn api(&self) -> Result<Api, WikidataError> {
         let api = Api::new_from_builder(&self.api_url, self.client_builder()).await?;
         Ok(api)
     }
 
     /// Returns a reqwest client with the current user agent and timeout.
-    pub fn reqwest_client(&self) -> Result<Client> {
+    pub fn reqwest_client(&self) -> Result<Client, WikidataError> {
         Ok(self.client_builder().build()?)
     }
 
@@ -73,7 +99,7 @@ impl Wikidata {
     ///     let record = result.unwrap();
     /// }
     /// ```
-    pub async fn load_sparql_csv(&self, sparql: &str) -> Result<csv::Reader<File>> {
+    pub async fn load_sparql_csv(&self, sparql: &str) -> Result<csv::Reader<File>, WikidataError> {
         let mut f = tempfile()?;
         let mut res = self
             .reqwest_client()?
@@ -126,9 +152,9 @@ impl Wikidata {
         &self.sparql_url
     }
 
-    pub fn item2qs(item: &ItemEntity) -> Result<Vec<String>> {
+    pub fn item2qs(item: &ItemEntity) -> Result<Vec<String>, WikidataError> {
         if !item.id().is_empty() {
-            return Err(anyhow!("Wikimisc::Wikidata::item2qs: Item ID is not empty"));
+            return Err(WikidataError::ItemIdNotEmpty);
         }
 
         let mut ret = vec!["CREATE".to_string()];

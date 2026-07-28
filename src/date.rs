@@ -15,11 +15,30 @@
 //! - **Two-digit years are rejected.** The patterns require `\d{3,}`, so a
 //!   bare `99` will not parse. This avoids ambiguity between, e.g., 1999 and 99.
 
-use anyhow::{anyhow, Result};
 use chrono::Datelike;
 use regex::Regex;
+use std::num::ParseIntError;
 use std::str::FromStr;
 use std::sync::LazyLock;
+use thiserror::Error;
+
+/// Failure modes of [`Date::from_str`].
+#[derive(Debug, Error)]
+pub enum DateError {
+    /// The string does not look like any date this module recognises, or it
+    /// does but the resulting date is not a valid one (month 13, day 32, a year
+    /// in the future, …).
+    #[error("could not parse '{0}' into a date")]
+    Unparsable(String),
+
+    /// A year/month/day component matched but is not a number.
+    #[error("could not parse the numeric components of date '{input}'")]
+    NotANumber {
+        input: String,
+        #[source]
+        source: ParseIntError,
+    },
+}
 
 static DATES: LazyLock<Vec<(Regex, String, u64)>> = LazyLock::new(|| {
     // NOTE: The pattern always needs to cover the whole string, so use ^$
@@ -85,46 +104,53 @@ impl Date {
 }
 
 impl FromStr for Date {
-    type Err = anyhow::Error;
+    type Err = DateError;
 
     /// Parses a date from a string. Returns None if the string is not a recognized or valid date.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let unparsable = || DateError::Unparsable(s.to_string());
+        let not_a_number = |source| DateError::NotANumber {
+            input: s.to_string(),
+            source,
+        };
+
         let (time, precision) = DATES
             .iter()
             .find_map(|e| {
                 let replaced = e.0.replace_all(s, &e.1);
                 (replaced != s).then(|| (replaced.into_owned(), e.2))
             })
-            .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?;
+            .ok_or_else(unparsable)?;
 
         let parts: Vec<&str> = time.split('-').collect();
         let year = parts
             .first()
-            .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?
-            .parse::<i32>()?;
+            .ok_or_else(unparsable)?
+            .parse::<i32>()
+            .map_err(not_a_number)?;
         let current_year = chrono::Utc::now().year();
         if year > current_year {
-            return Err(anyhow!("Could not parse '{s}' into date"));
+            return Err(unparsable());
         }
 
         let month = parts
             .get(1)
-            .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?
-            .parse::<u8>()?;
+            .ok_or_else(unparsable)?
+            .parse::<u8>()
+            .map_err(not_a_number)?;
         if month > 12 || (month == 0 && precision >= 11) {
-            return Err(anyhow!("Could not parse '{s}' into date"));
+            return Err(unparsable());
         }
 
-        let day_part = parts
-            .get(2)
-            .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?;
+        let day_part = parts.get(2).ok_or_else(unparsable)?;
         let day = day_part
             .split('T')
             .next()
-            .ok_or_else(|| anyhow!("Could not parse '{s}' into date"))?
-            .parse::<u8>()?;
+            .ok_or_else(unparsable)?
+            .parse::<u8>()
+            .map_err(not_a_number)?;
         if precision >= 11 && !(1..=31).contains(&day) {
-            return Err(anyhow!("Could not parse '{s}' into date"));
+            return Err(unparsable());
         }
         Ok(Self { time, precision })
     }

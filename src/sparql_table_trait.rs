@@ -3,6 +3,7 @@
 //! but differ in their row-storage backend (disk-backed `FileVec` vs in-memory `Vec`).
 
 use crate::sparql_results::SparqlRow;
+use crate::sparql_table::SparqlTableError;
 use crate::sparql_value::SparqlValue;
 
 /// Common interface shared by [`crate::sparql_table::SparqlTable`] and
@@ -27,7 +28,7 @@ pub trait SparqlTableTrait {
     fn get_var_index(&self, var: &str) -> Option<usize>;
 
     /// Append a row. Returns `Err` if the underlying storage fails (e.g. disk I/O).
-    fn push(&mut self, row: SparqlRow) -> anyhow::Result<()>;
+    fn push(&mut self, row: SparqlRow) -> Result<(), SparqlTableError>;
 
     /// Get a row by index. Returns `None` if out of range.
     fn get(&self, row_id: usize) -> Option<SparqlRow>;

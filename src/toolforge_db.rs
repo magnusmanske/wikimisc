@@ -10,11 +10,31 @@
 //! cluster hostname; locally it returns `127.0.0.1` so SSH tunnels work.
 
 use crate::toolforge_app::ToolforgeApp;
-use anyhow::{anyhow, Result};
 use core::time::Duration;
 use mysql_async::{Opts, OptsBuilder, PoolConstraints, PoolOpts};
 use serde_json::Value;
 use std::collections::HashMap;
+use thiserror::Error;
+
+/// Failure modes of [`ToolforgeDB`].
+#[derive(Debug, Error)]
+pub enum DatabaseError {
+    /// The JSON pool config has no `url` key, so no connection can be built.
+    #[error("create_pool: missing 'url' key in pool config")]
+    MissingPoolUrl,
+
+    /// No pool has been registered under the requested name.
+    #[error("no pool '{0}' found")]
+    UnknownPool(String),
+
+    /// The configured `url` is not a valid MySQL connection URL.
+    #[error(transparent)]
+    Url(#[from] mysql_async::UrlError),
+
+    /// Acquiring a connection from the pool failed.
+    #[error(transparent)]
+    MySql(#[from] mysql_async::Error),
+}
 
 #[derive(Debug, PartialEq)]
 pub struct HostSchema {
@@ -55,20 +75,20 @@ impl Default for ToolforgeDB {
 }
 
 impl ToolforgeDB {
-    pub fn add_mysql_pool(&mut self, key: &str, config: &Value) -> Result<()> {
+    pub fn add_mysql_pool(&mut self, key: &str, config: &Value) -> Result<(), DatabaseError> {
         self.mysql_pools
             .insert(key.to_string(), Self::create_pool(config)?);
         Ok(())
     }
 
     /// Helper function to create a DB pool from a JSON config object
-    fn create_pool(config: &Value) -> Result<mysql_async::Pool> {
+    fn create_pool(config: &Value) -> Result<mysql_async::Pool, DatabaseError> {
         let min_connections = config["min_connections"].as_u64().unwrap_or(0) as usize;
         let max_connections = config["max_connections"].as_u64().unwrap_or(10) as usize;
         let keep_sec = config["keep_sec"].as_u64().unwrap_or(0);
         let url = config["url"]
             .as_str()
-            .ok_or_else(|| anyhow!("create_pool: missing 'url' key in pool config"))?;
+            .ok_or(DatabaseError::MissingPoolUrl)?;
         let pool_opts = PoolOpts::default()
             .with_constraints(
                 PoolConstraints::new(min_connections, max_connections).expect("Constraints error"),
@@ -92,17 +112,17 @@ impl ToolforgeDB {
         self.mysql_pools.get(key)
     }
 
-    pub async fn get_connection(&self, key: &str) -> Result<mysql_async::Conn> {
+    pub async fn get_connection(&self, key: &str) -> Result<mysql_async::Conn, DatabaseError> {
         let conn = self
             .get_pool(key)
-            .ok_or_else(|| anyhow!("No pool '{key}' found"))?
+            .ok_or_else(|| DatabaseError::UnknownPool(key.to_string()))?
             .get_conn()
             .await?;
         Ok(conn)
     }
 
     /// Returns the server and database name for the wiki, as a tuple
-    pub fn db_host_and_schema_for_wiki(&self, wiki: &str) -> Result<HostSchema> {
+    pub fn db_host_and_schema_for_wiki(&self, wiki: &str) -> Result<HostSchema, DatabaseError> {
         let wiki = Self::fix_wiki_db_name(wiki);
         let host = match self.is_on_toolforge {
             false => "127.0.0.1".to_string(),

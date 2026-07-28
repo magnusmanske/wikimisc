@@ -12,6 +12,8 @@ pub(crate) mod disk_free;
 #[cfg(feature = "external-id")]
 pub mod external_id;
 #[cfg(feature = "file-storage")]
+pub mod file_error;
+#[cfg(feature = "file-storage")]
 pub mod file_hash;
 #[cfg(feature = "file-storage")]
 pub mod file_vec;

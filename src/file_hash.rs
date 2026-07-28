@@ -5,7 +5,6 @@
 //! Mutating operations still require `&mut self`, so most callers will wrap a
 //! `FileHash` in `Mutex` or `RwLock` themselves anyway.
 
-use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -16,6 +15,7 @@ use tempfile::tempfile;
 
 use crate::disk_free::DiskFree;
 use crate::disk_free::PositionLength;
+use crate::file_error::FileError;
 
 pub type EntityFileCache = FileHash<String, String>;
 
@@ -33,10 +33,9 @@ pub struct FileHash<KeyType, ValueType> {
     using_disk: bool,
 }
 
-/// Lock a `Mutex<File>` and convert a poisoned lock into an `anyhow` error.
-fn lock_file(fh: &Arc<Mutex<File>>) -> Result<MutexGuard<'_, File>> {
-    fh.lock()
-        .map_err(|_| anyhow!("FileHash file mutex is poisoned"))
+/// Lock a `Mutex<File>`, turning a poisoned lock into a [`FileError`].
+fn lock_file(fh: &Arc<Mutex<File>>) -> Result<MutexGuard<'_, File>, FileError> {
+    fh.lock().map_err(|_| FileError::PoisonedMutex)
 }
 
 impl<
@@ -63,7 +62,7 @@ impl<
         self.in_memory.is_empty() && self.id2pos.is_empty()
     }
 
-    pub fn clear(&mut self) -> Result<()> {
+    pub fn clear(&mut self) -> Result<(), FileError> {
         self.id2pos.clear();
         self.in_memory.clear();
         if let Some(fh) = &self.file_handle {
@@ -124,7 +123,11 @@ impl<
     /// Adds an entity for the key.
     /// Note that this will overwrite any existing entity for the key.
     /// Also, this will add the new value at the end of the file, wasting space for the previous one.
-    pub fn insert<K: Into<KeyType>, V: Into<ValueType>>(&mut self, key: K, value: V) -> Result<()> {
+    pub fn insert<K: Into<KeyType>, V: Into<ValueType>>(
+        &mut self,
+        key: K,
+        value: V,
+    ) -> Result<(), FileError> {
         let key: KeyType = key.into();
         let value: ValueType = value.into();
         if self.using_disk {
@@ -134,7 +137,7 @@ impl<
         }
     }
 
-    fn insert_mem(&mut self, key: KeyType, value: ValueType) -> Result<()> {
+    fn insert_mem(&mut self, key: KeyType, value: ValueType) -> Result<(), FileError> {
         if self.in_memory.len() >= self.max_mem_entries {
             self.flush_mem_to_disk()?;
             self.insert_disk(key, value)
@@ -151,7 +154,7 @@ impl<
         }
     }
 
-    fn insert_disk(&mut self, key: KeyType, value: ValueType) -> Result<()> {
+    fn insert_disk(&mut self, key: KeyType, value: ValueType) -> Result<(), FileError> {
         let fh = self.get_or_create_file_handle()?;
         self.release_storage(&key);
 
@@ -178,7 +181,7 @@ impl<
     /// Flushes all in-memory entities to disk.
     /// This is done automatically when the number of in-memory entities exceeds the limit.
     /// This operation is final; the entities will not be kept in memory again.
-    fn flush_mem_to_disk(&mut self) -> Result<()> {
+    fn flush_mem_to_disk(&mut self) -> Result<(), FileError> {
         // drain() moves every (key, value) pair out of the map in one pass,
         // avoiding the separate key-clone + value-clone that the old collect/get/to_owned
         // approach required.
@@ -259,7 +262,7 @@ impl<
         }
     }
 
-    fn get_or_create_file_handle(&mut self) -> Result<Arc<Mutex<File>>> {
+    fn get_or_create_file_handle(&mut self) -> Result<Arc<Mutex<File>>, FileError> {
         if let Some(fh) = &self.file_handle {
             return Ok(fh.clone());
         }

@@ -9,13 +9,28 @@
 //! the result set could grow large enough to exhaust RAM.
 
 use crate::{
+    file_error::FileError,
     file_vec::FileVec,
     sparql_results::{SparqlApiResult, SparqlRow},
     sparql_table_trait::SparqlTableTrait,
     sparql_value::SparqlValue,
 };
-use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+use thiserror::Error;
+
+/// Failure modes of the tabular SPARQL result types.
+#[derive(Debug, Error)]
+pub enum SparqlTableError {
+    /// A row was pushed before the header list was established, so its cells
+    /// cannot be assigned to columns.
+    #[error("header not set")]
+    HeaderNotSet,
+
+    /// The disk-backed row storage failed. Only reachable for the `FileVec`
+    /// backend; the in-memory `Vec` backend never produces this.
+    #[error(transparent)]
+    Storage(#[from] FileError),
+}
 
 /// Row-container abstraction shared by the in-memory and disk-spilling
 /// [`SparqlTable`] backends. Implemented for `Vec<SparqlRow>` and
@@ -24,7 +39,7 @@ use std::collections::HashMap;
 /// `push` returns `Result` because disk-backed implementations may fail on I/O.
 /// The in-memory `Vec` impl always returns `Ok(())`.
 pub trait RowStorage: Default {
-    fn push(&mut self, row: SparqlRow) -> Result<()>;
+    fn push(&mut self, row: SparqlRow) -> Result<(), SparqlTableError>;
     fn get(&self, idx: usize) -> Option<SparqlRow>;
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
@@ -33,7 +48,7 @@ pub trait RowStorage: Default {
 }
 
 impl RowStorage for Vec<SparqlRow> {
-    fn push(&mut self, row: SparqlRow) -> Result<()> {
+    fn push(&mut self, row: SparqlRow) -> Result<(), SparqlTableError> {
         Vec::push(self, row);
         Ok(())
     }
@@ -46,8 +61,8 @@ impl RowStorage for Vec<SparqlRow> {
 }
 
 impl RowStorage for FileVec<SparqlRow> {
-    fn push(&mut self, row: SparqlRow) -> Result<()> {
-        FileVec::push(self, row)
+    fn push(&mut self, row: SparqlRow) -> Result<(), SparqlTableError> {
+        Ok(FileVec::push(self, row)?)
     }
     fn get(&self, idx: usize) -> Option<SparqlRow> {
         FileVec::get(self, idx)
@@ -120,7 +135,7 @@ impl<S: RowStorage> SparqlTable<S> {
     }
 
     /// Append a row. Returns `Err` if the underlying [`RowStorage`] fails (e.g. disk I/O).
-    pub fn push(&mut self, row: SparqlRow) -> Result<()> {
+    pub fn push(&mut self, row: SparqlRow) -> Result<(), SparqlTableError> {
         self.rows.push(row)
     }
 
@@ -129,9 +144,12 @@ impl<S: RowStorage> SparqlTable<S> {
         self.rows.get(row_id)
     }
 
-    fn push_sparql_result_row(&mut self, row: &HashMap<String, SparqlValue>) -> Result<()> {
+    fn push_sparql_result_row(
+        &mut self,
+        row: &HashMap<String, SparqlValue>,
+    ) -> Result<(), SparqlTableError> {
         if self.headers.is_empty() {
-            return Err(anyhow!("Header not set"));
+            return Err(SparqlTableError::HeaderNotSet);
         }
         let new_row: SparqlRow = self
             .headers
@@ -163,7 +181,7 @@ impl<S: RowStorage> SparqlTable<S> {
     }
 
     /// Build a table from a deserialised SPARQL API result. Consumes `result`.
-    pub fn from_api_result(result: SparqlApiResult) -> Result<Self> {
+    pub fn from_api_result(result: SparqlApiResult) -> Result<Self, SparqlTableError> {
         let mut table = Self::new();
         let headers = result
             .head()
@@ -191,7 +209,7 @@ impl<S: RowStorage> SparqlTableTrait for SparqlTable<S> {
         self.get_var_index(var)
     }
 
-    fn push(&mut self, row: SparqlRow) -> Result<()> {
+    fn push(&mut self, row: SparqlRow) -> Result<(), SparqlTableError> {
         self.push(row)
     }
 
