@@ -160,4 +160,42 @@ mod tests {
         seppuku.disarm();
         assert!(!*seppuku.armed.lock().unwrap());
     }
+
+    #[tokio::test]
+    async fn test_rearming_after_disarm_reuses_the_running_timer() {
+        // arm() short-circuits on the `armed` flag, so the only way to reach
+        // start_timer() a second time is to disarm first. When that happens the
+        // still-running timer task must be reused rather than a second one
+        // spawned, which is what start_timer's `timer_running` guard is for.
+        let seppuku = Seppuku::new(3600);
+        seppuku.arm();
+        seppuku.disarm();
+
+        seppuku.arm();
+
+        assert!(*seppuku.armed.lock().unwrap());
+        assert!(
+            *seppuku.timer_running.lock().unwrap(),
+            "the original timer task must still be marked as running"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_armed_timer_does_not_fire_before_the_deadline() {
+        // Let the spawned watchdog run a full iteration: with a long window the
+        // elapsed time is below the deadline, so it must compute a remaining
+        // sleep and loop instead of exiting the process. (The exit branch itself
+        // cannot be covered in-process -- it calls std::process::exit.)
+        let seppuku = Seppuku::new(3600);
+        seppuku.arm();
+
+        // Yield repeatedly so the spawned task is actually polled.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        // Reaching here at all means the watchdog did not terminate the process.
+        assert!(*seppuku.armed.lock().unwrap());
+        assert!(*seppuku.timer_running.lock().unwrap());
+    }
 }

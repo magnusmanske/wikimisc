@@ -290,4 +290,44 @@ mod tests {
             "zh_min_nanwiki"
         );
     }
+
+    #[test]
+    fn test_add_mysql_pool_valid_url_registers_pool() {
+        // `Pool::new` is lazy -- it does not open a connection -- so the whole
+        // config-parsing path can be exercised offline against an address that
+        // nothing is listening on.
+        let mut db = ToolforgeDB::default();
+        let config = json!({
+            "url": "mysql://user:pass@127.0.0.1:3306/somedb",
+            "min_connections": 1,
+            "max_connections": 4,
+            "keep_sec": 30
+        });
+
+        db.add_mysql_pool("good", &config).unwrap();
+
+        assert!(db.get_pool("good").is_some());
+        assert!(db.get_pool("other").is_none());
+    }
+
+    #[test]
+    fn test_add_mysql_pool_applies_config_defaults() {
+        // Omitted min/max/keep values fall back to defaults rather than failing.
+        let mut db = ToolforgeDB::default();
+        db.add_mysql_pool("defaults", &json!({"url": "mysql://u@127.0.0.1:3306/d"}))
+            .unwrap();
+        assert!(db.get_pool("defaults").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_connection_unknown_pool_is_err() {
+        // Asking for a pool that was never registered must fail with
+        // DatabaseError::UnknownPool rather than panicking.
+        let db = ToolforgeDB::default();
+        let err = db.get_connection("nope").await.unwrap_err();
+        assert!(
+            matches!(&err, DatabaseError::UnknownPool(name) if name == "nope"),
+            "expected UnknownPool, got: {err:?}"
+        );
+    }
 }

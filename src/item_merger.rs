@@ -1427,4 +1427,283 @@ mod tests {
         assert!(merged.labels().iter().any(|l| l.language() == "en"));
         assert!(merged.labels().iter().any(|l| l.language() == "de"));
     }
+
+    // --- Date precision and claim ranking ---
+
+    /// A `Statement` whose main snak is a time value of the given precision.
+    fn time_statement(prop: &str, time: &str, precision: u64) -> Statement {
+        Statement::new_normal(
+            Snak::new(
+                SnakDataType::Time,
+                prop,
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::Time,
+                    Value::Time(TimeValue::new(
+                        0,
+                        0,
+                        "http://www.wikidata.org/entity/Q1985727",
+                        precision,
+                        time,
+                        0,
+                    )),
+                )),
+            ),
+            vec![],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn test_check_new_claim_for_dates_deprecates_lower_precision() {
+        // The item already knows the birth date to the day (precision 11); a new,
+        // vaguer year-only claim (precision 9) must be added as deprecated so it
+        // does not compete with the better one.
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(time_statement("P569", "+1952-03-11T00:00:00Z", 11));
+
+        let im = ItemMerger::new(base);
+        let mut new_claim = time_statement("P569", "+1952-00-00T00:00:00Z", 9);
+        im.check_new_claim_for_dates(&mut new_claim);
+
+        assert_eq!(*new_claim.rank(), StatementRank::Deprecated);
+    }
+
+    #[test]
+    fn test_check_new_claim_for_dates_keeps_equal_precision_normal() {
+        // Boundary: the check is `<`, not `<=`, so an equally precise claim keeps
+        // its rank.
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(time_statement("P570", "+2001-05-11T00:00:00Z", 11));
+
+        let im = ItemMerger::new(base);
+        let mut new_claim = time_statement("P570", "+2001-05-12T00:00:00Z", 11);
+        im.check_new_claim_for_dates(&mut new_claim);
+
+        assert_eq!(*new_claim.rank(), StatementRank::Normal);
+    }
+
+    #[test]
+    fn test_check_new_claim_for_dates_keeps_higher_precision_normal() {
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(time_statement("P569", "+1952-00-00T00:00:00Z", 9));
+
+        let im = ItemMerger::new(base);
+        let mut new_claim = time_statement("P569", "+1952-03-11T00:00:00Z", 11);
+        im.check_new_claim_for_dates(&mut new_claim);
+
+        assert_eq!(*new_claim.rank(), StatementRank::Normal);
+    }
+
+    #[test]
+    fn test_check_new_claim_for_dates_ignores_non_time_main_snak() {
+        // A P569 claim carrying a string rather than a time must be left alone.
+        let im = ItemMerger::new(ItemEntity::new_empty());
+        let mut new_claim =
+            Statement::new_normal(Snak::new_string("P569", "not a date"), vec![], vec![]);
+        im.check_new_claim_for_dates(&mut new_claim);
+
+        assert_eq!(*new_claim.rank(), StatementRank::Normal);
+    }
+
+    #[test]
+    fn test_check_new_claim_for_dates_ignores_non_time_existing_claims() {
+        // Existing P569 claims that are not time values contribute no precision,
+        // so `best_existing_precision` falls back to 0 and nothing is deprecated.
+        let mut base = ItemEntity::new_empty();
+        base.add_claim(Statement::new_normal(
+            Snak::new_string("P569", "junk"),
+            vec![],
+            vec![],
+        ));
+
+        let im = ItemMerger::new(base);
+        let mut new_claim = time_statement("P569", "+1952-00-00T00:00:00Z", 9);
+        im.check_new_claim_for_dates(&mut new_claim);
+
+        assert_eq!(*new_claim.rank(), StatementRank::Normal);
+    }
+
+    #[test]
+    fn test_is_data_value_identical_compares_time_values_by_precision() {
+        // Reaching the truncated-precision comparison through the data-value
+        // entry point, not just via is_time_value_identical directly.
+        let dv = |time: &str, precision: u64| {
+            Some(DataValue::new(
+                DataValueType::Time,
+                Value::Time(TimeValue::new(
+                    0,
+                    0,
+                    "http://www.wikidata.org/entity/Q1985727",
+                    precision,
+                    time,
+                    0,
+                )),
+            ))
+        };
+
+        // Precision 9 (year): month/day are noise and must be ignored.
+        assert!(ItemMerger::is_data_value_identical(
+            &dv("+1650-00-00T00:00:00Z", 9),
+            &dv("+1650-12-29T00:00:00Z", 9)
+        ));
+        assert!(!ItemMerger::is_data_value_identical(
+            &dv("+1650-00-00T00:00:00Z", 9),
+            &dv("+1651-00-00T00:00:00Z", 9)
+        ));
+        // Precision 11 (day) falls through to the exact-equality arm.
+        assert!(ItemMerger::is_data_value_identical(
+            &dv("+1650-12-29T00:00:00Z", 11),
+            &dv("+1650-12-29T00:00:00Z", 11)
+        ));
+        assert!(!ItemMerger::is_data_value_identical(
+            &dv("+1650-12-29T00:00:00Z", 11),
+            &dv("+1650-12-28T00:00:00Z", 11)
+        ));
+    }
+
+    #[test]
+    fn test_is_data_value_identical_non_time_values_use_equality() {
+        let a = Some(DataValue::new(
+            DataValueType::StringType,
+            Value::StringValue("foo".to_string()),
+        ));
+        let b = Some(DataValue::new(
+            DataValueType::StringType,
+            Value::StringValue("bar".to_string()),
+        ));
+        assert!(ItemMerger::is_data_value_identical(&a, &a.clone()));
+        assert!(!ItemMerger::is_data_value_identical(&a, &b));
+        assert!(ItemMerger::is_data_value_identical(&None, &None));
+        assert!(!ItemMerger::is_data_value_identical(&a, &None));
+    }
+
+    #[test]
+    fn test_is_time_value_identical_unhandled_precision_uses_exact_equality() {
+        // Precisions other than 9 and 10 take the `_` arm, which compares the
+        // whole TimeValue rather than a truncated string.
+        let t = |time: &str| {
+            TimeValue::new(
+                0,
+                0,
+                "http://www.wikidata.org/entity/Q1985727",
+                7, // century — neither of the special-cased precisions
+                time,
+                0,
+            )
+        };
+        assert!(ItemMerger::is_time_value_identical(
+            &t("+1900-00-00T00:00:00Z"),
+            &t("+1900-00-00T00:00:00Z")
+        ));
+        assert!(!ItemMerger::is_time_value_identical(
+            &t("+1900-00-00T00:00:00Z"),
+            &t("+1800-00-00T00:00:00Z")
+        ));
+    }
+
+    #[test]
+    fn test_merge_sitelinks_into_item_with_existing_sitelinks() {
+        // Only sites the base item does not already have are added.
+        let mut base = ItemEntity::new_empty();
+        base.sitelinks_mut()
+            .replace(vec![SiteLink::new("enwiki", "Foo", vec![])]);
+
+        let mut other = ItemEntity::new_empty();
+        other.sitelinks_mut().replace(vec![
+            SiteLink::new("enwiki", "Foo (different title, ignored)", vec![]),
+            SiteLink::new("dewiki", "Foo", vec![]),
+        ]);
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert_eq!(diff.sitelinks.len(), 1);
+        assert_eq!(diff.sitelinks[0].site(), "dewiki");
+        assert_eq!(im.item().sitelinks().as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_merge_sitelinks_are_dropped_when_base_item_has_none() {
+        // KNOWN LIMITATION: `merge` only records sitelinks when the base item
+        // already has a sitelink list. With `sitelinks() == None` the incoming
+        // links are computed and then discarded, because the write-back is
+        // guarded by `if let Some(my_sitelinks) = self.item.sitelinks_mut()`.
+        // `MergeDiff::apply` skips a None list in the same way. This test pins
+        // the current behaviour so that changing it is a deliberate decision.
+        let mut other = ItemEntity::new_empty();
+        other
+            .sitelinks_mut()
+            .replace(vec![SiteLink::new("enwiki", "Foo", vec![])]);
+
+        let mut im = ItemMerger::new(ItemEntity::new_empty());
+        let diff = im.merge(&other);
+
+        assert!(
+            diff.sitelinks.is_empty(),
+            "sitelinks are currently dropped when the base item has none"
+        );
+        assert!(im.item().sitelinks().is_none());
+    }
+
+    #[test]
+    fn test_compare_snak_same_property_orders_by_value() {
+        // Same property falls through to comparing the serialised data values,
+        // which is what makes qualifier-list sorting deterministic.
+        let a = Snak::new_string("P31", "aaa");
+        let b = Snak::new_string("P31", "bbb");
+        assert_eq!(ItemMerger::compare_snak(&a, &b), Ordering::Less);
+        assert_eq!(ItemMerger::compare_snak(&b, &a), Ordering::Greater);
+        assert_eq!(ItemMerger::compare_snak(&a, &a.clone()), Ordering::Equal);
+
+        // Different properties are ordered by property alone -- and lexically,
+        // not numerically, so "P31" sorts *after* "P279". That is fine for the
+        // deterministic qualifier sort this backs, but is worth pinning so the
+        // ordering is not mistaken for numeric.
+        let c = Snak::new_string("P279", "aaa");
+        assert_eq!(ItemMerger::compare_snak(&a, &c), Ordering::Greater);
+        assert_eq!(ItemMerger::compare_snak(&c, &a), Ordering::Less);
+    }
+
+    #[test]
+    fn test_get_external_ids_from_reference_skips_non_string_values() {
+        // An ExternalId-typed snak whose value is not a string must be skipped
+        // rather than producing a bogus ExternalId.
+        let reference = Reference::new(vec![
+            Snak::new(
+                SnakDataType::ExternalId,
+                "P214",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::EntityId,
+                    Value::Entity(EntityValue::new(EntityType::Item, "Q42")),
+                )),
+            ),
+            Snak::new_external_id("P227", "12345"),
+        ]);
+
+        let ids = ItemMerger::get_external_ids_from_reference(&reference);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], ExternalId::new(227, "12345"));
+    }
+
+    #[test]
+    fn test_get_reference_urls_skips_non_string_values() {
+        // A Url-typed snak whose value is not a string must be skipped.
+        let reference = Reference::new(vec![
+            Snak::new(
+                SnakDataType::Url,
+                "P854",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::EntityId,
+                    Value::Entity(EntityValue::new(EntityType::Item, "Q42")),
+                )),
+            ),
+            Snak::new_url("P854", "http://example.com"),
+        ]);
+
+        let urls = ItemMerger::get_reference_urls_from_reference(&reference);
+        assert_eq!(urls, vec!["http://example.com".to_string()]);
+    }
 }

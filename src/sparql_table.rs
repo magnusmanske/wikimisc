@@ -406,4 +406,17 @@ mod tests {
         );
         assert_eq!(table.get_row_col(0, 1), None);
     }
+
+    #[test]
+    fn test_default_is_an_empty_table() {
+        // Both backends get their Default from the same blanket impl.
+        let vec_table = SparqlTableVec::default();
+        assert_eq!(vec_table.len(), 0);
+        assert!(vec_table.is_empty());
+        assert!(vec_table.main_variable().is_none());
+
+        let disk_table = SparqlTable::<FileVec<SparqlRow>>::default();
+        assert_eq!(disk_table.len(), 0);
+        assert!(disk_table.is_empty());
+    }
 }

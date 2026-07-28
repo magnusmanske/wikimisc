@@ -656,4 +656,82 @@ mod tests {
         efc.insert("Q4", "d").unwrap();
         assert_eq!(efc.len(), 3);
     }
+
+    // --- swap() with absent keys ---
+    //
+    // `swap_in_map` documents that a value moves to the other key when only one
+    // side is present, and that a swap of two absent keys is a no-op. Both are
+    // exercised here for the in-memory and the disk backend.
+
+    #[test]
+    fn test_swap_moves_value_when_second_key_absent() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.insert("Q123", "Foo").unwrap();
+
+        efc.swap("Q123", "Q999");
+
+        assert!(efc.get("Q123").is_none(), "source key must be vacated");
+        assert_eq!(efc.get("Q999").unwrap(), "Foo");
+    }
+
+    #[test]
+    fn test_swap_moves_value_when_first_key_absent() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.insert("Q123", "Foo").unwrap();
+
+        efc.swap("Q999", "Q123");
+
+        assert!(efc.get("Q123").is_none());
+        assert_eq!(efc.get("Q999").unwrap(), "Foo");
+    }
+
+    #[test]
+    fn test_swap_moves_value_when_key_absent_on_disk() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.set_max_mem_entries(0);
+        efc.insert("Q123", "Foo").unwrap();
+
+        efc.swap("Q123", "Q999");
+
+        assert!(efc.get("Q123").is_none());
+        assert_eq!(efc.get("Q999").unwrap(), "Foo");
+    }
+
+    #[test]
+    fn test_swap_both_keys_absent_is_a_noop() {
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.insert("Q123", "Foo").unwrap();
+
+        efc.swap("Q888", "Q999");
+
+        assert_eq!(efc.len(), 1);
+        assert_eq!(efc.get("Q123").unwrap(), "Foo");
+        assert!(efc.get("Q888").is_none());
+        assert!(efc.get("Q999").is_none());
+    }
+
+    #[test]
+    fn test_contains_uses_disk_index_after_spill() {
+        // `contains` reads a different map depending on the backend, so it needs
+        // covering on both sides of the spill.
+        let mut efc: FileHash<String, String> = FileHash::new();
+        efc.insert("Q1", "a").unwrap();
+        assert!(efc.contains("Q1"), "in-memory lookup");
+        assert!(!efc.contains("Q2"));
+
+        efc.set_max_mem_entries(0);
+        efc.insert("Q2", "b").unwrap();
+        assert!(efc.using_disk);
+        assert!(efc.contains("Q1"), "spilled entry still reported present");
+        assert!(efc.contains("Q2"));
+        assert!(!efc.contains("Q3"));
+    }
+
+    #[test]
+    fn test_default_matches_new() {
+        let efc: FileHash<String, String> = FileHash::default();
+        assert_eq!(efc.len(), 0);
+        assert!(efc.is_empty());
+        assert!(!efc.using_disk);
+    }
 }

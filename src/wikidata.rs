@@ -642,4 +642,76 @@ http://www.wikidata.org/entity/Q5,five\r\n";
         let wd = Wikidata::new();
         assert!(wd.reqwest_client().is_ok());
     }
+
+    #[test]
+    fn test_default_matches_new() {
+        let wd = Wikidata::default();
+        assert_eq!(wd.api_url(), Wikidata::new().api_url());
+        assert_eq!(wd.sparql_url(), Wikidata::new().sparql_url());
+    }
+
+    #[test]
+    fn test_url_getters_reflect_the_defaults_and_overrides() {
+        let mut wd = Wikidata::new();
+        assert_eq!(wd.api_url(), DEFAULT_API_URL);
+        assert_eq!(wd.sparql_url(), DEFAULT_SPARQL_URL);
+
+        wd.set_api_url("http://localhost:1234/w/api.php");
+        wd.set_sparql_url("http://localhost:1234/sparql");
+        assert_eq!(wd.api_url(), "http://localhost:1234/w/api.php");
+        assert_eq!(wd.sparql_url(), "http://localhost:1234/sparql");
+    }
+
+    #[test]
+    fn test_item2qs_emits_coordinate_values() {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new(
+                SnakDataType::WikibaseItem,
+                "P31",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::GlobeCoordinate,
+                    wikibase::Value::Coordinate(wikibase::Coordinate::new(
+                        None,
+                        "http://www.wikidata.org/entity/Q2".to_string(),
+                        1.0,
+                        2.0,
+                        Some(0.1),
+                    )),
+                )),
+            ),
+            vec![],
+            vec![],
+        ));
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert!(qs.iter().any(|l| l.contains("@1/2")), "got: {qs:?}");
+    }
+
+    #[test]
+    fn test_item2qs_skips_unsupported_value_type() {
+        // `EntitySchema` is the one Value variant snak2qs has no QuickStatements
+        // representation for, so such a claim must be skipped rather than
+        // emitted malformed.
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(Statement::new_normal(
+            Snak::new(
+                SnakDataType::WikibaseItem,
+                "P31",
+                SnakType::Value,
+                Some(DataValue::new(
+                    DataValueType::EntityId,
+                    wikibase::Value::EntitySchema(EntityValue::new(
+                        EntityType::EntitySchema,
+                        "E123",
+                    )),
+                )),
+            ),
+            vec![],
+            vec![],
+        ));
+
+        let qs = Wikidata::item2qs(&item).unwrap();
+        assert_eq!(qs, vec!["CREATE".to_string()], "got: {qs:?}");
+    }
 }

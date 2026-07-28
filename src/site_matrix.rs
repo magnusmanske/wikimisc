@@ -861,4 +861,39 @@ mod tests {
         // Without a "sitematrix" object the function returns false rather than panicking.
         assert!(!site_matrix.is_language_rtl("ar"));
     }
+
+    #[tokio::test]
+    async fn test_get_api_for_wiki_builds_api_from_matrix_url() {
+        // get_api_for_wiki appends /w/api.php to the wiki's server URL and
+        // constructs an Api against it. Point the matrix at the mock server so
+        // the Api handshake resolves offline.
+        use crate::test_support::mount_siteinfo;
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        mount_siteinfo(&server).await;
+
+        let site_matrix = SiteMatrix {
+            site_matrix: serde_json::json!({
+                "sitematrix": {
+                    "count": 1,
+                    "0": {
+                        "code": "mock",
+                        "site": [ { "dbname": "mockwiki", "url": server.uri(), "code": "wiki" } ]
+                    }
+                }
+            }),
+        };
+
+        let api = site_matrix.get_api_for_wiki("mockwiki").await.unwrap();
+        assert_eq!(api.api_url(), &format!("{}/w/api.php", server.uri()));
+    }
+
+    #[tokio::test]
+    async fn test_get_api_for_wiki_unknown_wiki_is_err() {
+        let site_matrix = SiteMatrix {
+            site_matrix: serde_json::json!({ "sitematrix": { "count": 0 } }),
+        };
+        assert!(site_matrix.get_api_for_wiki("nosuchwiki").await.is_err());
+    }
 }

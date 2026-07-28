@@ -368,4 +368,15 @@ mod tests {
         let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
         assert_eq!(value, None);
     }
+
+    #[test]
+    fn test_new_from_json_wkt_literal_that_is_not_a_point() {
+        // Only POINT(...) is understood; any other WKT geometry yields None
+        // rather than a bogus location.
+        let json = r#"{"type":"literal",
+                       "datatype":"http://www.opengis.net/ont/geosparql#wktLiteral",
+                       "value":"POLYGON((0 0, 1 0, 1 1, 0 0))"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, None);
+    }
 }

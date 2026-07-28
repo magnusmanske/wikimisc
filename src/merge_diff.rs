@@ -92,6 +92,27 @@ impl MergeDiff {
         Some(json!(labels))
     }
 
+    /// Aliases are shaped differently from labels and descriptions in the
+    /// `wbeditentity` payload: each language maps to a *list* of values, because
+    /// an entity can carry many aliases per language — and [`MergeDiff::aliases`]
+    /// routinely does, since `ItemMerger` turns clashing labels into aliases.
+    /// Serialising them through [`Self::serialize_labels`] would silently keep
+    /// only one per language.
+    fn serialize_aliases(&self) -> Option<serde_json::Value> {
+        if self.aliases.is_empty() {
+            return None;
+        }
+
+        let mut by_language: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        for alias in &self.aliases {
+            by_language
+                .entry(alias.language().to_owned())
+                .or_default()
+                .push(json!({"language":alias.language(),"value":alias.value(), "add": ""}));
+        }
+        Some(json!(by_language))
+    }
+
     fn serialize_sitelinks(&self) -> Option<serde_json::Value> {
         if self.sitelinks.is_empty() {
             return None;
@@ -160,7 +181,8 @@ impl Serialize for MergeDiff {
         // Build a Vec of only the fields that have content, avoiding the two-HashMap
         // allocate-then-filter pattern.
         let fields: Vec<(&str, serde_json::Value)> = [
-            ("label", self.serialize_labels(&self.labels)),
+            ("labels", self.serialize_labels(&self.labels)),
+            ("aliases", self.serialize_aliases()),
             ("descriptions", self.serialize_labels(&self.descriptions)),
             ("sitelinks", self.serialize_sitelinks()),
             ("claims", self.serialize_claims()),
@@ -543,5 +565,155 @@ mod tests {
         assert_eq!(item.aliases()[0].value(), "alt-name");
         assert_eq!(item.descriptions().len(), 1);
         assert_eq!(item.descriptions()[0].value(), "a description");
+    }
+
+    // --- Serialization of the term/sitelink half of the wbeditentity payload ---
+    //
+    // NOTE: `serialize_labels` also emits an `"add": ""` key for labels and
+    // descriptions. That is the *alias* append idiom rather than anything
+    // `wbeditentity` documents for labels, but it is long-standing behaviour, so
+    // these tests pin it as-is rather than quietly changing a third thing.
+
+    #[test]
+    fn test_serialize_labels_uses_plural_key_and_maps_by_language() {
+        let mut diff = MergeDiff::new();
+        diff.labels.push(LocaleString::new("en", "Douglas Adams"));
+        diff.labels.push(LocaleString::new("de", "Douglas Adams"));
+
+        let serialized = serde_json::to_value(&diff).unwrap();
+
+        // `wbeditentity` expects "labels", not "label".
+        assert!(
+            serialized.get("label").is_none(),
+            "the singular \"label\" key must not be emitted, got: {serialized}"
+        );
+        let labels = serialized["labels"].as_object().unwrap();
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels["en"]["language"], "en");
+        assert_eq!(labels["en"]["value"], "Douglas Adams");
+        assert_eq!(labels["de"]["value"], "Douglas Adams");
+    }
+
+    #[test]
+    fn test_serialize_descriptions_keyed_by_language() {
+        let mut diff = MergeDiff::new();
+        diff.descriptions
+            .push(LocaleString::new("en", "English writer"));
+
+        let serialized = serde_json::to_value(&diff).unwrap();
+
+        let descriptions = serialized["descriptions"].as_object().unwrap();
+        assert_eq!(descriptions.len(), 1);
+        assert_eq!(descriptions["en"]["language"], "en");
+        assert_eq!(descriptions["en"]["value"], "English writer");
+    }
+
+    #[test]
+    fn test_serialize_aliases_are_emitted_at_all() {
+        // Regression: aliases were computed by ItemMerger and then dropped on
+        // serialization, so they never reached the API.
+        let mut diff = MergeDiff::new();
+        diff.aliases
+            .push(LocaleString::new("en", "Douglas Noel Adams"));
+
+        let serialized = serde_json::to_value(&diff).unwrap();
+
+        assert!(
+            serialized.get("aliases").is_some(),
+            "aliases present in the diff must be serialized, got: {serialized}"
+        );
+        assert_eq!(
+            serialized["aliases"]["en"][0]["value"],
+            "Douglas Noel Adams"
+        );
+    }
+
+    #[test]
+    fn test_serialize_aliases_groups_multiple_per_language_into_a_list() {
+        // An entity can have many aliases per language, and ItemMerger produces
+        // exactly that when a clashing label is demoted to an alias. Each
+        // language must therefore map to a list, not a single object.
+        let mut diff = MergeDiff::new();
+        diff.aliases.push(LocaleString::new("en", "DNA"));
+        diff.aliases
+            .push(LocaleString::new("en", "Douglas N. Adams"));
+        diff.aliases
+            .push(LocaleString::new("de", "Douglas Noel Adams"));
+
+        let serialized = serde_json::to_value(&diff).unwrap();
+        let aliases = serialized["aliases"].as_object().unwrap();
+
+        assert_eq!(aliases.len(), 2, "two languages expected: {serialized}");
+        let en = aliases["en"].as_array().unwrap();
+        assert_eq!(
+            en.len(),
+            2,
+            "both English aliases must survive: {serialized}"
+        );
+        let values: Vec<&str> = en.iter().map(|a| a["value"].as_str().unwrap()).collect();
+        assert!(values.contains(&"DNA"));
+        assert!(values.contains(&"Douglas N. Adams"));
+        // `add` marks the alias list as an append rather than a replacement.
+        assert_eq!(en[0]["add"], "");
+        assert_eq!(aliases["de"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_serialize_sitelinks_keyed_by_site() {
+        let mut diff = MergeDiff::new();
+        diff.sitelinks
+            .push(SiteLink::new("enwiki", "Douglas Adams", vec![]));
+        diff.sitelinks
+            .push(SiteLink::new("dewiki", "Douglas Adams", vec![]));
+
+        let serialized = serde_json::to_value(&diff).unwrap();
+        let sitelinks = serialized["sitelinks"].as_object().unwrap();
+
+        assert_eq!(sitelinks.len(), 2);
+        assert_eq!(sitelinks["enwiki"]["site"], "enwiki");
+        assert_eq!(sitelinks["enwiki"]["title"], "Douglas Adams");
+        assert_eq!(sitelinks["dewiki"]["title"], "Douglas Adams");
+    }
+
+    #[test]
+    fn test_serialize_omits_every_empty_section() {
+        // An empty diff must serialize to an empty object rather than a payload
+        // full of nulls, so that wbeditentity does not clear existing terms.
+        let serialized = serde_json::to_value(MergeDiff::new()).unwrap();
+        assert_eq!(
+            serialized.as_object().unwrap().len(),
+            0,
+            "expected no keys at all, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn test_serialize_full_payload_has_all_sections() {
+        let mut diff = MergeDiff::new();
+        diff.labels.push(LocaleString::new("en", "Label"));
+        diff.aliases.push(LocaleString::new("en", "Alias"));
+        diff.descriptions.push(LocaleString::new("en", "Desc"));
+        diff.sitelinks
+            .push(SiteLink::new("enwiki", "Title", vec![]));
+        diff.added_statements.push(Statement::new_normal(
+            Snak::new_string("P1476", "hello"),
+            vec![],
+            vec![],
+        ));
+
+        let serialized = serde_json::to_value(&diff).unwrap();
+        let keys: Vec<&str> = serialized
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+
+        for expected in ["labels", "aliases", "descriptions", "sitelinks", "claims"] {
+            assert!(
+                keys.contains(&expected),
+                "missing \"{expected}\" in payload: {serialized}"
+            );
+        }
     }
 }
