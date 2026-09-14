@@ -122,6 +122,7 @@ wikibase = { version = "^0.7", optional = true }
 # `#[cfg(test)]` modules (e.g. `lat-lon` round-trips through `serde_json`, and
 # the async tests need a runtime even where the feature itself does not).
 serde_json = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 

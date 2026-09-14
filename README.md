@@ -25,13 +25,98 @@ wikimisc = { version = "0.1", default-features = false, features = ["item-merger
 | `wikidata` | `wikidata` | `wikibase` | `csv`, `reqwest`, `tempfile`, `thiserror` |
 | `external-id` | `external_id` | `wikibase` | `chrono`, `regex`, `serde` |
 | `item-merger` | `item_merger`, `merge_diff` | `external-id` | `regex`, `serde`, `serde_json` |
-| `database` | `toolforge_db`, re-export of `mysql_async` | `toolforge` | `mysql_async`, `serde_json`, `thiserror` |
+| `database` | `toolforge_db`, `toolforge_credentials`, re-export of `mysql_async` | `toolforge` | `mysql_async`, `serde_json`, `thiserror` |
 | `full` | everything above | all | all |
 
 Note that `external-id` and `wikidata` interact: enabling both additionally
 exposes the Wikidata-search methods on `ExternalId`
 (`search_wikidata_single_item`, `get_item_for_external_id_value`, …), which need
 the `Wikidata` API client.
+
+## Wiki Replica clusters
+
+A handful of wikis have tables split off into an *extension database* on its own
+replica cluster, reached under a prefixed host name — Commons' links tables
+(`links.commonswiki…`, since September 2026) and Wikidata's `wbt_*` term store
+(`termstore.wikidatawiki…`, since 2025). `toolforge_db::DbCluster` knows which
+tables sit where, so instead of hard-coding host names you can ask for the host
+that can serve a given query:
+
+```rust
+use wikimisc::toolforge_db::{DatabaseError, DbCluster, ToolforgeDB};
+
+fn commons_links(db: &ToolforgeDB) -> Result<(), DatabaseError> {
+    // `links.commonswiki.web.db.svc.wikimedia.cloud` on Toolforge.
+    let links = db.db_host_and_schema_for_wiki_tables("commonswiki", &["page", "pagelinks"])?;
+
+    // The same call picks the core cluster for any wiki without the split.
+    let core = db.db_host_and_schema_for_wiki_tables("enwiki", &["page", "pagelinks"])?;
+
+    // Tables on opposite sides of a split cannot be joined in SQL, so this is
+    // an error rather than a query that silently returns nothing.
+    assert!(db
+        .db_host_and_schema_for_wiki_tables("commonswiki", &["actor", "pagelinks"])
+        .is_err());
+
+    // Or name the cluster directly, e.g. to pick a pre-registered pool.
+    assert_eq!(DbCluster::for_tables("commonswiki", &["pagelinks"])?, DbCluster::Links);
+    Ok(())
+}
+```
+
+`db_host_and_schema_for_wiki` is unchanged and still returns the core cluster,
+and `DbServerGroup` selects the `web` (default) or `analytics` service name.
+
+A tool that would otherwise open a connection per wiki can connect per
+*section* instead — the docs ask that nothing else do so, because which section
+holds a wiki changes. Get the mapping from `meta_p` (`SELECT dbname, slice FROM
+meta_p.wiki`) and parse it with `DbSection::from_meta_slice("s3.labsdb")`.
+
+## Connecting
+
+`add_mysql_pool` takes a JSON config with an explicit `url`. The alternative is
+to let the crate find the tool's own credentials, from the `TOOL_REPLICA_USER` /
+`TOOL_REPLICA_PASSWORD` environment variables (the only source a tool built into
+a custom container image has) or from `replica.my.cnf` in `$TOOL_DATA_DIR` or
+`$HOME`:
+
+```rust
+use std::time::Duration;
+use wikimisc::toolforge_db::{DatabaseError, DbSection, PoolSettings, ToolforgeDB};
+
+fn connect() -> Result<ToolforgeDB, DatabaseError> {
+    let mut db = ToolforgeDB::default().with_pool_settings(
+        // Issues `SET max_statement_time` on every connection in the pool.
+        PoolSettings::default().with_max_statement_time(Some(Duration::from_secs(300))),
+    );
+
+    // Picks the cluster, the host name and the credentials.
+    db.add_replica_pool("commons", "commonswiki", &["page", "pagelinks"])?;
+
+    // One connection for a whole section, for a crosswiki tool. Queries must
+    // name the schema: `SELECT page_title FROM enwiki_p.page`.
+    if let Some(section) = DbSection::from_meta_slice("s1.labsdb") {
+        db.add_section_pool("s1", section)?;
+    }
+
+    // The tool's own database, on ToolsDB. The read-only variant is
+    // `add_tool_db_pool_readonly`, which long queries should prefer.
+    db.add_tool_db_pool("own", "s51234__mytool_p")?;
+    Ok(db)
+}
+```
+
+Mind the Toolforge [connection handling
+policy](https://wikitech.wikimedia.org/wiki/Help:Wiki_Replicas#Connection_handling_policy):
+pools that hold connections open while unused are not permitted against the Wiki
+Replicas or ToolsDB, and idle connections get killed. `PoolSettings::default()`
+stays within it — `min_connections: 0`, `max_connections: 10` (the per-tool
+limit), `keep_sec: 1` — and is also what `add_mysql_pool` falls back to for
+missing keys. `keep_sec: 0` would be *worse* rather than stricter: `mysql_async`
+then bounds the pool by `min_connections`, closing every connection as it is
+returned, so nothing is reused and every query pays for a new connection and
+handshake. One second keeps connections reusable while still letting the pool
+reap what has gone idle.
 
 ## Errors
 

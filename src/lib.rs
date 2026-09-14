@@ -44,6 +44,8 @@ pub mod timestamp;
 #[cfg(feature = "toolforge")]
 pub mod toolforge_app;
 #[cfg(feature = "database")]
+pub mod toolforge_credentials;
+#[cfg(feature = "database")]
 pub mod toolforge_db;
 #[cfg(feature = "wikidata")]
 pub mod wikidata;
