@@ -15,10 +15,29 @@ static RE_ENTITY: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r#"^https{0,1}://[^/]+/entity/([A-Z]\d+)$"#).ok());
 static RE_FILE: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r#"^https{0,1}://[^/]+/wiki/Special:FilePath/(.+?)$"#).ok());
-static RE_POINT: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r#"^Point\((-{0,1}\d+[\.0-9]*) (-{0,1}\d+[\.0-9]*)\)$"#).ok());
-static RE_DATE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r#"^([+-]{0,1}\d+-\d{2}-\d{2})T00:00:00Z$"#).ok());
+// Blazegraph writes `Point(…)`, QLever `POINT(…)`; WKT keywords are
+// case-insensitive. A coordinate on another globe carries the globe's IRI in
+// front (`<http://www.wikidata.org/entity/Q405> Point(…)`, the Moon) and is
+// deliberately not matched — a `LatLon` has no globe, so it would read as a
+// place on Earth. Wikidata leaves the globe out for Earth, but one that spells
+// out Q2 explicitly is still on Earth.
+static RE_POINT: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)^(?:<https?://www\.wikidata\.org/entity/Q2>\s*)?Point\s*\(\s*(-?\d+(?:\.\d*)?(?:e[+-]?\d+)?)\s+(-?\d+(?:\.\d*)?(?:e[+-]?\d+)?)\s*\)$"#,
+    )
+    .ok()
+});
+// Midnight UTC is how both engines encode a date of day precision or coarser,
+// so the time part is dropped. QLever omits the `Z` on years outside xsd's
+// four-digit range (the Big Bang is `-13798000000-01-01T00:00:00`), so those
+// match without it; a four-digit year without a time zone is a local time
+// rather than a UTC date and is left alone.
+static RE_DATE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r#"^(?:([+-]?\d+-\d{2}-\d{2})T00:00:00Z|([+-]?\d{5,}-\d{2}-\d{2})T00:00:00)$"#).ok()
+});
+
+const WKT_LITERAL: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
+const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 
 /// Captures from one of the statics above, treating an unavailable regex as a
 /// plain non-match.
@@ -37,55 +56,60 @@ pub enum SparqlValue {
 }
 
 impl SparqlValue {
+    /// Parses one binding of a SPARQL JSON result. The lexical forms of WDQS
+    /// (Blazegraph) and QLever differ in places, and both are understood.
     pub fn new_from_json(j: &Value) -> Option<Self> {
         let value = j["value"].as_str()?;
         match j["type"].as_str() {
-            Some("uri") => match captures(&RE_ENTITY, value) {
-                Some(caps) => caps
-                    .get(1)
-                    .map(|caps1| SparqlValue::Entity(caps1.as_str().to_string())),
-                None => match captures(&RE_FILE, value) {
-                    Some(caps) => match caps.get(1) {
-                        Some(caps1) => {
-                            let file = caps1.as_str().to_string();
-                            let file = urlencoding::decode(&file).ok()?;
-                            let file = file.replace('_', " ");
-                            Some(SparqlValue::File(file))
-                        }
-                        None => None,
-                    },
-                    None => Some(SparqlValue::Uri(value.to_string())),
-                },
-            },
-            Some("literal") => match j["datatype"].as_str() {
-                Some("http://www.opengis.net/ont/geosparql#wktLiteral") => {
-                    match captures(&RE_POINT, value) {
-                        Some(caps) => {
-                            let lat: f64 = caps.get(2)?.as_str().parse().ok()?;
-                            let lon: f64 = caps.get(1)?.as_str().parse().ok()?;
-                            Some(SparqlValue::Location(LatLon::new(lat, lon)))
-                        }
-                        None => None,
-                    }
-                }
-                Some("http://www.w3.org/2001/XMLSchema#dateTime") => {
-                    let time = value.to_string();
-                    let time = match captures(&RE_DATE, value) {
-                        Some(caps) => {
-                            let date: String = caps.get(1)?.as_str().to_string();
-                            date
-                        }
-                        None => time,
-                    };
-                    Some(SparqlValue::Time(time))
-                }
-                _ => Some(SparqlValue::Literal(value.to_string())),
-            },
-            Some("bnode") => j["value"]
-                .as_str()
-                .map(|value| SparqlValue::Literal(value.to_string())),
+            Some("uri") => Self::from_uri(value),
+            // `typed-literal` is the pre-recommendation spelling some
+            // endpoints still emit for a literal with a datatype.
+            Some("literal") | Some("typed-literal") => {
+                Some(Self::from_literal(value, j["datatype"].as_str()))
+            }
+            Some("bnode") => Some(SparqlValue::Literal(value.to_string())),
             _ => None,
         }
+    }
+
+    fn from_uri(value: &str) -> Option<Self> {
+        if let Some(caps) = captures(&RE_ENTITY, value) {
+            return caps
+                .get(1)
+                .map(|entity| SparqlValue::Entity(entity.as_str().to_string()));
+        }
+        match captures(&RE_FILE, value) {
+            Some(caps) => {
+                let file = urlencoding::decode(caps.get(1)?.as_str()).ok()?;
+                Some(SparqlValue::File(file.replace('_', " ")))
+            }
+            None => Some(SparqlValue::Uri(value.to_string())),
+        }
+    }
+
+    fn from_literal(value: &str, datatype: Option<&str>) -> Self {
+        match datatype {
+            // Geometries other than a point on Earth have no typed
+            // representation, so they keep their WKT text.
+            Some(WKT_LITERAL) => Self::parse_point(value)
+                .map(SparqlValue::Location)
+                .unwrap_or_else(|| SparqlValue::Literal(value.to_string())),
+            Some(XSD_DATE_TIME) => {
+                let date = captures(&RE_DATE, value)
+                    .and_then(|caps| caps.get(1).or_else(|| caps.get(2)))
+                    .map_or(value, |date| date.as_str());
+                SparqlValue::Time(date.to_string())
+            }
+            _ => SparqlValue::Literal(value.to_string()),
+        }
+    }
+
+    /// WKT puts longitude first: `Point(lon lat)`.
+    fn parse_point(value: &str) -> Option<LatLon> {
+        let caps = captures(&RE_POINT, value)?;
+        let lon: f64 = caps.get(1)?.as_str().parse().ok()?;
+        let lat: f64 = caps.get(2)?.as_str().parse().ok()?;
+        Some(LatLon::new(lat, lon))
     }
 }
 
@@ -119,17 +143,14 @@ impl Serialize for SparqlValue {
             SparqlValue::Time(time) => {
                 let mut s = serializer.serialize_struct("Time", 3)?;
                 s.serialize_field("type", "literal")?;
-                s.serialize_field("datatype", "http://www.w3.org/2001/XMLSchema#dateTime")?;
+                s.serialize_field("datatype", XSD_DATE_TIME)?;
                 s.serialize_field("value", time)?;
                 s.end()
             }
             SparqlValue::Location(location) => {
                 let mut s = serializer.serialize_struct("Location", 3)?;
                 s.serialize_field("type", "literal")?;
-                s.serialize_field(
-                    "datatype",
-                    "http://www.opengis.net/ont/geosparql#wktLiteral",
-                )?;
+                s.serialize_field("datatype", WKT_LITERAL)?;
                 s.serialize_field(
                     "value",
                     &format!("Point({lon} {lat})", lat = location.lat, lon = location.lon),
@@ -374,16 +395,134 @@ mod tests {
         assert_eq!(value, None);
     }
 
+    fn wkt(value: &str) -> Option<SparqlValue> {
+        SparqlValue::new_from_json(&serde_json::json!({
+            "type": "literal",
+            "datatype": WKT_LITERAL,
+            "value": value,
+        }))
+    }
+
+    fn date_time(value: &str) -> Option<SparqlValue> {
+        SparqlValue::new_from_json(&serde_json::json!({
+            "type": "literal",
+            "datatype": XSD_DATE_TIME,
+            "value": value,
+        }))
+    }
+
     #[test]
     fn test_new_from_json_wkt_literal_that_is_not_a_point() {
-        // Only POINT(...) is understood; any other WKT geometry yields None
-        // rather than a bogus location.
-        let json = r#"{"type":"literal",
-                       "datatype":"http://www.opengis.net/ont/geosparql#wktLiteral",
-                       "value":"POLYGON((0 0, 1 0, 1 1, 0 0))"}"#;
-        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
-        assert_eq!(value, None);
+        // Only a point is understood. Any other WKT geometry keeps its text
+        // rather than becoming a bogus location — or failing the whole result,
+        // which is what a `None` here does to `SparqlApiResult`.
+        let polygon = "POLYGON((0 0, 1 0, 1 1, 0 0))";
+        assert_eq!(wkt(polygon), Some(SparqlValue::Literal(polygon.into())));
     }
+
+    #[test]
+    fn test_new_from_json_location_qlever_spelling() {
+        // QLever upper-cases the WKT keyword and prints fixed decimals.
+        assert_eq!(
+            wkt("POINT(13.383333 52.516667)"),
+            Some(SparqlValue::Location(LatLon::new(52.516667, 13.383333)))
+        );
+    }
+
+    #[test]
+    fn test_new_from_json_location_lenient_lexical_forms() {
+        assert_eq!(
+            wkt("Point( -0.5   1e-3 )"),
+            Some(SparqlValue::Location(LatLon::new(0.001, -0.5)))
+        );
+        assert_eq!(
+            wkt("point(1.0E2 -45.)"),
+            Some(SparqlValue::Location(LatLon::new(-45.0, 100.0)))
+        );
+    }
+
+    #[test]
+    fn test_new_from_json_location_explicit_earth_globe() {
+        assert_eq!(
+            wkt("<http://www.wikidata.org/entity/Q2> Point(1 2)"),
+            Some(SparqlValue::Location(LatLon::new(2.0, 1.0)))
+        );
+    }
+
+    #[test]
+    fn test_new_from_json_location_on_another_globe_stays_literal() {
+        // Both engines emit this for a coordinate on the Moon. A `LatLon` would
+        // silently place it on Earth.
+        let moon = "<http://www.wikidata.org/entity/Q405> Point(-60.44 -49.53)";
+        assert_eq!(wkt(moon), Some(SparqlValue::Literal(moon.into())));
+    }
+
+    #[test]
+    fn test_new_from_json_large_year_without_time_zone() {
+        // QLever drops the `Z` for years outside xsd's four-digit range; WDQS
+        // keeps it. Both must come out the same.
+        let expected = Some(SparqlValue::Time("-13798000000-01-01".into()));
+        assert_eq!(date_time("-13798000000-01-01T00:00:00"), expected);
+        assert_eq!(date_time("-13798000000-01-01T00:00:00Z"), expected);
+    }
+
+    #[test]
+    fn test_new_from_json_bce_date() {
+        assert_eq!(
+            date_time("-0099-07-01T00:00:00Z"),
+            Some(SparqlValue::Time("-0099-07-01".into()))
+        );
+    }
+
+    #[test]
+    fn test_new_from_json_local_midnight_is_not_a_date() {
+        // Without a time zone this is a local time, not a UTC date.
+        assert_eq!(
+            date_time("2020-01-15T00:00:00"),
+            Some(SparqlValue::Time("2020-01-15T00:00:00".into()))
+        );
+    }
+
+    #[test]
+    fn test_new_from_json_typed_literal() {
+        let json = serde_json::json!({
+            "type": "typed-literal",
+            "datatype": XSD_DATE_TIME,
+            "value": "2020-01-15T00:00:00Z",
+        });
+        assert_eq!(
+            SparqlValue::new_from_json(&json),
+            Some(SparqlValue::Time("2020-01-15".into()))
+        );
+    }
+
+    #[test]
+    fn test_new_from_json_other_datatypes_are_literals() {
+        // The lexical forms differ between engines (QLever writes `xsd:int`
+        // and `3700577.0` where WDQS writes `xsd:integer` and `3700577`); the
+        // value is passed through unchanged either way.
+        for (datatype, value) in [
+            ("http://www.w3.org/2001/XMLSchema#decimal", "3700577.0"),
+            ("http://www.w3.org/2001/XMLSchema#int", "42"),
+            ("http://www.w3.org/2001/XMLSchema#boolean", "true"),
+            ("http://www.w3.org/2001/XMLSchema#date", "2020-01-02"),
+        ] {
+            let json = serde_json::json!({"type": "literal", "datatype": datatype, "value": value});
+            assert_eq!(
+                SparqlValue::new_from_json(&json),
+                Some(SparqlValue::Literal(value.into())),
+                "{datatype}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_from_json_language_literal() {
+        let json = r#"{"type":"literal","value":"Berlin","xml:lang":"de"}"#;
+        let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
+        assert_eq!(value, Some(SparqlValue::Literal("Berlin".into())));
+    }
+
     #[test]
     fn test_all_static_regexes_compile() {
         // The statics degrade to "never matches" rather than panicking, so

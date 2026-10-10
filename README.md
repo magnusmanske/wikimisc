@@ -19,8 +19,9 @@ wikimisc = { version = "0.1", default-features = false, features = ["item-merger
 | `seppuku` | `seppuku` | | `tokio` |
 | `toolforge` | `toolforge_app`, re-export of `toolforge` | | `toolforge` |
 | `wikibase` | re-exports of `wikibase` and `wikibase::mediawiki` | | `wikibase` |
-| `sparql` | `sparql_value`, `sparql_results` | `lat-lon` | `regex`, `serde`, `serde_json`, `urlencoding` |
+| `sparql` | `sparql_value`, `sparql_results`, `sparql_endpoint` | `lat-lon` | `regex`, `serde`, `serde_json`, `urlencoding` |
 | `sparql-table` | `sparql_table`, `sparql_table_trait`, `sparql_table_vec` | `sparql` | `thiserror` |
+| `sparql-client` | `sparql_client` | `sparql-table` | `csv`, `reqwest`, `tempfile`, `thiserror` |
 | `site-matrix` | `site_matrix` | `wikibase` | `serde_json`, `thiserror` |
 | `wikidata` | `wikidata` | `wikibase` | `csv`, `reqwest`, `tempfile`, `thiserror` |
 | `external-id` | `external_id` | `wikibase` | `chrono`, `regex`, `serde` |
@@ -32,6 +33,51 @@ Note that `external-id` and `wikidata` interact: enabling both additionally
 exposes the Wikidata-search methods on `ExternalId`
 (`search_wikidata_single_item`, `get_item_for_external_id_value`, …), which need
 the `Wikidata` API client.
+
+## SPARQL: WDQS and QLever
+
+`SparqlClient` (feature `sparql-client`) queries any SPARQL 1.1 endpoint — the
+Wikidata Query Service (Blazegraph) and QLever in particular — and returns a
+`SparqlApiResult`, a `SparqlTableVec`, raw JSON, or a CSV reader. Where it is
+sent, and which prefixes go with it, is a `SparqlEndpoint`:
+
+```rust
+use wikimisc::sparql_client::{SparqlClient, SparqlError};
+use wikimisc::sparql_endpoint::SparqlEndpoint;
+
+async fn example() -> Result<(), SparqlError> {
+    // QLever declares no prefixes, so this preset prepends the ones WDQS
+    // declares implicitly; queries written for WDQS run unchanged.
+    let qlever = SparqlClient::new(SparqlEndpoint::qlever_wikidata())?;
+    let table = qlever
+        .query_table("SELECT ?item ?coord WHERE { ?item wdt:P625 ?coord } LIMIT 10")
+        .await?;
+
+    // Any other endpoint, with prefixes of its own. A prefix the query
+    // declares itself is not added again.
+    let endpoint = SparqlEndpoint::new("https://example.org/sparql")
+        .with_prefix("ex", "http://example.org/ns#");
+    let result = SparqlClient::new(endpoint)?.query("ASK { ?s ex:p ?o }").await?;
+    assert!(result.boolean().is_some());
+    Ok(())
+}
+```
+
+For WDQS, pass a client carrying your tool's own user agent, as Wikimedia's
+policy asks: `SparqlClient::with_client(SparqlEndpoint::wdqs(), wikidata.reqwest_client()?)`.
+
+`SparqlError` tells apart what a caller may want to react to differently: a
+query timeout (`Timeout`), rate limiting with the requested wait
+(`RateLimited`), any other error response with the endpoint's own message
+(`Endpoint` — e.g. a syntax error), and a body that is not a valid result
+(`InvalidResponse`). The two engines report these differently — QLever as JSON,
+and a timeout as HTTP 429; Blazegraph as a Java stack trace — and the client
+reads both.
+
+Values parse the same from either engine (`Point(…)` and `POINT(…)`, a missing
+`Z` on very large years, and so on). Literals are otherwise passed through as
+the engine wrote them, so a decimal can read `3700577` from WDQS and
+`3700577.0` from QLever.
 
 ## Wiki Replica clusters
 
@@ -130,6 +176,7 @@ the shape of another feature's error type:
 | `date` | `date::DateError` |
 | `lat-lon` | `lat_lon::LatLonError` |
 | `sparql-table` | `sparql_table::SparqlTableError` |
+| `sparql-client` | `sparql_client::SparqlError` |
 | `site-matrix` | `site_matrix::SiteMatrixError` |
 | `wikidata` | `wikidata::WikidataError` |
 | `database` | `toolforge_db::DatabaseError` |

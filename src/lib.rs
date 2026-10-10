@@ -29,6 +29,10 @@ pub mod merge_diff;
 pub mod seppuku;
 #[cfg(feature = "site-matrix")]
 pub mod site_matrix;
+#[cfg(feature = "sparql-client")]
+pub mod sparql_client;
+#[cfg(feature = "sparql")]
+pub mod sparql_endpoint;
 #[cfg(feature = "sparql")]
 pub mod sparql_results;
 #[cfg(feature = "sparql-table")]
