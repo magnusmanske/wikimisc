@@ -203,8 +203,13 @@ impl SparqlClient {
             .from_reader(file))
     }
 
-    async fn fetch_json(&self, sparql: &str) -> Result<String, SparqlError> {
-        Ok(self.send(sparql, ACCEPT_JSON).await?.text().await?)
+    /// The raw response body. Kept as bytes and parsed from there: decoding
+    /// it into a `String` first would hold a large result in memory twice.
+    async fn fetch_json(
+        &self,
+        sparql: &str,
+    ) -> Result<impl std::ops::Deref<Target = [u8]>, SparqlError> {
+        Ok(self.send(sparql, ACCEPT_JSON).await?.bytes().await?)
     }
 
     /// Sends the prepared query, turning an error status into a [`SparqlError`].
@@ -234,13 +239,13 @@ impl SparqlClient {
 }
 
 /// Parses a JSON response body.
-fn parse_json<T: DeserializeOwned>(body: &str) -> Result<T, SparqlError> {
-    serde_json::from_str(body).or_else(|source| {
+fn parse_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, SparqlError> {
+    serde_json::from_slice(body).or_else(|source| {
         // Endpoints occasionally emit raw control characters inside string
         // literals, which JSON forbids. In valid JSON they can only be
         // whitespace between tokens, so replacing every one with a space
         // repairs the strings without changing anything else.
-        let repaired: String = body
+        let repaired: String = String::from_utf8_lossy(body)
             .chars()
             .map(|c| if c < ' ' { ' ' } else { c })
             .collect();
