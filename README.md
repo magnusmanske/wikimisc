@@ -19,7 +19,7 @@ wikimisc = { version = "0.1", default-features = false, features = ["item-merger
 | `seppuku` | `seppuku` | | `tokio` |
 | `toolforge` | `toolforge_app`, re-export of `toolforge` | | `toolforge` |
 | `wikibase` | re-exports of `wikibase` and `wikibase::mediawiki` | | `wikibase` |
-| `sparql` | `sparql_value`, `sparql_results`, `sparql_endpoint` | `lat-lon` | `regex`, `serde`, `serde_json`, `urlencoding` |
+| `sparql` | `sparql_value`, `sparql_results`, `sparql_endpoint`, `sparql_rewrite` | `lat-lon` | `regex`, `serde`, `serde_json`, `urlencoding` |
 | `sparql-table` | `sparql_table`, `sparql_table_trait`, `sparql_table_vec` | `sparql` | `thiserror` |
 | `sparql-client` | `sparql_client` | `sparql-table` | `csv`, `reqwest`, `tempfile`, `thiserror` |
 | `site-matrix` | `site_matrix` | `wikibase` | `serde_json`, `thiserror` |
@@ -78,6 +78,29 @@ Values parse the same from either engine (`Point(…)` and `POINT(…)`, a missi
 `Z` on very large years, and so on). Literals are otherwise passed through as
 the engine wrote them, so a decimal can read `3700577` from WDQS and
 `3700577.0` from QLever.
+
+### Rewriting Blazegraph queries
+
+Queries written for WDQS v1 may use Blazegraph-only features that QLever (and
+so WDQS v2) rejects. `sparql_rewrite` (feature `sparql`) rewrites them into
+standard SPARQL 1.1, following Wikimedia's
+[migration guide](https://www.wikidata.org/wiki/Wikidata:SPARQL_query_service/WDQS_backend_update/Migrate).
+It splices the query text, so formatting and comments survive, and leaves a
+query it cannot rewrite unchanged. So far it handles `SERVICE wikibase:label`:
+
+```rust
+use wikimisc::sparql_rewrite::{LabelServiceRewrite, rewrite_label_service};
+
+let query = "SELECT ?item ?itemLabel WHERE {
+  ?item wdt:P31 wd:Q146 .
+  SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\" . }
+}";
+// Say which outputs you read from the results; others are not computed.
+match rewrite_label_service(query, |variable| variable == "itemLabel") {
+    LabelServiceRewrite::Rewritten(rewritten) => assert!(!rewritten.contains("SERVICE")),
+    LabelServiceRewrite::Unchanged | LabelServiceRewrite::Unsupported(_) => unreachable!(),
+}
+```
 
 ## Wiki Replica clusters
 

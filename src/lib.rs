@@ -34,7 +34,11 @@ pub mod sparql_client;
 #[cfg(feature = "sparql")]
 pub mod sparql_endpoint;
 #[cfg(feature = "sparql")]
+pub(crate) mod sparql_lexer;
+#[cfg(feature = "sparql")]
 pub mod sparql_results;
+#[cfg(feature = "sparql")]
+pub mod sparql_rewrite;
 #[cfg(feature = "sparql-table")]
 pub mod sparql_table;
 #[cfg(feature = "sparql-table")]
