@@ -267,7 +267,7 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
 /// The human-readable part of an error response body, whichever engine (or
 /// proxy in front of it) produced it.
 fn error_message(body: &str) -> String {
-    let message = qlever_exception(body)
+    let message = json_error(body)
         .or_else(|| java_exception(body))
         .or_else(|| html_text(body))
         .unwrap_or_else(|| collapse_whitespace(body));
@@ -278,10 +278,14 @@ fn error_message(body: &str) -> String {
     }
 }
 
-/// QLever: `{"exception": "Invalid SPARQL query: …", "status": "ERROR", …}`.
-fn qlever_exception(body: &str) -> Option<String> {
+/// A JSON error object, as returned by
+/// - QLever: `{"exception": "Invalid SPARQL query: …", "status": "ERROR", …}`;
+/// - WDQS v2, QLever behind Wikimedia's front end:
+///   `{"errorType": "parse_error", "message": "Encountered …", "details": {…}}`.
+fn json_error(body: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(body).ok()?;
-    Some(json.get("exception")?.as_str()?.trim().to_string())
+    let message = json.get("exception").or_else(|| json.get("message"))?;
+    Some(message.as_str()?.trim().to_string())
 }
 
 /// Blazegraph: the query echoed back, then a Java exception chain on one line,
@@ -357,6 +361,8 @@ mod tests {
         "status": "ERROR",
         "time": {"computeResult": 10, "total": 10}
     }"#;
+
+    const WDQS_V2_FEDERATION_ERROR: &str = r#"{"errorType":"federation_error","message":"Endpoint http://wikiba.se/ontology#label is not allowed for query federation.","details":{"rejectedEndpoint":"http://wikiba.se/ontology#label"}}"#;
 
     const BLAZEGRAPH_SYNTAX_ERROR: &str = "SPARQL-QUERY: queryStr=SELECT ?x WHERE { ?x wdt:P31 wd:Q5  LIMIT 1\n\
 java.util.concurrent.ExecutionException: org.openrdf.query.MalformedQueryException: Encountered \" \"limit\" \"LIMIT \"\" at line 1, column 37.\n\
@@ -591,6 +597,20 @@ p { margin: 0.7em 0 1em 0; }
                 assert_eq!(
                     message,
                     "Invalid SPARQL query: Prefix wdt was not registered using a PREFIX declaration"
+                );
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wdqs_v2_error() {
+        match error_for(json_response(400, WDQS_V2_FEDERATION_ERROR)).await {
+            SparqlError::Endpoint { status, message } => {
+                assert_eq!(status, 400);
+                assert_eq!(
+                    message,
+                    "Endpoint http://wikiba.se/ontology#label is not allowed for query federation."
                 );
             }
             other => panic!("got {other:?}"),
