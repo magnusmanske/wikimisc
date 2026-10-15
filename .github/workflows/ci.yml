@@ -58,11 +58,13 @@ jobs:
           - external-id
           - item-merger
           - lat-lon
+          - process-stats
           - seppuku
           - site-matrix
           - sparql
           - sparql-client
           - sparql-table
+          - telemetry
           - toolforge
           - wikibase
           - wikidata

@@ -29,6 +29,10 @@ lat-lon = ["dep:serde", "dep:thiserror"]
 # `seppuku`: inactivity watchdog that terminates the process when idle.
 seppuku = ["dep:tokio"]
 
+# `process_stats`: memory/CPU/thread readings of the current process and its
+# cgroup (Linux; empty elsewhere).
+process-stats = []
+
 # `toolforge_app` plus the `toolforge` crate re-export.
 toolforge = ["dep:toolforge"]
 
@@ -99,6 +103,20 @@ database = [
     "dep:thiserror",
 ]
 
+# `telemetry` plus the `metrics` re-export: pushes metrics, process readings
+# and exit reasons to the Buggregator service dashboard.
+telemetry = [
+    "process-stats",
+    "dep:metrics",
+    "dep:metrics-util",
+    "dep:reqwest",
+    "dep:serde",
+    "dep:thiserror",
+    "dep:tokio",
+    "tokio/signal",
+    "tokio/sync",
+]
+
 # Convenience umbrella enabling every feature above; also what the test suite
 # and `cargo doc` are run with.
 full = [
@@ -107,11 +125,13 @@ full = [
     "external-id",
     "item-merger", # Actually used
     "lat-lon", # Actually used
+    "process-stats",
     "seppuku", # Actually used
     "site-matrix", # Actually used
     "sparql", # Actually used
     "sparql-client",
     "sparql-table", # Actually used
+    "telemetry",
     "toolforge",
     "wikibase", # Actually used
     "wikidata", # Actually used
@@ -120,6 +140,8 @@ full = [
 [dependencies]
 chrono = { version = "0.4", optional = true }
 csv = { version = "1", optional = true }
+metrics = { version = "0.24", optional = true }
+metrics-util = { version = "0.20", default-features = false, features = ["layers", "registry"], optional = true }
 mysql_async = { version = "0.36", optional = true }
 regex = { version = "1", optional = true }
 reqwest = { version = "0.13", features = ["form", "json"], optional = true }

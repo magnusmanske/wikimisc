@@ -4,7 +4,8 @@
 //! Intended for Toolforge web services that should self-terminate when idle:
 //! call [`Seppuku::arm`] once at startup, then call [`Seppuku::alive`] on each
 //! request. If no `alive()` arrives within the configured window, the timer
-//! task calls `std::process::exit(0)`.
+//! task calls `std::process::exit(0)` — after telling the dashboard why, when
+//! [`crate::telemetry`] is running.
 
 use std::{
     sync::{Arc, Mutex, MutexGuard},
@@ -92,6 +93,11 @@ impl Seppuku {
                 let elapsed = lock(&last_activity).elapsed();
                 if *lock(&armed) && elapsed >= max {
                     println!("Committing seppuku after {max_seconds} seconds of inactivity");
+                    #[cfg(feature = "telemetry")]
+                    crate::telemetry::shutdown(crate::telemetry::ExitReason::Watchdog(format!(
+                        "No activity for {max_seconds} seconds"
+                    )))
+                    .await;
                     std::process::exit(0);
                 }
                 // Sleep just until the deadline. A fresh `alive()` call will

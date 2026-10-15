@@ -25,6 +25,8 @@ pub mod item_merger;
 pub mod lat_lon;
 #[cfg(feature = "item-merger")]
 pub mod merge_diff;
+#[cfg(feature = "process-stats")]
+pub mod process_stats;
 #[cfg(feature = "seppuku")]
 pub mod seppuku;
 #[cfg(feature = "site-matrix")]
@@ -47,6 +49,10 @@ pub mod sparql_table_trait;
 pub mod sparql_table_vec;
 #[cfg(feature = "sparql")]
 pub mod sparql_value;
+#[cfg(feature = "telemetry")]
+pub mod telemetry;
+#[cfg(feature = "telemetry")]
+mod telemetry_recorder;
 #[cfg(feature = "date")]
 pub mod timestamp;
 #[cfg(feature = "toolforge")]
@@ -61,6 +67,8 @@ pub mod wikidata;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+#[cfg(feature = "telemetry")]
+pub use metrics;
 #[cfg(feature = "database")]
 pub use mysql_async;
 #[cfg(feature = "toolforge")]

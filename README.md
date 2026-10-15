@@ -17,6 +17,7 @@ wikimisc = { version = "0.1", default-features = false, features = ["item-merger
 | `date` | `date`, `timestamp` | | `chrono`, `regex`, `thiserror` |
 | `lat-lon` | `lat_lon` | | `serde`, `thiserror` |
 | `seppuku` | `seppuku` | | `tokio` |
+| `process-stats` | `process_stats` | | |
 | `toolforge` | `toolforge_app`, re-export of `toolforge` | | `toolforge` |
 | `wikibase` | re-exports of `wikibase` and `wikibase::mediawiki` | | `wikibase` |
 | `sparql` | `sparql_value`, `sparql_results`, `sparql_endpoint`, `sparql_rewrite` | `lat-lon` | `regex`, `serde`, `serde_json`, `urlencoding` |
@@ -27,12 +28,52 @@ wikimisc = { version = "0.1", default-features = false, features = ["item-merger
 | `external-id` | `external_id` | `wikibase` | `chrono`, `regex`, `serde` |
 | `item-merger` | `item_merger`, `merge_diff` | `external-id` | `regex`, `serde`, `serde_json` |
 | `database` | `toolforge_db`, `toolforge_credentials`, re-export of `mysql_async` | `toolforge` | `mysql_async`, `serde_json`, `thiserror` |
+| `telemetry` | `telemetry`, re-export of `metrics` | `process-stats` | `metrics`, `metrics-util`, `reqwest`, `serde`, `thiserror`, `tokio` |
 | `full` | everything above | all | all |
 
 Note that `external-id` and `wikidata` interact: enabling both additionally
 exposes the Wikidata-search methods on `ExternalId`
 (`search_wikidata_single_item`, `get_item_for_external_id_value`, …), which need
 the `Wikidata` API client.
+
+## Telemetry: the service dashboard
+
+`telemetry` (feature `telemetry`) pushes a long-running service's health to the
+[Buggregator service dashboard](https://magnustools.toolforge.org/buggregator/#/dashboard)
+once a minute: memory against its limit, CPU, threads, open files, plus
+whatever the service records through the re-exported [`metrics`](https://docs.rs/metrics)
+macros. When the process ends on SIGTERM/SIGINT, a fatal panic, or a `Seppuku`
+watchdog kill, a final push records why, so the dashboard can tell planned
+restarts from crashes.
+
+```rust,no_run
+use wikimisc::telemetry::{Level, Telemetry};
+
+async fn example() -> Result<(), wikimisc::telemetry::TelemetryError> {
+    // Token from the config (`TelemetryConfig`) or $DASHBOARD_TOKEN.
+    let telemetry = Telemetry::builder("web")
+        .version(env!("CARGO_PKG_VERSION"))
+        .install()?;
+    wikimisc::metrics::gauge!("queue_length").set(42.0);
+    telemetry.event(Level::Warn, "maxlag, backing off");
+    Ok(())
+}
+```
+
+- The component name (`"web"`, `"bot"`, …) separates processes of one service;
+  the token decides which service a push belongs to. Register a service and get
+  its token with `scripts/buggregator/dashboard/dashboard.php add <name>` in
+  magnustools.
+- SIGTERM/SIGINT handling is on by default: final push, then exit with 143/130.
+  A service with its own graceful shutdown turns it off with
+  `.handle_signals(false)` and calls `telemetry.shutdown(ExitReason::Shutdown(…))`
+  when done.
+- `record_http_request(status, duration)` gives web services request counts and
+  latency from their middleware. `ignore_label("route")` merges series split by
+  a label with many values; `install_alongside(prometheus_recorder)` keeps an
+  existing `/metrics` endpoint working.
+- Pushing never blocks or fails the service. Unchanged counters are not resent,
+  and a failed push is caught up by the next one.
 
 ## SPARQL: WDQS and QLever
 
@@ -203,6 +244,7 @@ the shape of another feature's error type:
 | `site-matrix` | `site_matrix::SiteMatrixError` |
 | `wikidata` | `wikidata::WikidataError` |
 | `database` | `toolforge_db::DatabaseError` |
+| `telemetry` | `telemetry::TelemetryError` |
 
 All of these implement `std::error::Error`, so a downstream crate that uses
 several features can fold them into its own error type with
