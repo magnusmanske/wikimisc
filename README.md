@@ -110,8 +110,10 @@ policy asks: `SparqlClient::with_client(SparqlEndpoint::wdqs(), wikidata.reqwest
 `SparqlError` tells apart what a caller may want to react to differently: a
 query timeout (`Timeout`), rate limiting with the requested wait
 (`RateLimited`), any other error response with the endpoint's own message
-(`Endpoint` — e.g. a syntax error), and a body that is not a valid result
-(`InvalidResponse`). The two engines report these differently — QLever as JSON,
+(`Endpoint` — e.g. a syntax error), a body that is not a valid result
+(`InvalidResponse`), and one larger than the limit set with
+`with_max_response_bytes` (`ResponseTooLarge`) — a runaway query can make an
+endpoint stream hundreds of megabytes before its own timeout cuts it off. The two engines report these differently — QLever as JSON,
 and a timeout as HTTP 429; Blazegraph as a Java stack trace — and the client
 reads both.
 
