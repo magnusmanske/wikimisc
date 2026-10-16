@@ -542,10 +542,9 @@ impl Telemetry {
         .collect()
     }
 
-    /// Records every panic as an event. A panic on the main thread ends the
-    /// process, so that one also gets a final push, sent from a separate
-    /// thread and runtime: the panicking thread may be the one driving the
-    /// service's runtime.
+    /// Records every panic as an event. A panic that ends the process also
+    /// gets a final push, sent from a separate thread and runtime: the
+    /// panicking thread may be the one driving the service's runtime.
     fn install_panic_hook(&self) {
         let previous = std::panic::take_hook();
         let me = self.clone();
@@ -554,7 +553,7 @@ impl Telemetry {
             let message = panic_message(info);
             me.inner.panics.fetch_add(1, Ordering::Relaxed);
             me.event(Level::Error, format!("panic: {message}"));
-            if std::thread::current().name() == Some("main") {
+            if panic_ends_process(std::thread::current().name()) {
                 me.shutdown_blocking(ExitReason::Panic(message));
             }
         }));
@@ -647,6 +646,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Whether a panic on this thread ends the process: always when built with
+/// `panic = "abort"` (the abort follows right after the hook), otherwise only
+/// on the main thread — elsewhere it ends just a thread or tokio task.
+fn panic_ends_process(thread_name: Option<&str>) -> bool {
+    cfg!(panic = "abort") || thread_name == Some("main")
 }
 
 fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
@@ -954,6 +960,14 @@ mod tests {
         .unwrap();
         let pushes = received(&server).await;
         assert_eq!(pushes[0]["exit"]["reason"], "panic");
+    }
+
+    #[test]
+    fn test_which_panics_end_the_process() {
+        assert!(panic_ends_process(Some("main")));
+        // Tests are built with panic = "unwind": a worker panic is survivable.
+        assert!(!panic_ends_process(Some("tokio-runtime-worker")));
+        assert!(!panic_ends_process(None));
     }
 
     #[test]
