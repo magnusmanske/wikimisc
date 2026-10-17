@@ -5,9 +5,12 @@
 //! `None`. The file parsing is factored into pure functions so it stays
 //! testable on any platform.
 //!
-//! Memory is reported as process RSS rather than cgroup `memory.current`,
-//! because the latter includes reclaimable page cache; anonymous memory is
-//! what drives an OOM kill, and RSS tracks it closely. The cgroup is resolved
+//! Memory is read per process rather than from cgroup `memory.current`,
+//! because the latter includes reclaimable page cache. Anonymous memory is what
+//! drives an OOM kill, and full RSS does not track it for processes that mmap
+//! large files: every page of the mapping they touch counts as resident, but
+//! the kernel drops those under pressure instead of killing anything. Hence
+//! [`ProcessStats::anon_rss_bytes`] next to the full RSS. The cgroup is resolved
 //! from `/proc/self/cgroup`, so this works both inside a container (where the
 //! cgroup root is the container's) and for a systemd service on a VM.
 
@@ -26,8 +29,13 @@ const NO_LIMIT_SENTINEL: u64 = 1 << 53;
 /// provide them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProcessStats {
-    /// Resident set size of this process, in bytes.
+    /// Resident set size of this process, in bytes, including pages of
+    /// mmap'd files.
     pub rss_bytes: Option<u64>,
+    /// Resident memory the kernel cannot reclaim without swap (`RssAnon` +
+    /// `RssShmem`: heap, stacks, shared memory), in bytes. `None` on kernels
+    /// before 4.5, which lack the breakdown.
+    pub anon_rss_bytes: Option<u64>,
     /// Memory limit of the process's cgroup, in bytes.
     pub memory_limit_bytes: Option<u64>,
     /// CPU time (user + system) used by this process so far, in seconds.
@@ -57,7 +65,8 @@ impl ProcessStats {
             rss_bytes: status
                 .as_deref()
                 .and_then(|s| status_field(s, "VmRSS:"))
-                .map(|kb| kb.saturating_mul(1024)),
+                .map(kib_to_bytes),
+            anon_rss_bytes: status.as_deref().and_then(parse_anon_rss).map(kib_to_bytes),
             memory_limit_bytes: read_cgroup("memory.max")
                 .or_else(|| {
                     std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes").ok()
@@ -97,6 +106,18 @@ fn status_field(raw: &str, label: &str) -> Option<u64> {
         .find_map(|line| line.strip_prefix(label))
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|value| value.parse().ok())
+}
+
+/// `RssAnon` + `RssShmem` of a `/proc/self/status` body, in KiB.
+fn parse_anon_rss(raw: &str) -> Option<u64> {
+    let anon = status_field(raw, "RssAnon:")?;
+    let shmem = status_field(raw, "RssShmem:").unwrap_or(0);
+    Some(anon.saturating_add(shmem))
+}
+
+/// `/proc` reports memory in KiB (labelled "kB").
+fn kib_to_bytes(kib: u64) -> u64 {
+    kib.saturating_mul(1024)
 }
 
 /// A cgroup memory limit; `None` for "max", the v1 "unlimited" sentinel, and
@@ -157,6 +178,15 @@ mod tests {
         assert_eq!(status_field(raw, "VmRSS:"), Some(123456));
         assert_eq!(status_field(raw, "Threads:"), Some(17));
         assert_eq!(status_field(raw, "VmSwap:"), None);
+    }
+
+    #[test]
+    fn test_parse_anon_rss() {
+        let raw = "VmRSS:\t 3000000 kB\nRssAnon:\t  400000 kB\nRssFile:\t 2599000 kB\nRssShmem:\t    1000 kB\n";
+        assert_eq!(parse_anon_rss(raw), Some(401000));
+        assert_eq!(parse_anon_rss("RssAnon:\t 5 kB\n"), Some(5));
+        // Kernels before 4.5 have VmRSS only.
+        assert_eq!(parse_anon_rss("VmRSS:\t 3000000 kB\n"), None);
     }
 
     #[test]

@@ -22,7 +22,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Feature `telemetry` (plus a `metrics` re-export): pushes process readings,
   metrics, events and exit reasons to the Buggregator service dashboard.
 - Feature `process-stats`: memory, CPU, thread and file-descriptor readings of
-  the current process and its cgroup.
+  the current process and its cgroup. Memory comes as full RSS and as
+  non-reclaimable resident memory (`RssAnon` + `RssShmem`); telemetry reports
+  the latter, so pages of mmap'd files don't look like memory pressure.
 - `Seppuku` sends a final `watchdog` push before exiting when `telemetry` is
   running.
 

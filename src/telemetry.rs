@@ -564,9 +564,12 @@ impl Telemetry {
             .and_then(Result::ok)
             .map(|h| h.metrics().num_alive_tasks() as f64);
         [
+            // Named for the dashboard, which compares it to the limit to infer
+            // OOM kills: page cache of mmap'd files in a full RSS would make
+            // such services look permanently close to it.
             gauge(
                 "process_resident_memory_bytes",
-                stats.rss_bytes.map(|v| v as f64),
+                stats.anon_rss_bytes.or(stats.rss_bytes).map(|v| v as f64),
             ),
             gauge(
                 "process_memory_limit_bytes",
