@@ -15,6 +15,8 @@
     warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+#[cfg(any(feature = "sparql-client", feature = "wikidata"))]
+mod content_type;
 #[cfg(feature = "date")]
 pub mod date;
 #[cfg(feature = "external-id")]

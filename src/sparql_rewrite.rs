@@ -27,10 +27,12 @@
 //! Unlike there:
 //!
 //! - an output nobody needs is not computed at all. The caller says which
-//!   outputs it uses; one that is neither used by the caller nor referenced
-//!   anywhere in the query except where it is projected or grouped by is
-//!   left unbound, and a service with no needed outputs is simply removed.
-//!   That keeps the rewritten query as cheap as possible.
+//!   outputs it uses; one the caller does not use is left unbound if the
+//!   query refers to it only where that cannot change which rows come back:
+//!   where it is projected, unless the `SELECT` is `DISTINCT` (or `REDUCED`)
+//!   without also projecting the entity, and in a `GROUP BY` that also groups
+//!   by the entity. A service with no needed outputs is simply removed. That
+//!   keeps the rewritten query as cheap as possible.
 //! - `[AUTO_LANGUAGE]` is dropped. Only the WDQS web interface substitutes
 //!   it; in a query sent to the endpoint it matches no language.
 //! - aliases (`skos:altLabel`) are not rewritten, as they need a copy of the
@@ -38,8 +40,8 @@
 //!   left unchanged.
 
 use crate::sparql_endpoint::WIKIDATA_PREFIXES;
-use crate::sparql_lexer::{matching, tokenize, Token, TokenKind};
-use std::collections::{HashMap, HashSet};
+use crate::sparql_lexer::{tokenize, Brackets, Token, TokenKind};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 const LABEL_SERVICE: &str = "http://wikiba.se/ontology#label";
@@ -106,9 +108,8 @@ impl fmt::Display for UnsupportedLabelService {
 /// 1.1; see the [module documentation](self).
 ///
 /// `is_needed` is asked about each output variable (without `?`) that the
-/// query itself does not use apart from projecting or grouping by it: return
-/// `true` if the caller reads that variable from the results. Pass
-/// `|_| true` to rewrite every output.
+/// query itself does not need: return `true` if the caller reads
+/// that variable from the results. Pass `|_| true` to rewrite every output.
 pub fn rewrite_label_service(
     sparql: &str,
     is_needed: impl Fn(&str) -> bool,
@@ -126,21 +127,24 @@ pub fn rewrite_label_service(
 
 type Result<T> = std::result::Result<T, UnsupportedLabelService>;
 
-/// A `SELECT` and the token ranges of its clauses.
+/// A text edit: replace the byte range `start..end` of the query.
+type Edit = (usize, usize, String);
+
+/// A `SELECT`, with what its clauses say about the variables.
 #[derive(Debug)]
-struct SelectScope {
+struct SelectScope<'a> {
     /// Tokens of the projection, between `SELECT` and the `WHERE` group.
     projection: (usize, usize),
-    /// The `{` and `}` of the `WHERE` group.
-    group: (usize, usize),
     /// Tokens of the `GROUP BY` clause, if any.
     group_by: Option<(usize, usize)>,
-}
-
-impl SelectScope {
-    fn contains(&self, index: usize) -> bool {
-        self.group.0 < index && index < self.group.1
-    }
+    /// Whether this is `SELECT DISTINCT` or `SELECT REDUCED`.
+    distinct: bool,
+    /// Variables projected as such, not inside an expression.
+    projected: HashSet<&'a str>,
+    /// Variables grouped by as such, not inside an expression.
+    grouped: HashSet<&'a str>,
+    /// The outputs of a label service in automatic mode.
+    automatic: Vec<Output<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -159,6 +163,13 @@ struct Output<'a> {
     entity: String,
 }
 
+impl Output<'_> {
+    /// The entity's variable name, if it is a variable.
+    fn entity_var(&self) -> Option<&str> {
+        self.entity.strip_prefix(['?', '$'])
+    }
+}
+
 /// One `SERVICE wikibase:label { … }`.
 #[derive(Debug)]
 struct Service<'a> {
@@ -166,25 +177,51 @@ struct Service<'a> {
     span: (usize, usize),
     /// The `{` and `}` of the graph pattern the service is in.
     group: (usize, usize),
+    /// The `{` of the `WHERE` group of the `SELECT` the service is in.
+    select: usize,
     languages: Vec<&'a str>,
-    outputs: Vec<Output<'a>>,
+    /// The outputs the service names; if none, it has its `SELECT`'s
+    /// automatic ones.
+    manual: Vec<Output<'a>>,
+}
+
+impl Service<'_> {
+    fn contains(&self, index: usize) -> bool {
+        self.span.0 <= index && index <= self.span.1
+    }
 }
 
 struct LabelServiceRewriter<'a> {
     sparql: &'a str,
     tokens: Vec<Token<'a>>,
     prefixes: HashMap<&'a str, &'a str>,
-    selects: Vec<SelectScope>,
+    /// The tokens where each variable occurs, by name.
+    occurrences: HashMap<&'a str, Vec<usize>>,
+    /// The `(` or `{` opening the constraint of each `FILTER`.
+    filters: HashSet<usize>,
+    /// Set by `rewrite`, once the brackets are known to balance.
+    brackets: Brackets,
+    /// Set by `rewrite`; by the `{` of their `WHERE` group.
+    selects: HashMap<usize, SelectScope<'a>>,
 }
 
 impl<'a> LabelServiceRewriter<'a> {
     fn new(sparql: &'a str) -> Self {
         let tokens = tokenize(sparql);
+        let mut occurrences: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, token) in tokens.iter().enumerate() {
+            if let Some(name) = token.var_name() {
+                occurrences.entry(name).or_default().push(i);
+            }
+        }
         Self {
             sparql,
             prefixes: declared_prefixes(&tokens),
+            occurrences,
+            filters: filter_constraints(&tokens),
             tokens,
-            selects: Vec::new(),
+            brackets: Brackets::default(),
+            selects: HashMap::new(),
         }
     }
 
@@ -210,24 +247,29 @@ impl<'a> LabelServiceRewriter<'a> {
         if self.uses_named_subqueries() {
             return Err(UnsupportedLabelService::NamedSubqueries);
         }
-        self.selects = self.select_scopes()?;
+        self.brackets = Brackets::new(&self.tokens).ok_or(UnsupportedLabelService::Syntax)?;
+        self.selects = self.select_scopes();
         let services = self.services()?;
-        let mut taken: HashSet<String> = self
-            .tokens
-            .iter()
-            .filter_map(Token::var_name)
-            .map(str::to_string)
+        let mut taken: HashSet<String> = self.occurrences.keys().map(|v| v.to_string()).collect();
+        let mut edits: Vec<Edit> = self
+            .removed_runs(&services)
+            .into_iter()
+            .flat_map(|run| self.removal(run))
             .collect();
-        let mut edits = Vec::new();
-        let mut insertions: Vec<(usize, Vec<String>)> = Vec::new();
+        let mut insertions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
         let mut bound: HashSet<&str> = HashSet::new();
+        // Services in automatic mode share their `SELECT`'s outputs and have
+        // no variables of their own, so what they need is decided once.
+        let mut automatic_needed: HashMap<usize, Vec<&Output>> = HashMap::new();
         for service in &services {
-            edits.push(self.removal(service));
-            let needed: Vec<&Output> = service
-                .outputs
-                .iter()
-                .filter(|o| self.is_used_in_query(o.output, service) || is_needed(o.output))
-                .collect();
+            let needed = if service.manual.is_empty() {
+                automatic_needed
+                    .entry(service.select)
+                    .or_insert_with(|| self.needed(service, is_needed))
+                    .clone()
+            } else {
+                self.needed(service, is_needed)
+            };
             if needed.is_empty() {
                 continue;
             }
@@ -242,29 +284,56 @@ impl<'a> LabelServiceRewriter<'a> {
                 return Err(UnsupportedLabelService::PreboundOutput);
             }
             let lines = self.replacement(service, &needed, &mut taken);
-            match insertions.iter_mut().find(|(at, _)| *at == service.group.1) {
-                Some((_, existing)) => existing.extend(lines),
-                None => insertions.push((service.group.1, lines)),
-            }
+            insertions.entry(service.group.1).or_default().extend(lines);
         }
         for (group_close, lines) in insertions {
             edits.push(self.insertion(group_close, &lines));
         }
-        // Apply from the back, so earlier offsets stay valid. Edits never
-        // overlap; should a removal and an insertion start at the same
-        // offset, remove first, so the inserted text survives.
-        edits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-        let mut query = self.sparql.to_string();
+        Ok(Some(self.apply(edits)))
+    }
+
+    /// The query with `edits` made. Edits never overlap; an insertion at the
+    /// offset where a removal starts goes before it, so it survives.
+    fn apply(&self, mut edits: Vec<Edit>) -> String {
+        edits.sort_by_key(|&(start, end, _)| (start, end));
+        let mut query = String::with_capacity(self.sparql.len());
+        let mut kept_from = 0;
         for (start, end, text) in edits {
-            query.replace_range(start..end, &text);
+            query.push_str(self.sparql.get(kept_from..start).unwrap_or_default());
+            query.push_str(&text);
+            kept_from = end;
         }
-        Ok(Some(query))
+        query.push_str(self.sparql.get(kept_from..).unwrap_or_default());
+        query
+    }
+
+    /// The service's outputs that are needed, by the query itself or by the
+    /// caller.
+    fn needed<'s>(
+        &'s self,
+        service: &'s Service<'a>,
+        is_needed: &dyn Fn(&str) -> bool,
+    ) -> Vec<&'s Output<'a>> {
+        self.outputs(service)
+            .iter()
+            .filter(|o| self.is_used_in_query(o, service) || is_needed(o.output))
+            .collect()
+    }
+
+    /// The outputs the service names, or else those of its `SELECT`.
+    fn outputs<'s>(&'s self, service: &'s Service<'a>) -> &'s [Output<'a>] {
+        if !service.manual.is_empty() {
+            return &service.manual;
+        }
+        self.selects
+            .get(&service.select)
+            .map_or(&[], |select| &select.automatic)
     }
 
     // ── analysis ────────────────────────────────────────────────────────────
 
-    fn select_scopes(&self) -> Result<Vec<SelectScope>> {
-        let mut scopes = Vec::new();
+    fn select_scopes(&self) -> HashMap<usize, SelectScope<'a>> {
+        let mut scopes = HashMap::new();
         for (i, token) in self.tokens.iter().enumerate() {
             if !token.is_keyword("SELECT") {
                 continue;
@@ -284,15 +353,27 @@ impl<'a> LabelServiceRewriter<'a> {
                 }
             }
             let Some(open) = open else { continue };
-            let close = matching(&self.tokens, open).ok_or(UnsupportedLabelService::Syntax)?;
+            let Some(close) = self.brackets.partner(open) else {
+                continue;
+            };
+            let projection = (i + 1, open);
             let group_by = self.group_by_clause(close + 1);
-            scopes.push(SelectScope {
-                projection: (i + 1, open),
-                group: (open, close),
-                group_by,
-            });
+            scopes.insert(
+                open,
+                SelectScope {
+                    projection,
+                    group_by,
+                    distinct: self
+                        .tokens
+                        .get(i + 1)
+                        .is_some_and(|t| t.is_keyword("DISTINCT") || t.is_keyword("REDUCED")),
+                    projected: self.bare_vars(projection).collect(),
+                    grouped: group_by.map_or_else(HashSet::new, |c| self.bare_vars(c).collect()),
+                    automatic: self.automatic_outputs(projection),
+                },
+            );
         }
-        Ok(scopes)
+        scopes
     }
 
     fn group_by_clause(&self, start: usize) -> Option<(usize, usize)> {
@@ -330,21 +411,20 @@ impl<'a> LabelServiceRewriter<'a> {
             if !self.tokens.get(open).is_some_and(|t| t.is_punct('{')) {
                 return Err(UnsupportedLabelService::Syntax);
             }
-            let close = matching(&self.tokens, open).ok_or(UnsupportedLabelService::Syntax)?;
-            let scope = self
-                .scope_of(i)
+            let close = self
+                .brackets
+                .partner(open)
+                .ok_or(UnsupportedLabelService::Syntax)?;
+            let select = self
+                .select_of(i)
                 .ok_or(UnsupportedLabelService::NotInSelect)?;
             let (languages, manual) = self.parse_body(open + 1, close)?;
-            let outputs = if manual.is_empty() {
-                self.automatic_outputs(scope)
-            } else {
-                manual
-            };
             services.push(Service {
                 span: (i, close),
                 group: self.enclosing_group(i)?,
+                select,
                 languages,
-                outputs,
+                manual,
             });
         }
         Ok(services)
@@ -407,10 +487,10 @@ impl<'a> LabelServiceRewriter<'a> {
         Ok((languages, outputs))
     }
 
-    /// Variables the scope projects as such (not inside an expression) whose
-    /// names end in `Label`, `Description` or `AltLabel`.
-    fn automatic_outputs(&self, scope: &SelectScope) -> Vec<Output<'a>> {
-        self.bare_projection(scope)
+    /// Variables projected as such in `tokens[projection]` whose names end
+    /// in `Label`, `Description` or `AltLabel`.
+    fn automatic_outputs(&self, projection: (usize, usize)) -> Vec<Output<'a>> {
+        self.bare_vars(projection)
             .filter_map(|output| {
                 [
                     ("AltLabel", Kind::Alias),
@@ -430,102 +510,86 @@ impl<'a> LabelServiceRewriter<'a> {
             .collect()
     }
 
-    fn bare_projection<'s>(&'s self, scope: &SelectScope) -> impl Iterator<Item = &'a str> + 's {
-        let mut depth = 0usize;
-        self.tokens[scope.projection.0..scope.projection.1]
-            .iter()
-            .filter_map(move |t| {
-                if t.is_punct('(') {
-                    depth += 1;
-                } else if t.is_punct(')') {
-                    depth = depth.saturating_sub(1);
-                } else if depth == 0 {
-                    return t.var_name();
-                }
-                None
-            })
+    /// The variables in `tokens[start..end]` that are not inside an
+    /// expression there.
+    fn bare_vars<'s>(&'s self, (start, end): (usize, usize)) -> impl Iterator<Item = &'a str> + 's {
+        (start..end)
+            .filter(move |&i| self.is_bare(i, start))
+            .filter_map(|i| self.tokens.get(i)?.var_name())
     }
 
-    /// The innermost `SELECT` whose `WHERE` group contains `tokens[index]`.
-    /// Scopes are in source order, so a nested one comes after its parent.
-    fn scope_of(&self, index: usize) -> Option<&SelectScope> {
-        self.selects.iter().rev().find(|s| s.contains(index))
+    /// Whether `tokens[index]` is inside no bracket opened at or after
+    /// `tokens[start]`.
+    fn is_bare(&self, index: usize, start: usize) -> bool {
+        self.brackets.parent(index).is_none_or(|b| b < start)
+    }
+
+    /// The innermost `SELECT` whose `WHERE` group contains `tokens[index]`,
+    /// by the group's `{`.
+    fn select_of(&self, index: usize) -> Option<usize> {
+        self.brackets
+            .ancestors(index)
+            .find(|open| self.selects.contains_key(open))
     }
 
     /// The innermost `{ … }` around `tokens[index]`.
     fn enclosing_group(&self, index: usize) -> Result<(usize, usize)> {
-        let mut stack = Vec::new();
-        for (i, token) in self.tokens[..index].iter().enumerate() {
-            if token.is_punct('{') {
-                stack.push(i);
-            } else if token.is_punct('}') {
-                stack.pop();
-            }
-        }
-        let open = stack.pop().ok_or(UnsupportedLabelService::Syntax)?;
-        let close = matching(&self.tokens, open).ok_or(UnsupportedLabelService::Syntax)?;
+        let open = self
+            .brackets
+            .ancestors(index)
+            .find(|&b| self.tokens.get(b).is_some_and(|t| t.is_punct('{')))
+            .ok_or(UnsupportedLabelService::Syntax)?;
+        let close = self
+            .brackets
+            .partner(open)
+            .ok_or(UnsupportedLabelService::Syntax)?;
         Ok((open, close))
     }
 
-    /// Whether the query references `?output` anywhere besides the service
-    /// itself, the bare projection of the service's `SELECT`, and that
-    /// `SELECT`'s `GROUP BY` — places where an unbound variable is harmless.
-    fn is_used_in_query(&self, output: &str, service: &Service) -> bool {
-        let Some(scope) = self.scope_of(service.span.0) else {
+    /// The tokens where `?var` occurs.
+    fn occurrences(&self, var: &str) -> &[usize] {
+        self.occurrences.get(var).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the query needs `output` bound for its own sake: whether it
+    /// refers to it anywhere besides the service itself and the places in
+    /// the service's `SELECT` where leaving it unbound cannot change which
+    /// rows come back. Those are the projection, unless the `SELECT` is
+    /// `DISTINCT` without projecting the entity as well, and a `GROUP BY`
+    /// that groups by the entity as well — else rows or groups that differ
+    /// only in the label would merge.
+    fn is_used_in_query(&self, output: &Output, service: &Service) -> bool {
+        let Some(select) = self.selects.get(&service.select) else {
             return true;
         };
-        let mut paren_depth = 0usize;
-        self.tokens.iter().enumerate().any(|(i, t)| {
-            let in_projection = scope.projection.0 <= i && i < scope.projection.1;
-            if in_projection && t.is_punct('(') {
-                paren_depth += 1;
-            } else if in_projection && t.is_punct(')') {
-                paren_depth = paren_depth.saturating_sub(1);
-            }
-            if t.var_name() != Some(output) {
-                return false;
-            }
-            let in_service = service.span.0 <= i && i <= service.span.1;
-            let bare_projected = in_projection && paren_depth == 0;
-            let grouped = scope.group_by.is_some_and(|(s, e)| s <= i && i < e);
-            !(in_service || bare_projected || grouped)
+        let with_entity =
+            |vars: &HashSet<&str>| output.entity_var().is_some_and(|e| vars.contains(e));
+        let (start, end) = select.projection;
+        self.occurrences(output.output).iter().any(|&i| {
+            let projected = start <= i
+                && i < end
+                && self.is_bare(i, start)
+                && (!select.distinct || with_entity(&select.projected));
+            let grouped = select.group_by.is_some_and(|(s, e)| s <= i && i < e)
+                && with_entity(&select.grouped);
+            !(service.contains(i) || projected || grouped)
         })
     }
 
-    /// Whether `?output` is bound somewhere in the service's graph pattern
-    /// other than in a `FILTER`, which would clash with the rewrite's `BIND`.
+    /// Whether `?output` occurs in the service's graph pattern other than in
+    /// a `FILTER`, so it is bound there, which would clash with the rewrite's
+    /// `BIND`.
     fn is_prebound(&self, output: &str, service: &Service) -> bool {
         let (open, close) = service.group;
-        let mut i = open + 1;
-        while i < close {
-            let token = &self.tokens[i];
-            if i == service.span.0 {
-                i = service.span.1 + 1;
-                continue;
-            }
-            if token.is_keyword("FILTER") {
-                i = self.filter_end(i + 1).map_or(close, |end| end + 1);
-                continue;
-            }
-            if token.var_name() == Some(output) {
-                return true;
-            }
-            i += 1;
-        }
-        false
-    }
-
-    /// Index of the last token of the constraint after `FILTER`:
-    /// `( … )`, `fn( … )` or `[NOT] EXISTS { … }`.
-    fn filter_end(&self, start: usize) -> Option<usize> {
-        let mut i = start;
-        loop {
-            let token = self.tokens.get(i)?;
-            if token.is_punct('(') || token.is_punct('{') {
-                return matching(&self.tokens, i);
-            }
-            i += 1;
-        }
+        let in_filter = |i: usize| {
+            self.brackets
+                .ancestors(i)
+                .take_while(|&b| b > open)
+                .any(|b| self.filters.contains(&b))
+        };
+        self.occurrences(output)
+            .iter()
+            .any(|&i| open < i && i < close && !service.contains(i) && !in_filter(i))
     }
 
     /// The full IRI a token names, if it is an IRI or a prefixed name with a
@@ -580,8 +644,8 @@ impl<'a> LabelServiceRewriter<'a> {
         let mut values: HashMap<(&str, Kind), String> = HashMap::new();
         for output in needed {
             let entity = output.entity.as_str();
-            let is_var = entity.starts_with('?') || entity.starts_with('$');
-            let base = if is_var { &entity[1..] } else { output.output };
+            let is_var = output.entity_var().is_some();
+            let base = output.entity_var().unwrap_or(output.output);
             let subject = match subjects.get(entity) {
                 Some(subject) => subject.clone(),
                 None if is_var => {
@@ -634,49 +698,97 @@ impl<'a> LabelServiceRewriter<'a> {
         lines
     }
 
-    /// The text range to delete for `service`: the service and a `.` right
-    /// after it, and the whole line if nothing else is left on it.
-    fn removal(&self, service: &Service) -> (usize, usize, String) {
-        let start = self.tokens[service.span.0].start;
-        let mut end = self.tokens[service.span.1].end();
-        if let Some(dot) = self
-            .tokens
-            .get(service.span.1 + 1)
-            .filter(|t| t.is_punct('.'))
-        {
-            end = dot.end();
+    /// The token ranges to delete, one per run of adjacent services: each
+    /// service and a `.` right after it.
+    fn removed_runs(&self, services: &[Service]) -> Vec<(usize, usize)> {
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for service in services {
+            let (first, close) = service.span;
+            let last = if self.tokens.get(close + 1).is_some_and(|t| t.is_punct('.')) {
+                close + 1
+            } else {
+                close
+            };
+            match runs.last_mut() {
+                Some(run) if run.1 + 1 == first => run.1 = last,
+                _ => runs.push((first, last)),
+            }
         }
-        let line_start = self.sparql[..start].rfind('\n').map_or(0, |i| i + 1);
-        let line_end = self.sparql[end..]
-            .find('\n')
-            .map_or(self.sparql.len(), |i| end + i);
-        if self.sparql[line_start..start].trim().is_empty()
-            && self.sparql[end..line_end].trim().is_empty()
-        {
-            (
-                line_start,
-                (line_end + 1).min(self.sparql.len()),
-                String::new(),
-            )
-        } else {
-            (start, end, String::new())
+        runs
+    }
+
+    /// Edits deleting `tokens[first..=last]`, and the whole line if nothing
+    /// else is left on it.
+    fn removal(&self, (first, last): (usize, usize)) -> Vec<Edit> {
+        let start = self.tokens[first].start;
+        let end = self.tokens[last].end();
+        let (start, end) = match (self.blank_line_start(start), self.blank_line_end(end)) {
+            (Some(line_start), Some(line_end)) => (line_start, line_end),
+            _ => (start, end),
+        };
+        let mut edits = vec![(start, end, String::new())];
+        // SERVICE needs no `.` before it, so it may be all that separates two
+        // triples (`?a ?b ?c SERVICE … { … } ?d ?e ?f`). Keep them apart with
+        // a `.`, which may follow anything but `{` or another `.`.
+        let previous = first.checked_sub(1).and_then(|i| self.tokens.get(i));
+        if let Some(previous) = previous.filter(|t| !t.is_punct('{') && !t.is_punct('.')) {
+            edits.push((previous.end(), previous.end(), " .".to_string()));
         }
+        edits
     }
 
     /// The text to insert before the `}` at `tokens[group_close]`.
-    fn insertion(&self, group_close: usize, lines: &[String]) -> (usize, usize, String) {
+    fn insertion(&self, group_close: usize, lines: &[String]) -> Edit {
         let at = self.tokens[group_close].start;
-        let line_start = self.sparql[..at].rfind('\n').map_or(0, |i| i + 1);
-        let before = &self.sparql[line_start..at];
-        if before.trim().is_empty() {
-            // `}` on its own line: add indented lines above it.
-            let indent = format!("{before}  ");
-            let text: String = lines.iter().map(|l| format!("{indent}{l}\n")).collect();
-            (line_start, line_start, text)
-        } else {
-            (at, at, format!(" {} ", lines.join(" ")))
+        match self.blank_line_start(at) {
+            Some(line_start) => {
+                // `}` on its own line: add indented lines above it.
+                let indent = format!("{}  ", &self.sparql[line_start..at]);
+                let text: String = lines.iter().map(|l| format!("{indent}{l}\n")).collect();
+                (line_start, line_start, text)
+            }
+            None => (at, at, format!(" {} ", lines.join(" "))),
         }
     }
+
+    /// The start of the line `offset` is on, if only blanks precede it there.
+    fn blank_line_start(&self, offset: usize) -> Option<usize> {
+        let before = self.sparql.get(..offset)?.trim_end_matches(is_blank);
+        (before.is_empty() || before.ends_with('\n')).then_some(before.len())
+    }
+
+    /// The end of the line `offset` is on, past its `\n`, if only blanks
+    /// follow it there.
+    fn blank_line_end(&self, offset: usize) -> Option<usize> {
+        let after = self.sparql.get(offset..)?.trim_start_matches(is_blank);
+        let line_end = self.sparql.len() - after.len();
+        match after.chars().next() {
+            None => Some(line_end),
+            Some('\n') => Some(line_end + 1),
+            Some(_) => None,
+        }
+    }
+}
+
+/// Whitespace within a line.
+fn is_blank(c: char) -> bool {
+    c != '\n' && c.is_whitespace()
+}
+
+/// The `(` or `{` that opens the constraint of each `FILTER`: `( … )`,
+/// `fn( … )` or `[NOT] EXISTS { … }`.
+fn filter_constraints(tokens: &[Token]) -> HashSet<usize> {
+    let mut constraints = HashSet::new();
+    let mut after_filter = false;
+    for (i, token) in tokens.iter().enumerate() {
+        if token.is_keyword("FILTER") {
+            after_filter = true;
+        } else if after_filter && (token.is_punct('(') || token.is_punct('{')) {
+            constraints.insert(i);
+            after_filter = false;
+        }
+    }
+    constraints
 }
 
 /// The prefixes the query declares, by name (without `:`).
@@ -1029,5 +1141,94 @@ mod tests {
         assert!(UnsupportedLabelService::Aliases
             .to_string()
             .contains("alias"));
+    }
+
+    #[test]
+    fn test_removed_service_keeps_triples_apart() {
+        // SERVICE needs no `.` before it, and the one after it is optional,
+        // so removing it must not glue the triples around it together.
+        let svc = "SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\" }";
+        let manual = "SERVICE wikibase:label { bd:serviceParam wikibase:language \"de\" . ?item schema:description ?d }";
+        for sparql in [
+            format!("SELECT ?item ?itemLabel WHERE {{ ?item wdt:P31 wd:Q5 {svc} . ?item wdt:P21 ?g }}"),
+            format!("SELECT ?item ?itemLabel WHERE {{ ?item wdt:P31 wd:Q5 {svc} ?item wdt:P21 ?g }}"),
+            format!("SELECT ?item ?itemLabel WHERE {{\n  ?item wdt:P31 wd:Q5\n  {svc}\n  ?item wdt:P21 ?g\n}}"),
+            format!("SELECT ?item ?itemLabel WHERE {{ ?item wdt:P31 wd:Q5 {svc} {manual} ?item wdt:P21 ?g }}"),
+            format!("SELECT ?item ?itemLabel WHERE {{\n  ?item wdt:P31 wd:Q5\n  {svc} .\n  {manual}\n  ?item wdt:P21 ?g\n}}"),
+            format!("SELECT ?item ?itemLabel WHERE {{ OPTIONAL {{ ?item wdt:P21 ?g }} {svc} ?item wdt:P31 wd:Q5 }}"),
+        ] {
+            for needed in [&[][..], &["itemLabel"]] {
+                // `rewritten` checks the result parses.
+                let query = rewritten(&sparql, needed);
+                assert!(!query.contains("SERVICE"), "{query}");
+            }
+        }
+        let sparql = format!("SELECT ?item ?itemLabel WHERE {{\n  ?item wdt:P31 wd:Q5\n  {svc}\n  ?item wdt:P21 ?g\n}}");
+        assert_eq!(
+            rewritten(&sparql, &[]),
+            "SELECT ?item ?itemLabel WHERE {\n  ?item wdt:P31 wd:Q5 .\n  ?item wdt:P21 ?g\n}"
+        );
+    }
+
+    #[test]
+    fn test_label_that_determines_the_rows_is_needed() {
+        // Without the label, all countries would form one group, or one
+        // distinct row.
+        let svc = "SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\" }";
+        for sparql in [
+            format!("SELECT ?countryLabel (COUNT(*) AS ?n) WHERE {{ ?p wdt:P27 ?country . {svc} }} GROUP BY ?countryLabel"),
+            format!("SELECT DISTINCT ?countryLabel WHERE {{ ?p wdt:P27 ?country . {svc} }}"),
+            format!("SELECT REDUCED ?countryLabel WHERE {{ ?p wdt:P27 ?country . {svc} }}"),
+            format!("SELECT DISTINCT ?countryLabel ?n WHERE {{ {{ SELECT ?country (COUNT(*) AS ?n) WHERE {{ ?p wdt:P27 ?country }} GROUP BY ?country }} {svc} }}"),
+        ] {
+            let query = rewritten(&sparql, &["n"]);
+            assert!(query.contains("AS ?countryLabel)"), "{query}");
+        }
+    }
+
+    #[test]
+    fn test_label_alongside_its_entity_is_not_needed() {
+        let svc = "SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\" }";
+        for sparql in [
+            format!("SELECT DISTINCT ?country ?countryLabel WHERE {{ ?p wdt:P27 ?country . {svc} }}"),
+            format!("SELECT ?countryLabel (COUNT(*) AS ?n) WHERE {{ ?p wdt:P27 ?country . {svc} }} GROUP BY ?country ?countryLabel"),
+            // `*` projects the entity too.
+            "SELECT DISTINCT * WHERE { ?p wdt:P27 ?country . SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\" . ?country rdfs:label ?name } }".to_string(),
+        ] {
+            let query = rewritten(&sparql, &["n"]);
+            assert!(
+                !query.contains("SERVICE") && !query.contains("OPTIONAL"),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_many_services_are_rewritten_quickly() {
+        // About 200 KB each. When every output was checked against every
+        // token, the first of these took over a minute in a release build;
+        // both now take milliseconds.
+        const SERVICES: usize = 2000;
+        let svc = "SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\"";
+        let projected: String = (0..SERVICES).map(|n| format!(" ?v{n}Label")).collect();
+        let automatic: String = (0..SERVICES)
+            .map(|n| format!("?v{n} wdt:P31 wd:Q5 . {svc} }}\n"))
+            .collect();
+        let manual: String = (0..SERVICES)
+            .map(|n| format!("?v{n} wdt:P31 wd:Q5 . {svc} . ?v{n} rdfs:label ?l{n} }}\n"))
+            .collect();
+        let started = std::time::Instant::now();
+        let unneeded = rewrite_label_service(
+            &format!("SELECT{projected} WHERE {{\n{automatic}}}"),
+            |_| false,
+        );
+        let needed = rewrite_label_service(&format!("SELECT * WHERE {{\n{manual}}}"), |_| true);
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_secs() < 10, "took {elapsed:?}");
+        let LabelServiceRewrite::Rewritten(query) = unneeded else {
+            panic!("expected a rewrite, got {unneeded:?}");
+        };
+        assert_valid(&query);
+        assert!(matches!(needed, LabelServiceRewrite::Rewritten(q) if q.contains("AS ?l1999)")));
     }
 }

@@ -60,6 +60,11 @@ pub enum TelemetryError {
     NoToken,
     #[error("invalid component name '{0}': use 1-32 of a-z, 0-9, '-', '_'")]
     InvalidComponent(String),
+    #[error("invalid dashboard URL '{0}'")]
+    InvalidUrl(String),
+    /// The token must not travel in clear text; plain http is only allowed to localhost.
+    #[error("dashboard URL '{0}' must use https (plain http only to localhost)")]
+    InsecureUrl(String),
     #[error("a global metrics recorder is already installed")]
     RecorderAlreadyInstalled,
     #[error("telemetry must be started from within a tokio runtime")]
@@ -73,10 +78,25 @@ pub enum TelemetryError {
 /// The `telemetry` block of a service's config file. Both fields are
 /// optional: the token falls back to `$DASHBOARD_TOKEN`, the URL to
 /// `$DASHBOARD_URL` and then [`DEFAULT_URL`].
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct TelemetryConfig {
     pub url: Option<String>,
     pub token: Option<String>,
+}
+
+impl std::fmt::Debug for TelemetryConfig {
+    // Hand-written so the token never ends up in a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelemetryConfig")
+            .field("url", &self.url)
+            .field("token", &redacted(&self.token))
+            .finish()
+    }
+}
+
+/// Shows whether a token is set, but not the token.
+fn redacted(token: &Option<String>) -> Option<&'static str> {
+    token.as_ref().map(|_| "<redacted>")
 }
 
 /// Why a process is ending, as reported in the final push.
@@ -150,7 +170,7 @@ struct Payload<'a> {
 }
 
 /// Configures a [`Telemetry`]; see [`Telemetry::builder`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TelemetryBuilder {
     component: String,
     url: Option<String>,
@@ -159,6 +179,21 @@ pub struct TelemetryBuilder {
     interval: Duration,
     ignored_labels: HashSet<String>,
     handle_signals: bool,
+}
+
+impl std::fmt::Debug for TelemetryBuilder {
+    // Hand-written so the token never ends up in a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelemetryBuilder")
+            .field("component", &self.component)
+            .field("url", &self.url)
+            .field("token", &redacted(&self.token))
+            .field("version", &self.version)
+            .field("interval", &self.interval)
+            .field("ignored_labels", &self.ignored_labels)
+            .field("handle_signals", &self.handle_signals)
+            .finish()
+    }
 }
 
 impl TelemetryBuilder {
@@ -216,12 +251,14 @@ impl TelemetryBuilder {
 
     /// Creates the telemetry without installing its recorder or starting it.
     /// For combining with another recorder; otherwise use [`Self::install`].
+    /// The URL must be https, except to localhost.
     pub fn build(self) -> Result<Telemetry, TelemetryError> {
         if !is_valid_component(&self.component) {
             return Err(TelemetryError::InvalidComponent(self.component));
         }
         let token = setting(self.token, TOKEN_ENV).ok_or(TelemetryError::NoToken)?;
         let url = setting(self.url, URL_ENV).unwrap_or_else(|| DEFAULT_URL.to_string());
+        check_url(&url)?;
         let host = host_name();
         let started = unix_now();
         let instance = InstanceInfo {
@@ -252,6 +289,9 @@ impl TelemetryBuilder {
     /// Builds, installs the recorder as the global `metrics` recorder, and starts.
     pub fn install(self) -> Result<Telemetry, TelemetryError> {
         let telemetry = self.build()?;
+        // Checked before installing the recorder, which cannot be undone: a
+        // retry from within a runtime would find the place taken.
+        current_runtime()?;
         metrics::set_global_recorder(telemetry.recorder())
             .map_err(|_| TelemetryError::RecorderAlreadyInstalled)?;
         telemetry.start()?;
@@ -266,6 +306,7 @@ impl TelemetryBuilder {
         R: Recorder + Send + Sync + 'static,
     {
         let telemetry = self.build()?;
+        current_runtime()?;
         let fanout = metrics_util::layers::FanoutBuilder::default()
             .add_recorder(other)
             .add_recorder(telemetry.recorder())
@@ -379,8 +420,7 @@ impl Telemetry {
     /// signal handlers. Only the first started telemetry of a process does
     /// anything; later calls are no-ops.
     pub fn start(&self) -> Result<(), TelemetryError> {
-        let runtime =
-            tokio::runtime::Handle::try_current().map_err(|_| TelemetryError::NoRuntime)?;
+        let runtime = current_runtime()?;
         if GLOBAL.set(self.clone()).is_err() {
             return Ok(());
         }
@@ -553,7 +593,7 @@ impl Telemetry {
             let message = panic_message(info);
             me.inner.panics.fetch_add(1, Ordering::Relaxed);
             me.event(Level::Error, format!("panic: {message}"));
-            if panic_ends_process(std::thread::current().name()) {
+            if this_panic_ends_process() {
                 me.shutdown_blocking(ExitReason::Panic(message));
             }
         }));
@@ -561,7 +601,7 @@ impl Telemetry {
 
     fn shutdown_blocking(&self, reason: ExitReason) {
         let me = self.clone();
-        let _ = std::thread::spawn(move || {
+        let send = move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -577,8 +617,15 @@ impl Telemetry {
                 let _ =
                     tokio::time::timeout(FINAL_PUSH_TIMEOUT, me.push(&client, Some(&reason))).await;
             });
-        })
-        .join();
+        };
+        // Not `std::thread::spawn`, which panics if no thread can be created:
+        // a panic inside the panic hook aborts the process.
+        match std::thread::Builder::new().spawn(send) {
+            Ok(thread) => {
+                let _ = thread.join();
+            }
+            Err(e) => eprintln!("telemetry: cannot send the final push: {e}"),
+        }
     }
 
     fn handle_signals(&self, runtime: &tokio::runtime::Handle) {
@@ -633,11 +680,40 @@ fn setting(configured: Option<String>, env: &str) -> Option<String> {
         .or_else(|| std::env::var(env).ok().and_then(non_blank))
 }
 
+/// Redirects are not followed: reqwest would turn the POST into a GET, which
+/// can succeed without anything being ingested. A redirect is a failed push.
 fn http_client() -> Result<reqwest::Client, TelemetryError> {
     Ok(reqwest::Client::builder()
         .timeout(PUSH_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("wikimisc-telemetry/", env!("CARGO_PKG_VERSION")))
         .build()?)
+}
+
+/// Every push carries the token, so it must not go over plain http, except
+/// to this machine (e.g. a local test server).
+fn check_url(url: &str) -> Result<(), TelemetryError> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|_| TelemetryError::InvalidUrl(url.to_string()))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if parsed.host_str().is_some_and(is_loopback) => Ok(()),
+        _ => Err(TelemetryError::InsecureUrl(url.to_string())),
+    }
+}
+
+/// `localhost` or a loopback address; IPv6 hosts come in brackets (`[::1]`).
+fn is_loopback(host: &str) -> bool {
+    host == "localhost"
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn current_runtime() -> Result<tokio::runtime::Handle, TelemetryError> {
+    tokio::runtime::Handle::try_current().map_err(|_| TelemetryError::NoRuntime)
 }
 
 /// Lock a mutex, recovering from poisoning: a panic elsewhere (which the
@@ -648,11 +724,29 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Whether a panic on this thread ends the process: always when built with
-/// `panic = "abort"` (the abort follows right after the hook), otherwise only
-/// on the main thread — elsewhere it ends just a thread or tokio task.
-fn panic_ends_process(thread_name: Option<&str>) -> bool {
-    cfg!(panic = "abort") || thread_name == Some("main")
+/// Whether a panic ends the process: always when built with `panic = "abort"`
+/// (the abort follows right after the hook), otherwise only on the main
+/// thread — elsewhere it ends just that thread.
+///
+/// Not inside a tokio task, though, even on the main thread: tokio catches
+/// the panic and only that task ends. Tasks run on the main thread on a
+/// `current_thread` runtime. The main future of `#[tokio::main]` is not a
+/// task, so a panic there does end the process, whatever the flavour.
+///
+/// Getting this right matters: the dashboard rejects every push after an
+/// exit push, so a panic wrongly taken as fatal shows a running instance as
+/// dead for good. A panic the service catches itself on the main thread,
+/// outside a task, still counts as fatal; there is no way to tell.
+fn panic_ends_process(thread_name: Option<&str>, in_tokio_task: bool) -> bool {
+    cfg!(panic = "abort") || (thread_name == Some("main") && !in_tokio_task)
+}
+
+/// [`panic_ends_process`] for a panic on the calling thread.
+fn this_panic_ends_process() -> bool {
+    panic_ends_process(
+        std::thread::current().name(),
+        tokio::task::try_id().is_some(),
+    )
 }
 
 fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
@@ -964,10 +1058,117 @@ mod tests {
 
     #[test]
     fn test_which_panics_end_the_process() {
-        assert!(panic_ends_process(Some("main")));
+        assert!(panic_ends_process(Some("main"), false));
         // Tests are built with panic = "unwind": a worker panic is survivable.
-        assert!(!panic_ends_process(Some("tokio-runtime-worker")));
-        assert!(!panic_ends_process(None));
+        assert!(!panic_ends_process(Some("tokio-runtime-worker"), false));
+        assert!(!panic_ends_process(Some("tokio-runtime-worker"), true));
+        assert!(!panic_ends_process(None, false));
+        // A task on a current_thread runtime: tokio catches the panic.
+        assert!(!panic_ends_process(Some("main"), true));
+    }
+
+    #[test]
+    fn test_main_thread_panics_in_and_outside_tasks() {
+        // What #[tokio::main(flavor = "current_thread")] does: the runtime is
+        // driven from the main thread, and spawned tasks run there too.
+        let verdicts = std::thread::Builder::new()
+            .name("main".to_string())
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    let in_task = tokio::spawn(async { this_panic_ends_process() })
+                        .await
+                        .unwrap();
+                    (this_panic_ends_process(), in_task)
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(
+            verdicts,
+            (true, false),
+            "the main future's panics are fatal, a task's are not"
+        );
+    }
+
+    #[test]
+    fn test_debug_does_not_show_the_token() {
+        let config = TelemetryConfig {
+            url: None,
+            token: Some("s3cret".to_string()),
+        };
+        let builder = Telemetry::builder("web").token("s3cret");
+        for debug in [format!("{config:?}"), format!("{builder:?}")] {
+            assert!(!debug.contains("s3cret"), "token in {debug}");
+            assert!(debug.contains("<redacted>"), "{debug}");
+        }
+        assert!(format!("{:?}", TelemetryConfig::default()).contains("token: None"));
+    }
+
+    #[test]
+    fn test_url_must_be_https_except_to_localhost() {
+        for url in [
+            DEFAULT_URL,
+            "http://localhost:8080/ingest.php",
+            "http://127.0.0.1:1234",
+            "http://[::1]/x",
+        ] {
+            assert!(check_url(url).is_ok(), "{url}");
+        }
+        for url in ["http://example.org/ingest.php", "ftp://localhost/x"] {
+            assert!(
+                matches!(check_url(url), Err(TelemetryError::InsecureUrl(_))),
+                "{url}"
+            );
+        }
+        assert!(matches!(
+            check_url("not a url"),
+            Err(TelemetryError::InvalidUrl(_))
+        ));
+        assert!(matches!(
+            Telemetry::builder("web")
+                .token("x")
+                .url("http://example.org")
+                .build(),
+            Err(TelemetryError::InsecureUrl(_))
+        ));
+    }
+
+    #[test]
+    fn test_install_without_runtime_leaves_the_recorder_slot_free() {
+        let result = Telemetry::builder("web")
+            .token("x")
+            .handle_signals(false)
+            .install();
+        assert!(matches!(result, Err(TelemetryError::NoRuntime)));
+        // The only test that installs a global recorder, so this proves the
+        // failed install did not take the slot.
+        assert!(metrics::set_global_recorder(metrics::NoopRecorder).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_redirect_is_a_failed_push() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/elsewhere"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let t = telemetry(&server.uri());
+        metrics::with_local_recorder(&t.recorder(), || {
+            metrics::counter!("jobs_total").increment(1)
+        });
+
+        let err = t.push(&t.inner.client, None).await.unwrap_err();
+        assert!(matches!(err, TelemetryError::Rejected { status: 302, .. }));
+        assert_eq!(received(&server).await.len(), 1, "redirect not followed");
+        assert!(lock(&t.inner.state).acked.is_empty());
     }
 
     #[test]

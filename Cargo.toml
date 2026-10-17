@@ -1,8 +1,8 @@
 [package]
 name = "wikimisc"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Magnus Manske <magnusmanske@googlemail.com>"]
 keywords = ["wikibase", "wikidata", "mediawiki"]
 repository = "https://github.com/magnusmanske/wikimisc"
@@ -149,10 +149,10 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 tempfile = { version = "3", optional = true }
 thiserror = { version = "2", optional = true }
-tokio = { version = "1", features = ["rt", "time"], optional = true }
+tokio = { version = "1.41", features = ["rt", "time"], optional = true }
 toolforge = { version = "5", optional = true }
 urlencoding = { version = "^2", optional = true }
-wikibase = { version = "^0.7", optional = true }
+wikibase = { version = "0.7.8", optional = true }
 
 [dev-dependencies]
 # Test-only deps, needed regardless of which features are enabled: several

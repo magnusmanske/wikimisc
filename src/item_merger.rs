@@ -106,9 +106,10 @@ impl ItemMerger {
             .filter(|a| !self.item.descriptions().contains(a))
             .cloned()
             .collect();
-        self.item
-            .aliases_mut()
-            .append(&mut other.aliases().to_owned());
+        // Record exactly what the diff adds, so the item matches what the
+        // entity will look like after the edit: demoted labels included, and
+        // incoming aliases that the diff dropped excluded.
+        self.item.aliases_mut().extend(diff.aliases.iter().cloned());
         self.item.aliases_mut().sort_by(Self::compare_locale_string);
         self.item.aliases_mut().dedup();
 
@@ -290,8 +291,11 @@ impl ItemMerger {
         false
     }
 
+    /// The snak type matters on its own: `novalue` and `somevalue` snaks both
+    /// carry no data value, but say opposite things.
     pub fn is_snak_identical(snak1: &Snak, snak2: &Snak) -> bool {
         snak1.property() == snak2.property()
+            && snak1.snak_type() == snak2.snak_type()
             && Self::is_data_value_identical(snak1.data_value(), snak2.data_value())
     }
 
@@ -404,7 +408,11 @@ impl ItemMerger {
     }
 
     fn compare_snak(snak1: &Snak, snak2: &Snak) -> Ordering {
-        match snak1.property().cmp(snak2.property()) {
+        // The snak type separates `novalue` from `somevalue`, which have the
+        // same (absent) data value; see `is_snak_identical`.
+        let type1 = snak1.snak_type().string_mapping();
+        let type2 = snak2.snak_type().string_mapping();
+        match (snak1.property(), type1).cmp(&(snak2.property(), type2)) {
             Ordering::Equal => {
                 // Serialise directly to a JSON string for a stable, deterministic ordering.
                 // This avoids the intermediate serde_json::Value allocation that json!() would
@@ -1743,6 +1751,216 @@ mod tests {
         let urls = ItemMerger::get_reference_urls_from_reference(&reference);
         assert_eq!(urls, vec!["http://example.com".to_string()]);
     }
+
+    // ── Statements added and then extended within one merge ────────────────
+
+    fn p31_q5_with_reference(url: &str) -> Statement {
+        Statement::new_normal(
+            Snak::new_item("P31", "Q5"),
+            vec![],
+            vec![Reference::new(vec![Snak::new_url("P854", url)])],
+        )
+    }
+
+    #[test]
+    fn test_merge_same_new_claim_twice_in_one_source_is_added_once() {
+        // Regression: the second claim matched the first (added without an ID
+        // a moment earlier), came back as "altered" with no ID, and was pushed
+        // into `added_statements` a second time, creating two statements.
+        let mut source = ItemEntity::new_empty();
+        source.add_claim(p31_q5_with_reference("http://a.example.com"));
+        source.add_claim(p31_q5_with_reference("http://b.example.com"));
+
+        let mut im = ItemMerger::new(ItemEntity::new_empty());
+        let diff = im.merge(&source);
+
+        assert!(diff.altered_statements.is_empty());
+        assert_eq!(diff.added_statements.len(), 1);
+        assert_eq!(diff.added_statements[0].references().len(), 2);
+        assert_eq!(im.item().claims().len(), 1);
+        let payload = serde_json::to_value(&diff).unwrap();
+        assert_eq!(payload["claims"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_merge_same_new_claim_from_two_sources_extends_once() {
+        let mut source_a = ItemEntity::new_empty();
+        source_a.add_claim(p31_q5_with_reference("http://a.example.com"));
+        let mut source_b = ItemEntity::new_empty();
+        source_b.add_claim(p31_q5_with_reference("http://b.example.com"));
+
+        let mut im = ItemMerger::new(ItemEntity::new_empty());
+        let mut total = MergeDiff::new();
+        total.extend(&im.merge(&source_a));
+        total.extend(&im.merge(&source_b));
+
+        assert!(total.altered_statements.is_empty());
+        assert_eq!(total.added_statements.len(), 1);
+        assert_eq!(total.added_statements[0].references().len(), 2);
+        assert_eq!(total.added_statements[0], im.item().claims()[0]);
+    }
+
+    #[test]
+    fn test_merge_incompatible_new_claims_are_both_added() {
+        // Same main snak, contradicting qualifiers: two statements, as before.
+        let mut source = ItemEntity::new_empty();
+        source.add_claim(Statement::new_normal(
+            Snak::new_item("P39", "Q11696"),
+            vec![Snak::new_item("P1365", "Q1")],
+            vec![],
+        ));
+        source.add_claim(Statement::new_normal(
+            Snak::new_item("P39", "Q11696"),
+            vec![Snak::new_item("P1365", "Q2")],
+            vec![],
+        ));
+
+        let diff = ItemMerger::new(ItemEntity::new_empty()).merge(&source);
+        assert_eq!(diff.added_statements.len(), 2);
+    }
+
+    // ── novalue / somevalue ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_snak_identical_distinguishes_novalue_from_somevalue() {
+        let novalue = Snak::new_no_value("P570", SnakDataType::Time);
+        let somevalue = Snak::new_unknown_value("P570", SnakDataType::Time);
+        assert!(ItemMerger::is_snak_identical(&novalue, &novalue));
+        assert!(ItemMerger::is_snak_identical(&somevalue, &somevalue));
+        assert!(!ItemMerger::is_snak_identical(&novalue, &somevalue));
+    }
+
+    #[test]
+    fn test_merge_somevalue_claim_not_swallowed_by_novalue() {
+        let mut base = ItemEntity::new_empty();
+        let mut existing = Statement::new_normal(
+            Snak::new_no_value("P570", SnakDataType::Time),
+            vec![],
+            vec![],
+        );
+        existing.set_id("Q1$novalue");
+        base.add_claim(existing);
+
+        let mut other = ItemEntity::new_empty();
+        other.add_claim(Statement::new_normal(
+            Snak::new_unknown_value("P570", SnakDataType::Time),
+            vec![],
+            vec![],
+        ));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert!(diff.altered_statements.is_empty());
+        assert_eq!(diff.added_statements.len(), 1);
+        assert_eq!(
+            *diff.added_statements[0].main_snak().snak_type(),
+            SnakType::UnknownValue
+        );
+        assert_eq!(im.item().claims().len(), 2);
+    }
+
+    #[test]
+    fn test_merge_somevalue_qualifier_added_next_to_novalue_qualifier() {
+        let mut base = ItemEntity::new_empty();
+        let mut existing = Statement::new_normal(
+            Snak::new_item("P31", "Q5"),
+            vec![Snak::new_no_value("P1013", SnakDataType::WikibaseItem)],
+            vec![],
+        );
+        existing.set_id("Q1$p31");
+        base.add_claim(existing);
+
+        let mut other = ItemEntity::new_empty();
+        other.add_claim(Statement::new_normal(
+            Snak::new_item("P31", "Q5"),
+            vec![Snak::new_unknown_value("P1013", SnakDataType::WikibaseItem)],
+            vec![],
+        ));
+
+        let mut im = ItemMerger::new(base);
+        im.set_properties_ignore_qualifier_match(vec!["P31".to_string()]);
+        let diff = im.merge(&other);
+
+        assert_eq!(diff.altered_statements["Q1$p31"].qualifiers().len(), 2);
+    }
+
+    #[test]
+    fn test_are_qualifiers_identical_considers_snak_type() {
+        let novalue = Snak::new_no_value("P1013", SnakDataType::WikibaseItem);
+        let somevalue = Snak::new_unknown_value("P1013", SnakDataType::WikibaseItem);
+        assert!(!ItemMerger::are_qualifiers_identical(
+            std::slice::from_ref(&novalue),
+            std::slice::from_ref(&somevalue)
+        ));
+        // Same set in a different order: sorting must not pair them up wrongly.
+        assert!(ItemMerger::are_qualifiers_identical(
+            &[novalue.clone(), somevalue.clone()],
+            &[somevalue, novalue]
+        ));
+    }
+
+    #[test]
+    fn test_reference_with_somevalue_not_matched_by_novalue_reference() {
+        let existing = vec![Reference::new(vec![Snak::new_no_value(
+            "P248",
+            SnakDataType::WikibaseItem,
+        )])];
+        let new = Reference::new(vec![Snak::new_unknown_value(
+            "P248",
+            SnakDataType::WikibaseItem,
+        )]);
+        assert!(!ItemMerger::reference_exists(&existing, &new));
+    }
+
+    // ── Aliases recorded on the merged item ─────────────────────────────────
+
+    #[test]
+    fn test_merge_demoted_label_is_recorded_as_alias_on_item() {
+        let mut base = ItemEntity::new_empty();
+        base.labels_mut().push(LocaleString::new("en", "Foo"));
+        let mut other = ItemEntity::new_empty();
+        other.labels_mut().push(LocaleString::new("en", "Bar"));
+
+        let mut im = ItemMerger::new(base);
+        im.merge(&other);
+
+        assert_eq!(*im.item().aliases(), vec![LocaleString::new("en", "Bar")]);
+    }
+
+    #[test]
+    fn test_merge_alias_equal_to_existing_label_not_recorded_on_item() {
+        let mut base = ItemEntity::new_empty();
+        base.labels_mut().push(LocaleString::new("en", "Foo"));
+        let mut other = ItemEntity::new_empty();
+        other.aliases_mut().push(LocaleString::new("en", "Foo"));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert!(diff.aliases.is_empty());
+        assert!(im.item().aliases().is_empty());
+    }
+
+    #[test]
+    fn test_merge_same_source_twice_yields_empty_second_diff() {
+        let mut base = ItemEntity::new_empty();
+        base.labels_mut().push(LocaleString::new("en", "Foo"));
+        let mut other = ItemEntity::new_empty();
+        other.labels_mut().push(LocaleString::new("en", "Bar"));
+        other.labels_mut().push(LocaleString::new("de", "Bar"));
+        other.aliases_mut().push(LocaleString::new("en", "Baz"));
+        other.aliases_mut().push(LocaleString::new("en", "Foo"));
+        other.add_claim(p31_q5_with_reference("http://a.example.com"));
+
+        let mut im = ItemMerger::new(base);
+        let first = im.merge(&other);
+        assert!(!first.aliases.is_empty());
+
+        let second = im.merge(&other);
+        assert_eq!(second, MergeDiff::new());
+    }
+
     #[test]
     fn test_all_static_regexes_compile() {
         // The statics degrade to exact comparison rather than panicking, so

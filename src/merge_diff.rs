@@ -23,13 +23,17 @@ impl MergeDiff {
 
     /// Append every field of `other` onto `self`.
     ///
-    /// **No dedup.** This is a raw concatenation: labels, aliases, descriptions,
-    /// sitelinks, and added/altered statements from `other` are appended in
-    /// order, and identical entries from a prior `extend` are kept duplicate.
-    /// This matches how `ItemMerger` accumulates per-call diffs that have
-    /// already been deduplicated against the merger's internal item state — so
-    /// the diff stream is duplicate-free *if* it comes from the same merger.
-    /// Hand-built diffs should be deduplicated by the caller before extending.
+    /// **No dedup of terms.** Labels, aliases, descriptions and sitelinks from
+    /// `other` are appended in order, and identical entries from a prior
+    /// `extend` are kept duplicate. This matches how `ItemMerger` accumulates
+    /// per-call diffs that have already been deduplicated against the merger's
+    /// internal item state — so the diff stream is duplicate-free *if* it comes
+    /// from the same merger. Hand-built diffs should be deduplicated by the
+    /// caller before extending.
+    ///
+    /// Statements go through [`Self::add_statement`], because a later merge
+    /// can extend a statement an earlier one added: that later version must
+    /// replace the earlier one, or Wikibase would create the statement twice.
     pub fn extend(&mut self, other: &MergeDiff) {
         self.labels.extend(other.labels.iter().cloned());
         self.aliases.extend(other.aliases.iter().cloned());
@@ -41,8 +45,9 @@ impl MergeDiff {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone())),
         );
-        self.added_statements
-            .extend(other.added_statements.iter().cloned());
+        for statement in &other.added_statements {
+            self.add_statement(statement.clone());
+        }
     }
 
     /// Fold this diff into `item`.
@@ -68,16 +73,48 @@ impl MergeDiff {
                 *existing_statement = statement.to_owned();
             }
         }
-        item.claims_mut()
-            .extend(self.added_statements.iter().cloned());
+        for statement in &self.added_statements {
+            Self::add_or_supersede(item.claims_mut(), statement.to_owned());
+        }
     }
 
+    /// Record a statement that was added or altered.
+    ///
+    /// A statement with an ID is an alteration of a saved statement. One
+    /// without an ID is new — unless it merely extends a statement this diff
+    /// already adds (same main snak, rank and type, with qualifiers and
+    /// references only appended), in which case it replaces that one:
+    /// `ItemMerger` reports a statement it added earlier, and then gave
+    /// more references or qualifiers, as altered, but it still has no ID.
     pub fn add_statement(&mut self, s: Statement) {
         if let Some(id) = s.id() {
             self.altered_statements.insert(id, s);
         } else {
-            self.added_statements.push(s);
+            Self::add_or_supersede(&mut self.added_statements, s);
         }
+    }
+
+    fn add_or_supersede(statements: &mut Vec<Statement>, new: Statement) {
+        match statements
+            .iter_mut()
+            .find(|old| Self::supersedes(&new, old))
+        {
+            Some(old) => *old = new,
+            None => statements.push(new),
+        }
+    }
+
+    /// Whether `new` is a not-yet-saved statement `old` grown by merging: the
+    /// same unsaved statement with qualifiers and references only appended,
+    /// which is how `ItemMerger` folds a matching claim into an existing one.
+    fn supersedes(new: &Statement, old: &Statement) -> bool {
+        new.id().is_none()
+            && old.id().is_none()
+            && new.claim_type() == old.claim_type()
+            && new.rank() == old.rank()
+            && new.main_snak() == old.main_snak()
+            && new.qualifiers().starts_with(old.qualifiers())
+            && new.references().starts_with(old.references())
     }
 
     fn serialize_labels(&self, list: &[LocaleString]) -> Option<serde_json::Value> {
@@ -332,6 +369,146 @@ mod tests {
         diff.add_statement(statement.clone());
         assert_eq!(diff.altered_statements.len(), 0);
         assert_eq!(diff.added_statements.len(), 1);
+    }
+
+    fn p31_q5(urls: &[&str]) -> Statement {
+        let references = urls
+            .iter()
+            .map(|url| Reference::new(vec![Snak::new_url("P854", url)]))
+            .collect();
+        Statement::new_normal(Snak::new_item("P31", "Q5"), vec![], references)
+    }
+
+    fn source_with(statement: Statement) -> ItemEntity {
+        let mut item = ItemEntity::new_empty();
+        item.add_claim(statement);
+        item
+    }
+
+    #[test]
+    fn test_merge_diff_add_statement_replaces_the_unsaved_statement_it_extends() {
+        let mut diff = MergeDiff::new();
+        diff.add_statement(p31_q5(&["http://a.example.com"]));
+        diff.add_statement(p31_q5(&["http://a.example.com", "http://b.example.com"]));
+        assert_eq!(
+            diff.added_statements,
+            vec![p31_q5(&["http://a.example.com", "http://b.example.com"])]
+        );
+    }
+
+    #[test]
+    fn test_merge_diff_add_statement_keeps_unrelated_statements() {
+        // Same main snak, but neither reference list extends the other.
+        let mut diff = MergeDiff::new();
+        diff.add_statement(p31_q5(&["http://a.example.com"]));
+        diff.add_statement(p31_q5(&["http://b.example.com"]));
+        assert_eq!(diff.added_statements.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_diff_extend_does_not_duplicate_statement_extended_by_later_merge() {
+        let mut im = ItemMerger::new(ItemEntity::new_empty());
+        let first = im.merge(&source_with(p31_q5(&["http://a.example.com"])));
+        let second = im.merge(&source_with(p31_q5(&["http://b.example.com"])));
+
+        let mut total = MergeDiff::new();
+        total.extend(&first);
+        total.extend(&second);
+
+        assert_eq!(
+            total.added_statements,
+            vec![p31_q5(&["http://a.example.com", "http://b.example.com"])]
+        );
+        let payload = serde_json::to_value(&total).unwrap();
+        assert_eq!(payload["claims"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_merge_diff_apply_does_not_duplicate_statement_extended_by_later_merge() {
+        let mut im = ItemMerger::new(ItemEntity::new_empty());
+        let first = im.merge(&source_with(p31_q5(&["http://a.example.com"])));
+        let second = im.merge(&source_with(p31_q5(&["http://b.example.com"])));
+
+        let mut item = ItemEntity::new_empty();
+        first.apply(&mut item);
+        second.apply(&mut item);
+
+        assert_eq!(item.claims(), im.item().claims());
+        assert_eq!(item.claims().len(), 1);
+    }
+
+    // Altered statements are sent whole, with their ID, so whatever does not
+    // survive serialization is deleted from the saved statement. Both of these
+    // were lost by wikibase < 0.7.7.
+
+    #[test]
+    fn test_serialize_altered_statement_keeps_all_qualifiers_of_a_property() {
+        let mut base = ItemEntity::new_empty();
+        let mut existing = Statement::new_normal(Snak::new_item("P31", "Q5"), vec![], vec![]);
+        existing.set_id("Q1$p31");
+        base.add_claim(existing);
+        let source = source_with(Statement::new_normal(
+            Snak::new_item("P31", "Q5"),
+            vec![
+                Snak::new_string("P1810", "A"),
+                Snak::new_string("P1810", "B"),
+            ],
+            vec![],
+        ));
+
+        let diff = ItemMerger::new(base).merge(&source);
+        let payload = serde_json::to_value(&diff).unwrap();
+
+        let claim = &payload["claims"][0];
+        assert_eq!(claim["id"], "Q1$p31");
+        let values: Vec<&str> = claim["qualifiers"]["P1810"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|q| q["datavalue"]["value"].as_str().unwrap())
+            .collect();
+        assert_eq!(values, ["A", "B"]);
+    }
+
+    #[test]
+    fn test_serialize_altered_statement_keeps_quantity_bounds() {
+        let quantity = Snak::new(
+            SnakDataType::Quantity,
+            "P2067",
+            SnakType::Value,
+            Some(DataValue::new(
+                DataValueType::Quantity,
+                Value::Quantity(QuantityValue::new(
+                    5.0,
+                    Some(4.5),
+                    "http://www.wikidata.org/entity/Q11570",
+                    Some(5.5),
+                )),
+            )),
+        );
+        let mut base = ItemEntity::new_empty();
+        let mut existing = Statement::new_normal(quantity.clone(), vec![], vec![]);
+        existing.set_id("Q1$mass");
+        base.add_claim(existing);
+        let source = source_with(Statement::new_normal(
+            quantity,
+            vec![],
+            vec![Reference::new(vec![Snak::new_url(
+                "P854",
+                "http://a.example.com",
+            )])],
+        ));
+
+        let diff = ItemMerger::new(base).merge(&source);
+        let payload = serde_json::to_value(&diff).unwrap();
+
+        let claim = &payload["claims"][0];
+        assert_eq!(claim["id"], "Q1$mass");
+        let value = &claim["mainsnak"]["datavalue"]["value"];
+        assert_eq!(value["lowerBound"].as_f64(), Some(4.5));
+        assert_eq!(value["upperBound"].as_f64(), Some(5.5));
+        assert!(value.get("lower_bound").is_none(), "{value}");
+        assert!(value.get("upper_bound").is_none(), "{value}");
     }
 
     #[test]

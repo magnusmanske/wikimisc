@@ -27,11 +27,12 @@
 //! }
 //! ```
 
+use crate::content_type::may_be_csv;
 use crate::sparql_endpoint::SparqlEndpoint;
 use crate::sparql_results::SparqlApiResult;
 use crate::sparql_table::{SparqlTableError, SparqlTableVec};
 use regex::Regex;
-use reqwest::header::{HeaderMap, ACCEPT, RETRY_AFTER};
+use reqwest::header::{HeaderMap, ACCEPT, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{Client, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use std::fs::File;
@@ -55,6 +56,13 @@ const ACCEPT_CSV: &str = "text/csv";
 const SNIPPET_CHARS: usize = 200;
 /// How much of an endpoint's error message an error keeps.
 const MESSAGE_CHARS: usize = 500;
+/// How much of an error response is read. The message is near the start, and
+/// the status already says the query failed, so the rest is not worth waiting
+/// for.
+const ERROR_BODY_BYTES: usize = 64 * 1024;
+/// The most memory reserved up front for a response, whatever size it
+/// declares: the declaration is the server's claim, not data received.
+const MAX_PREALLOCATION: usize = 1024 * 1024;
 
 // As in `sparql_value`, the patterns are literals stored as `Option<Regex>` so
 // that one which somehow failed to compile degrades to "never matches" instead
@@ -105,6 +113,15 @@ pub enum SparqlError {
         #[source]
         source: serde_json::Error,
         snippet: String,
+    },
+
+    /// The endpoint reported success but sent `content_type` where CSV was
+    /// expected — typically an HTML error page from a proxy. `message` is
+    /// that page's explanation, as for [`Self::Endpoint`].
+    #[error("SPARQL endpoint sent {content_type:?} where CSV was expected: {message}")]
+    UnexpectedContentType {
+        content_type: String,
+        message: String,
     },
 
     /// The response is larger than the limit set with
@@ -216,6 +233,16 @@ impl SparqlClient {
     /// (`Point(…)` from WDQS, `POINT(…)` from QLever) with IRIs unabbreviated.
     pub async fn query_csv(&self, sparql: &str) -> Result<csv::Reader<File>, SparqlError> {
         let response = self.send(sparql, ACCEPT_CSV).await?;
+        if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
+            let content_type = String::from_utf8_lossy(content_type.as_bytes()).into_owned();
+            if !may_be_csv(&content_type) {
+                let message = error_message(&read_error_body(response).await);
+                return Err(SparqlError::UnexpectedContentType {
+                    content_type,
+                    message,
+                });
+            }
+        }
         let mut file = tempfile()?;
         self.read_body(response, |chunk| file.write_all(chunk))
             .await?;
@@ -230,13 +257,8 @@ impl SparqlClient {
     /// it into a `String` first would hold a large result in memory twice.
     async fn fetch_json(&self, sparql: &str) -> Result<Vec<u8>, SparqlError> {
         let response = self.send(sparql, ACCEPT_JSON).await?;
-        let mut body = Vec::with_capacity(
-            response
-                .content_length()
-                .and_then(|len| usize::try_from(len).ok())
-                .unwrap_or_default()
-                .min(self.max_response_bytes.unwrap_or(usize::MAX)),
-        );
+        let declared = self.declared_length(&response)?;
+        let mut body = Vec::with_capacity(declared.min(MAX_PREALLOCATION));
         self.read_body(response, |chunk| {
             body.extend_from_slice(chunk);
             Ok(())
@@ -249,26 +271,33 @@ impl SparqlClient {
     /// as it exceeds the configured maximum size.
     async fn read_body(
         &self,
-        mut response: Response,
-        mut sink: impl FnMut(&[u8]) -> std::io::Result<()>,
+        response: Response,
+        sink: impl FnMut(&[u8]) -> std::io::Result<()>,
     ) -> Result<(), SparqlError> {
-        let limit = self.max_response_bytes.unwrap_or(usize::MAX);
-        let too_large = || SparqlError::ResponseTooLarge { limit };
+        self.declared_length(&response)?;
+        let limit = self.response_limit();
+        if read_capped(response, limit, sink).await? {
+            Ok(())
+        } else {
+            Err(SparqlError::ResponseTooLarge { limit })
+        }
+    }
+
+    /// The body size the response declares (0 if it declares none), refused
+    /// if it is over the configured maximum before anything is read.
+    fn declared_length(&self, response: &Response) -> Result<usize, SparqlError> {
+        let limit = self.response_limit();
         let declared = response
             .content_length()
             .map_or(0, |len| usize::try_from(len).unwrap_or(usize::MAX));
         if declared > limit {
-            return Err(too_large());
+            return Err(SparqlError::ResponseTooLarge { limit });
         }
-        let mut received: usize = 0;
-        while let Some(chunk) = response.chunk().await? {
-            received = received.saturating_add(chunk.len());
-            if received > limit {
-                return Err(too_large());
-            }
-            sink(&chunk)?;
-        }
-        Ok(())
+        Ok(declared)
+    }
+
+    fn response_limit(&self) -> usize {
+        self.max_response_bytes.unwrap_or(usize::MAX)
     }
 
     /// Sends the prepared query, turning an error status into a [`SparqlError`].
@@ -286,15 +315,46 @@ impl SparqlClient {
             return Ok(response);
         }
         let retry_after = retry_after(response.headers());
-        // The status already says the query failed; an unreadable body only
-        // costs the explanation, so it is not an error of its own.
-        let body = response.text().await.unwrap_or_default();
+        let body = read_error_body(response).await;
         Err(SparqlError::from_error_response(
             status.as_u16(),
             retry_after,
             &body,
         ))
     }
+}
+
+/// Feeds `sink` at most `limit` bytes of the response body. Returns whether
+/// that was the whole body; if not, the rest is left unread.
+async fn read_capped(
+    mut response: Response,
+    limit: usize,
+    mut sink: impl FnMut(&[u8]) -> std::io::Result<()>,
+) -> Result<bool, SparqlError> {
+    let mut remaining = limit;
+    while let Some(mut chunk) = response.chunk().await? {
+        let complete = chunk.len() <= remaining;
+        chunk.truncate(remaining);
+        sink(&chunk)?;
+        if !complete {
+            return Ok(false);
+        }
+        remaining -= chunk.len();
+    }
+    Ok(true)
+}
+
+/// The start of an error response's body, for its explanation. The status
+/// already says the request failed; an unreadable body only costs the
+/// explanation, so it is not an error of its own.
+async fn read_error_body(response: Response) -> String {
+    let mut body = Vec::new();
+    let _ = read_capped(response, ERROR_BODY_BYTES, |chunk| {
+        body.extend_from_slice(chunk);
+        Ok(())
+    })
+    .await;
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// Parses a JSON response body.
@@ -666,9 +726,11 @@ p { margin: 0.7em 0 1em 0; }
         ));
     }
 
-    /// Serves one request with `body` in chunked encoding, without a
-    /// Content-Length — as WDQS streams its results.
-    async fn chunked_server(body: &'static str) -> String {
+    /// Serves one request with `response`, written to the socket verbatim,
+    /// so it can say things wiremock would correct — a Content-Length the
+    /// body does not match, say. Unless `close` is set the connection then
+    /// stays open, as from a server still sending.
+    async fn raw_server(response: String, close: bool) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -684,20 +746,90 @@ p { margin: 0.7em 0 1em 0; }
                 }
                 request.extend_from_slice(&buffer[..n]);
             }
-            let mut response = String::from(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/sparql-results+json\r\nTransfer-Encoding: chunked\r\n\r\n",
-            );
-            for chunk in body.as_bytes().chunks(16) {
-                response += &format!(
-                    "{:x}\r\n{}\r\n",
-                    chunk.len(),
-                    String::from_utf8_lossy(chunk)
-                );
-            }
-            response += "0\r\n\r\n";
             let _ = socket.write_all(response.as_bytes()).await;
+            if !close {
+                std::future::pending::<()>().await;
+            }
         });
         format!("http://{address}{SPARQL_PATH}")
+    }
+
+    /// Serves one request with `body` in chunked encoding, without a
+    /// Content-Length — as WDQS streams its results.
+    async fn chunked_server(body: &'static str) -> String {
+        let mut response = String::from(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/sparql-results+json\r\nTransfer-Encoding: chunked\r\n\r\n",
+        );
+        for chunk in body.as_bytes().chunks(16) {
+            response += &format!(
+                "{:x}\r\n{}\r\n",
+                chunk.len(),
+                String::from_utf8_lossy(chunk)
+            );
+        }
+        response += "0\r\n\r\n";
+        raw_server(response, true).await
+    }
+
+    /// A response declaring a Content-Length far beyond its actual body.
+    async fn overclaiming_server(content_length: u64) -> String {
+        raw_server(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/sparql-results+json\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n{QLEVER_RESULT}"
+            ),
+            true,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_huge_declared_length_without_limit_is_not_preallocated() {
+        // Reserving the declared 2^63 bytes would panic with a capacity
+        // overflow; the body then ends early, which is an HTTP error.
+        let url = overclaiming_server(1 << 63).await;
+        let client = SparqlClient::new(SparqlEndpoint::new(url)).unwrap();
+        assert!(matches!(
+            client.query("SELECT * {}").await,
+            Err(SparqlError::Http(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_huge_declared_length_over_limit_is_refused_unread() {
+        let url = overclaiming_server(1 << 63).await;
+        let client = SparqlClient::new(SparqlEndpoint::new(url))
+            .unwrap()
+            .with_max_response_bytes(1 << 30);
+        assert!(matches!(
+            client.query("SELECT * {}").await,
+            Err(SparqlError::ResponseTooLarge { limit }) if limit == 1 << 30
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_error_body_is_read_only_up_to_the_cap() {
+        // The body declares more than it sends and the connection stays
+        // open, so reading it whole would wait for the client timeout.
+        let padding = " ".repeat(ERROR_BODY_BYTES * 2);
+        let url = raw_server(
+            format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\n\r\nUpstream down{padding}",
+                ERROR_BODY_BYTES * 100
+            ),
+            false,
+        )
+        .await;
+        let client = SparqlClient::new(SparqlEndpoint::new(url)).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(10), client.query("ASK {}"))
+            .await
+            .expect("the error body is not read to its end");
+        match result {
+            Err(SparqlError::Endpoint { status, message }) => {
+                assert_eq!(status, 503);
+                assert_eq!(message, "Upstream down");
+            }
+            other => panic!("got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -722,6 +854,45 @@ p { margin: 0.7em 0 1em 0; }
             client.query("SELECT * {}").await.unwrap().bindings().len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn test_query_csv_rejects_html_served_as_success() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            // `set_body_raw`, as `set_body_string` would make it `text/plain`.
+            ResponseTemplate::new(200)
+                .set_body_raw(WIKIMEDIA_RATE_LIMIT, "text/html; charset=utf-8"),
+        )
+        .await;
+        let client = client_for(&server);
+        match client.query_csv("SELECT * {}").await {
+            Err(SparqlError::UnexpectedContentType {
+                content_type,
+                message,
+            }) => {
+                assert_eq!(content_type, "text/html; charset=utf-8");
+                assert!(
+                    message.starts_with("Aggressively rate-limiting"),
+                    "{message}"
+                );
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_csv_accepts_wdqs_content_type() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            ResponseTemplate::new(200).set_body_raw("x\r\nv\r\n", "text/csv;charset=utf-8"),
+        )
+        .await;
+        let client = client_for(&server);
+        let mut reader = client.query_csv("SELECT * {}").await.unwrap();
+        assert_eq!(reader.records().count(), 1);
     }
 
     #[tokio::test]

@@ -64,6 +64,8 @@ async fn example() -> Result<(), wikimisc::telemetry::TelemetryError> {
   the token decides which service a push belongs to. Register a service and get
   its token with `scripts/buggregator/dashboard/dashboard.php add <name>` in
   magnustools.
+- The push URL (`TelemetryConfig::url`, `$DASHBOARD_URL`) must be https, so the
+  token never travels in clear text; plain http is accepted only to localhost.
 - SIGTERM/SIGINT handling is on by default: final push, then exit with 143/130.
   A service with its own graceful shutdown turns it off with
   `.handle_signals(false)` and calls `telemetry.shutdown(ExitReason::Shutdown(…))`
@@ -198,7 +200,8 @@ use wikimisc::toolforge_db::{DatabaseError, DbSection, PoolSettings, ToolforgeDB
 
 fn connect() -> Result<ToolforgeDB, DatabaseError> {
     let mut db = ToolforgeDB::default().with_pool_settings(
-        // Issues `SET max_statement_time` on every connection in the pool.
+        // Issues `SET max_statement_time` on every connection in the pool,
+        // whenever it is opened or reset for reuse.
         PoolSettings::default().with_max_statement_time(Some(Duration::from_secs(300))),
     );
 
@@ -223,8 +226,11 @@ policy](https://wikitech.wikimedia.org/wiki/Help:Wiki_Replicas#Connection_handli
 pools that hold connections open while unused are not permitted against the Wiki
 Replicas or ToolsDB, and idle connections get killed. `PoolSettings::default()`
 stays within it — `min_connections: 0`, `max_connections: 10` (the per-tool
-limit), `keep_sec: 1` — and is also what `add_mysql_pool` falls back to for
-missing keys. `keep_sec: 0` would be *worse* rather than stricter: `mysql_async`
+limit), `keep_sec: 1`. `add_mysql_pool` takes each setting from its JSON key,
+else from the URL's `pool_min` / `pool_max` / `inactive_connection_ttl`
+parameter, else from the `ToolforgeDB`'s pool settings — `PoolSettings::default()`
+unless `set_pool_settings` changed them — and never from `mysql_async`'s own
+defaults (min 10, max 100). `keep_sec: 0` would be *worse* rather than stricter: `mysql_async`
 then bounds the pool by `min_connections`, closing every connection as it is
 returned, so nothing is reused and every query pays for a new connection and
 handshake. One second keeps connections reusable while still letting the pool

@@ -165,26 +165,62 @@ fn word_len(text: &str) -> usize {
     text[..len].trim_end_matches('.').len().max(1)
 }
 
-/// Index of the token closing the bracket opened at `tokens[open]`
-/// (`{`/`}` or `(`/`)`), or `None` if it is never closed.
-pub(crate) fn matching(tokens: &[Token], open: usize) -> Option<usize> {
-    let (opening, closing) = match tokens.get(open)?.text {
-        "{" => ('{', '}'),
-        "(" => ('(', ')'),
-        _ => return None,
-    };
-    let mut depth = 0usize;
-    for (i, token) in tokens.iter().enumerate().skip(open) {
-        if token.is_punct(opening) {
-            depth += 1;
-        } else if token.is_punct(closing) {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(i);
+/// How the brackets `( … )` and `{ … }` of a token list nest, worked out in
+/// one pass so that looking a bracket up is cheap.
+#[derive(Debug, Default)]
+pub(crate) struct Brackets {
+    /// For each token that is a bracket, the bracket matching it.
+    partner: Vec<Option<usize>>,
+    /// For each token, the innermost opening bracket around it.
+    parent: Vec<Option<usize>>,
+}
+
+impl Brackets {
+    /// The brackets of `tokens`, or `None` if they do not balance.
+    pub fn new(tokens: &[Token]) -> Option<Self> {
+        let mut partner = vec![None; tokens.len()];
+        let mut parent = Vec::with_capacity(tokens.len());
+        let mut open: Vec<(usize, char)> = Vec::new();
+        for (i, token) in tokens.iter().enumerate() {
+            let closes = if token.is_punct(')') {
+                Some('(')
+            } else if token.is_punct('}') {
+                Some('{')
+            } else {
+                None
+            };
+            if let Some(expected) = closes {
+                let (opening, kind) = open.pop()?;
+                if kind != expected {
+                    return None;
+                }
+                partner[opening] = Some(i);
+                partner[i] = Some(opening);
+            }
+            parent.push(open.last().map(|&(opening, _)| opening));
+            for kind in ['(', '{'] {
+                if token.is_punct(kind) {
+                    open.push((i, kind));
+                }
             }
         }
+        open.is_empty().then_some(Self { partner, parent })
     }
-    None
+
+    /// The bracket matching the one at `tokens[index]`.
+    pub fn partner(&self, index: usize) -> Option<usize> {
+        self.partner.get(index).copied().flatten()
+    }
+
+    /// The innermost opening bracket around `tokens[index]`.
+    pub fn parent(&self, index: usize) -> Option<usize> {
+        self.parent.get(index).copied().flatten()
+    }
+
+    /// The opening brackets around `tokens[index]`, innermost first.
+    pub fn ancestors(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(self.parent(index), |&b| self.parent(b))
+    }
 }
 
 #[cfg(test)]
@@ -309,11 +345,23 @@ mod tests {
     }
 
     #[test]
-    fn test_matching() {
-        let tokens = tokenize("{ ( { } ) } }");
-        assert_eq!(matching(&tokens, 0), Some(5));
-        assert_eq!(matching(&tokens, 1), Some(4));
-        assert_eq!(matching(&tokens, 6), None);
-        assert_eq!(matching(&tokenize("{ {"), 0), None);
+    fn test_brackets() {
+        // Indices:                            0 1 2 3 4 5 6 7
+        let brackets = Brackets::new(&tokenize("{ ( { y } ) x }")).unwrap();
+        assert_eq!(brackets.partner(0), Some(7));
+        assert_eq!(brackets.partner(7), Some(0));
+        assert_eq!(brackets.partner(1), Some(5));
+        assert_eq!(brackets.partner(6), None);
+        assert_eq!(brackets.parent(0), None);
+        assert_eq!(brackets.parent(4), Some(1));
+        assert_eq!(brackets.parent(6), Some(0));
+        assert_eq!(brackets.ancestors(3).collect::<Vec<_>>(), [2, 1, 0]);
+    }
+
+    #[test]
+    fn test_unbalanced_brackets() {
+        for sparql in ["{ {", "{ } }", "{ ( } )", "( }"] {
+            assert!(Brackets::new(&tokenize(sparql)).is_none(), "{sparql}");
+        }
     }
 }

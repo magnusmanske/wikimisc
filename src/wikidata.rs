@@ -9,6 +9,7 @@
 //! Also provides [`Wikidata::item2qs`] for converting an `ItemEntity` into a
 //! QuickStatements-compatible line list.
 
+use crate::content_type::may_be_csv;
 use crate::mediawiki::reqwest::{Client, ClientBuilder};
 use std::{
     fs::File,
@@ -28,7 +29,9 @@ pub enum WikidataError {
     #[error("item2qs: item ID is not empty")]
     ItemIdNotEmpty,
 
-    /// Buffering the SPARQL response to a temporary file failed.
+    /// Buffering the SPARQL response to a temporary file failed — or, with
+    /// [`std::io::ErrorKind::InvalidData`], the endpoint reported success but
+    /// sent something other than CSV, such as a proxy's HTML error page.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
@@ -112,6 +115,17 @@ impl Wikidata {
             )
             .send()
             .await?;
+        // An HTML error page from a proxy, served with status 200, would
+        // otherwise come back as rows of "CSV".
+        if let Some(content_type) = res.headers().get(reqwest::header::CONTENT_TYPE) {
+            let content_type = String::from_utf8_lossy(content_type.as_bytes());
+            if !may_be_csv(&content_type) {
+                return Err(WikidataError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("SPARQL endpoint sent {content_type:?} where CSV was expected"),
+                )));
+            }
+        }
         while let Some(chunk) = res.chunk().await? {
             f.write_all(chunk.as_ref())?;
         }
@@ -312,6 +326,32 @@ http://www.wikidata.org/entity/Q5,five\r\n";
         wd.set_api_url(&format!("{}{}", server.uri(), API_PATH));
         let _ = wd.load_sparql_csv(sparql).await.unwrap();
         // expect(1) + drop runs the verifier and panics if the request did not arrive.
+    }
+
+    #[tokio::test]
+    async fn test_load_sparql_csv_rejects_html_served_as_success() {
+        use crate::test_support::{wikidata_for, SPARQL_PATH};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(SPARQL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "<!DOCTYPE html>\n<title>Wikimedia Error</title>",
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+
+        let wd = wikidata_for(&server);
+        match wd.load_sparql_csv("SELECT ?x {}").await {
+            Err(WikidataError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert!(error.to_string().contains("text/html"), "{error}");
+            }
+            other => panic!("got {other:?}"),
+        }
     }
 
     #[test]

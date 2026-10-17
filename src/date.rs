@@ -8,10 +8,10 @@
 //!   UTC year fails to parse. This catches typos like `3000` when the input
 //!   should have been `2000`. If you need to represent future dates, parse
 //!   them yourself.
-//! - **BCE years are not supported.** The regex always prepends `+` to the
-//!   captured year, so explicitly negative inputs like `-0500-01-01T00:00:00Z/11`
-//!   produce a malformed timestamp and fail. Wikidata represents BCE years
-//!   via Julian-calendar items rather than negative years anyway.
+//! - **BCE years are not supported.** The Wikibase-style patterns accept an
+//!   optional leading `+` (as in Wikidata's canonical `+1776-07-04T00:00:00Z/11`)
+//!   but no `-`, so explicitly negative inputs like `-0500-01-01T00:00:00Z/11`
+//!   are not recognised and fail.
 //! - **Two-digit years are rejected.** The patterns require `\d{3,}`, so a
 //!   bare `99` will not parse. This avoids ambiguity between, e.g., 1999 and 99.
 
@@ -64,17 +64,17 @@ static DATES: LazyLock<Vec<(Regex, String, u64)>> = LazyLock::new(|| {
             9,
         ),
         (
-            r"^([+-]?\d{3,})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}Z/11$",
+            r"^\+?(\d{3,})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}Z/11$",
             "+${1}-${2}-${3}T00:00:00Z",
             11,
         ),
         (
-            r"^([+-]?\d{3,})-(\d{2})-0[01]T\d{2}:\d{2}:\d{2}Z/10$",
+            r"^\+?(\d{3,})-(\d{2})-0[01]T\d{2}:\d{2}:\d{2}Z/10$",
             "+${1}-${2}-00T00:00:00Z",
             10,
         ),
         (
-            r"^([+-]?\d{3,})-0[01]-0[01]T\d{2}:\d{2}:\d{2}Z/9$",
+            r"^\+?(\d{3,})-0[01]-0[01]T\d{2}:\d{2}:\d{2}Z/9$",
             "+${1}-00-00T00:00:00Z",
             9,
         ),
@@ -354,22 +354,38 @@ mod tests {
 
     #[test]
     fn test_bce_year_not_supported() {
-        // The regex patterns always prepend '+' to the captured year group, so
-        // negative-year inputs produce a malformed time string that fails i16 parsing.
+        // The Wikibase-style patterns accept a leading '+' but not '-'.
         // BCE years are not supported by Date::from_str.
-        assert!(Date::from_str("-0500-01-01T00:00:00Z/11").is_err());
-        assert!(Date::from_str("-1000-01-01T00:00:00Z/9").is_err());
+        for s in [
+            "-0500-01-01T00:00:00Z/11",
+            "-0500-01-00T00:00:00Z/10",
+            "-1000-01-01T00:00:00Z/9",
+        ] {
+            assert!(
+                matches!(Date::from_str(s), Err(DateError::Unparsable(_))),
+                "{s}"
+            );
+        }
     }
 
     #[test]
     fn test_positive_signed_year_via_wikibase_format() {
-        // The wikibase /11 format with an explicit '+' prefix: the regex captures
-        // '+1776' as group 1, and the replacement prepends another '+', yielding
-        // '++1776-...' which fails i16 parsing. Only bare (unsigned) years work here.
-        assert!(Date::from_str("+1776-07-04T00:00:00Z/11").is_err());
-        // The unsuffixed form (bare digits) is what works for positive years.
-        let d = Date::from_str("1776-07-04").unwrap();
+        // Regression: Wikidata's canonical form carries an explicit '+', which
+        // the replacement used to double into '++1776-…'.
+        let d = Date::from_str("+1776-07-04T00:00:00Z/11").unwrap();
         assert_eq!(d.time(), "+1776-07-04T00:00:00Z");
+        assert_eq!(d.precision(), 11);
+        let d = Date::from_str("+1776-07-00T00:00:00Z/10").unwrap();
+        assert_eq!(d.time(), "+1776-07-00T00:00:00Z");
+        assert_eq!(d.precision(), 10);
+        let d = Date::from_str("+1776-00-00T00:00:00Z/9").unwrap();
+        assert_eq!(d.time(), "+1776-00-00T00:00:00Z");
+        assert_eq!(d.precision(), 9);
+        // The unsigned form keeps working.
+        let d = Date::from_str("1776-07-04T00:00:00Z/11").unwrap();
+        assert_eq!(d.time(), "+1776-07-04T00:00:00Z");
+        // One sign only.
+        assert!(Date::from_str("++1776-07-04T00:00:00Z/11").is_err());
     }
 
     #[test]

@@ -73,7 +73,8 @@ pub enum DatabaseError {
     #[error("no [client] user and password in credentials file '{path}'")]
     MalformedCredentials { path: String },
 
-    /// The configured `url` is not a valid MySQL connection URL.
+    /// The configured `url` is not a valid MySQL connection URL, or a wiki
+    /// name cannot be part of one (reported as an invalid `wiki` parameter).
     #[error(transparent)]
     Url(#[from] mysql_async::UrlError),
 
@@ -158,22 +159,53 @@ impl Default for PoolSettings {
 
 impl PoolSettings {
     /// Reads the settings from a JSON config object, falling back to the
-    /// default for every key that is absent or not a number. Recognised keys
-    /// are `min_connections`, `max_connections`, `keep_sec` and
-    /// `max_statement_time` (in seconds, decimals allowed).
+    /// default for every key that is absent or not a usable number. Recognised
+    /// keys are `min_connections`, `max_connections`, `keep_sec` and
+    /// `max_statement_time` (in seconds, decimals allowed; 0 means no limit).
     pub fn from_json(config: &Value) -> Self {
-        let default = Self::default();
+        Self::default().overridden_by_json(config)
+    }
+
+    /// These settings, with every key `config` sets taken from it instead; see
+    /// [`Self::from_json`] for the keys.
+    fn overridden_by_json(self, config: &Value) -> Self {
         Self {
             min_connections: config["min_connections"]
                 .as_u64()
-                .map_or(default.min_connections, |value| value as usize),
+                .map_or(self.min_connections, |value| value as usize),
             max_connections: config["max_connections"]
                 .as_u64()
-                .map_or(default.max_connections, |value| value as usize),
-            keep_sec: config["keep_sec"].as_u64().unwrap_or(default.keep_sec),
+                .map_or(self.max_connections, |value| value as usize),
+            keep_sec: config["keep_sec"].as_u64().unwrap_or(self.keep_sec),
             max_statement_time: config["max_statement_time"]
                 .as_f64()
-                .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok()),
+                .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+                .map_or(self.max_statement_time, |limit| limit_or_none(Some(limit))),
+        }
+    }
+
+    /// These settings, with the pool parameters a connection URL sets taken
+    /// from it instead: `pool_min`, `pool_max` and `inactive_connection_ttl`,
+    /// whose values `mysql_async` has already parsed into `url_pool_opts`.
+    /// A parameter the URL does not mention keeps the current setting rather
+    /// than `mysql_async`'s default, which would break the policy.
+    fn overridden_by_url(self, url: &str, url_pool_opts: &PoolOpts) -> Self {
+        let given = |param: &str| url_query_keys(url).any(|key| key == param);
+        let constraints = url_pool_opts.constraints();
+        Self {
+            min_connections: match given("pool_min") {
+                true => constraints.min(),
+                false => self.min_connections,
+            },
+            max_connections: match given("pool_max") {
+                true => constraints.max(),
+                false => self.max_connections,
+            },
+            keep_sec: match given("inactive_connection_ttl") {
+                true => url_pool_opts.inactive_connection_ttl().as_secs(),
+                false => self.keep_sec,
+            },
+            ..self
         }
     }
 
@@ -201,14 +233,19 @@ impl PoolSettings {
 
     /// Caps how long a single query may run, by issuing MariaDB's
     /// [`SET max_statement_time`](https://wikitech.wikimedia.org/wiki/Help:Toolforge/Database#Query_Limits)
-    /// on every new connection in the pool.
+    /// on every connection in the pool, each time it is opened or reset for
+    /// reuse.
     ///
     /// Worth setting: the replicas kill a query at 5 minutes on the `web`
     /// service name and 3 hours on `analytics`, and a self-imposed limit fails
     /// a runaway query where the caller can see it. MariaDB-only — MySQL calls
     /// this `max_execution_time` and counts milliseconds.
+    ///
+    /// A zero limit is the same as `None`, as it is to MariaDB: no limit. A
+    /// limit below MariaDB's one-microsecond resolution is rounded up to it
+    /// rather than down to zero.
     pub fn with_max_statement_time(mut self, max_statement_time: Option<Duration>) -> Self {
-        self.max_statement_time = max_statement_time;
+        self.max_statement_time = limit_or_none(max_statement_time);
         self
     }
 
@@ -228,7 +265,9 @@ impl PoolSettings {
         self.max_statement_time
     }
 
-    fn pool_opts(&self) -> Result<PoolOpts, DatabaseError> {
+    /// `base` with these settings applied. Whatever else `base` holds, such as
+    /// a URL's `reset_connection`, is kept.
+    fn pool_opts(&self, base: PoolOpts) -> Result<PoolOpts, DatabaseError> {
         // `PoolConstraints::new` rejects min > max, and both values can come
         // straight from a caller's JSON, so this must be an error rather than
         // a panic.
@@ -238,18 +277,43 @@ impl PoolSettings {
                 max: self.max_connections,
             },
         )?;
-        Ok(PoolOpts::default()
+        Ok(base
             .with_constraints(constraints)
             .with_inactive_connection_ttl(Duration::from_secs(self.keep_sec)))
     }
 
-    /// The statements to run on every new connection.
-    fn init_commands(&self) -> Vec<String> {
+    /// The statements to run on every connection, both when it is opened and
+    /// each time the pool resets it for reuse. They have to be `setup` rather
+    /// than `init` statements: the reset (`COM_RESET_CONNECTION`) clears
+    /// session variables, and only `setup` statements are run again after it.
+    fn setup_commands(&self) -> Vec<String> {
         self.max_statement_time
-            .map(|limit| format!("SET max_statement_time = {}", limit.as_secs_f64()))
+            .map(|limit| format!("SET max_statement_time = {}", statement_time_secs(limit)))
             .into_iter()
             .collect()
     }
+}
+
+/// `None` for a zero limit, which MariaDB reads as "no limit" anyway.
+fn limit_or_none(limit: Option<Duration>) -> Option<Duration> {
+    limit.filter(|limit| !limit.is_zero())
+}
+
+/// A statement time limit in seconds, rounded up to MariaDB's resolution of a
+/// microsecond: MariaDB truncates anything finer, and a limit truncated to
+/// zero would be no limit at all.
+fn statement_time_secs(limit: Duration) -> f64 {
+    limit.as_nanos().div_ceil(1_000) as f64 / 1e6
+}
+
+/// The parameter names in a connection URL's query string. Only good for
+/// telling which parameters are present: `mysql_async` parses the values.
+fn url_query_keys(url: &str) -> impl Iterator<Item = &str> {
+    let query = url.split_once('?').map_or("", |(_, query)| query);
+    let query = query.split_once('#').map_or(query, |(query, _)| query);
+    query
+        .split('&')
+        .map(|pair| pair.split_once('=').map_or(pair, |(key, _)| key))
 }
 
 /// A production database section, such as `s4`: the cluster a wiki's core
@@ -472,7 +536,6 @@ impl HostSchema {
     }
 }
 
-#[derive(Debug)]
 pub struct ToolforgeDB {
     mysql_pools: HashMap<String, mysql_async::Pool>,
     is_on_toolforge: bool,
@@ -493,12 +556,37 @@ impl Default for ToolforgeDB {
     }
 }
 
+/// Written by hand because `mysql_async::Pool`'s `Debug` prints its connection
+/// options, password included: only the pool names are shown.
+impl std::fmt::Debug for ToolforgeDB {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut pools: Vec<&str> = self.mysql_pools.keys().map(String::as_str).collect();
+        pools.sort_unstable();
+        f.debug_struct("ToolforgeDB")
+            .field("mysql_pools", &pools)
+            .field("is_on_toolforge", &self.is_on_toolforge)
+            .field("server_group", &self.server_group)
+            .field("pool_settings", &self.pool_settings)
+            .field("port", &self.port)
+            .finish()
+    }
+}
+
 impl ToolforgeDB {
     /// Registers a connection pool built from a JSON config object under
-    /// `key`. Recognised keys are `url` (required), `min_connections`
-    /// (default 0), `max_connections` (default 10), `keep_sec` (default 1, the
-    /// idle-connection TTL in seconds) and `max_statement_time` (in seconds,
-    /// decimals allowed, unset by default).
+    /// `key`. Recognised keys are `url` (required), `min_connections`,
+    /// `max_connections`, `keep_sec` (the idle-connection TTL in seconds) and
+    /// `max_statement_time` (in seconds, decimals allowed, 0 for no limit).
+    ///
+    /// Each setting comes from the first of these that has it: the JSON key;
+    /// the URL's `pool_min`, `pool_max` or `inactive_connection_ttl`
+    /// parameter; and [`Self::pool_settings`], which are
+    /// [`PoolSettings::default()`] (minimum 0, maximum 10, `keep_sec` 1, no
+    /// statement limit) unless [`Self::set_pool_settings`] said otherwise.
+    /// Other pool parameters in the URL, such as `reset_connection`, are kept.
+    /// Mind that `mysql_async` checks the URL on its own first, against *its*
+    /// default minimum of 10, so a URL giving a `pool_max` below 10 must give
+    /// `pool_min` too.
     ///
     /// The defaults follow the Toolforge [connection handling
     /// policy](https://wikitech.wikimedia.org/wiki/Help:Wiki_Replicas#Connection_handling_policy):
@@ -508,34 +596,42 @@ impl ToolforgeDB {
     /// instance — a pool that keeps idle connections against a shared server
     /// will have them killed.
     pub fn add_mysql_pool(&mut self, key: &str, config: &Value) -> Result<(), DatabaseError> {
-        self.mysql_pools
-            .insert(key.to_string(), Self::create_pool(config)?);
+        let pool = mysql_async::Pool::new(self.opts_from_json(config)?);
+        self.mysql_pools.insert(key.to_string(), pool);
         Ok(())
     }
 
-    /// Helper function to create a DB pool from a JSON config object
-    fn create_pool(config: &Value) -> Result<mysql_async::Pool, DatabaseError> {
+    /// The connection options for an [`Self::add_mysql_pool`] config.
+    fn opts_from_json(&self, config: &Value) -> Result<Opts, DatabaseError> {
         let url = config["url"]
             .as_str()
             .ok_or(DatabaseError::MissingPoolUrl)?;
-        let opts = OptsBuilder::from_opts(Opts::from_url(url)?);
-        Self::build_pool(opts, &PoolSettings::from_json(config))
+        let opts = Opts::from_url(url)?;
+        let url_pool_opts = opts.pool_opts().clone();
+        let settings = self
+            .pool_settings
+            .clone()
+            .overridden_by_url(url, &url_pool_opts)
+            .overridden_by_json(config);
+        Self::apply_pool_settings(OptsBuilder::from_opts(opts), url_pool_opts, &settings)
     }
 
-    /// Applies [`PoolSettings`] to connection options and builds the pool.
-    fn build_pool(
+    /// Applies [`PoolSettings`] to connection options, on top of the pool
+    /// options in `base`.
+    fn apply_pool_settings(
         opts: OptsBuilder,
+        base: PoolOpts,
         settings: &PoolSettings,
-    ) -> Result<mysql_async::Pool, DatabaseError> {
-        let opts = opts.pool_opts(settings.pool_opts()?);
-        let init_commands = settings.init_commands();
-        // `init` replaces whatever the connection URL asked for, so only touch
-        // it when there is something to say.
-        let opts = match init_commands.is_empty() {
+    ) -> Result<Opts, DatabaseError> {
+        let opts = opts.pool_opts(settings.pool_opts(base)?);
+        let setup_commands = settings.setup_commands();
+        // `setup` replaces any earlier setup statements. A connection URL
+        // cannot give any, but only touch it when there is something to say.
+        let opts = match setup_commands.is_empty() {
             true => opts,
-            false => opts.init(init_commands),
+            false => opts.setup(setup_commands),
         };
-        Ok(mysql_async::Pool::new(opts))
+        Ok(opts.into())
     }
 
     /// The settings new pools are built with. [`PoolSettings::default()`]
@@ -675,21 +771,48 @@ impl ToolforgeDB {
             .user(Some(credentials.user()))
             .pass(Some(credentials.password()))
             .db_name(schema);
-        let pool = Self::build_pool(opts, &self.pool_settings)?;
-        self.mysql_pools.insert(key.to_string(), pool);
+        let opts = Self::apply_pool_settings(opts, PoolOpts::default(), &self.pool_settings)?;
+        self.mysql_pools
+            .insert(key.to_string(), mysql_async::Pool::new(opts));
         Ok(())
     }
 
     /// Normalizes a wiki name to its replica database name, without the `_p`
-    /// suffix: hyphens become underscores, the several spellings of
-    /// be-tarask collapse into one, and an already-suffixed name such as
-    /// `enwiki_p` loses the suffix so it does not end up doubled.
+    /// suffix: the name is lowercased, an already-suffixed name such as
+    /// `enwiki_p` loses the suffix so it does not end up doubled, hyphens
+    /// become underscores, and the several spellings of be-tarask collapse
+    /// into one.
+    ///
+    /// The result is not checked here; the host-name builders reject anything
+    /// that is not a plain database name.
     pub fn fix_wiki_db_name(wiki: &str) -> String {
-        let normalized = match wiki {
-            "be-taraskwiki" | "be-x-oldwiki" | "be_taraskwiki" | "be_x_oldwiki" => "be_x_oldwiki",
-            other => other.trim_end_matches("_p"),
-        };
-        normalized.replace('-', "_")
+        let normalized = wiki
+            .to_ascii_lowercase()
+            .trim_end_matches("_p")
+            .replace('-', "_");
+        match normalized.as_str() {
+            "be_taraskwiki" => "be_x_oldwiki".to_string(),
+            _ => normalized,
+        }
+    }
+
+    /// [`Self::fix_wiki_db_name`], refusing anything but lowercase ASCII
+    /// letters, digits and underscores. The name becomes part of a host name,
+    /// so a `.` or other stray character could send the connection — and the
+    /// tool's credentials — to another server. Fails with
+    /// [`DatabaseError::Url`] reporting an invalid `wiki` parameter.
+    fn checked_wiki_db_name(wiki: &str) -> Result<String, DatabaseError> {
+        let name = Self::fix_wiki_db_name(wiki);
+        let plain = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_';
+        match !name.is_empty() && name.bytes().all(plain) {
+            true => Ok(name),
+            false => Err(DatabaseError::Url(
+                mysql_async::UrlError::InvalidParamValue {
+                    param: "wiki".to_string(),
+                    value: wiki.to_string(),
+                },
+            )),
+        }
     }
 
     pub fn get_pool(&self, key: &str) -> Option<&mysql_async::Pool> {
@@ -737,12 +860,16 @@ impl ToolforgeDB {
     /// [`DbCluster::Core`], where those tables still live — so a caller can
     /// always ask for [`DbCluster::Links`] when reading `pagelinks`, whatever
     /// the wiki.
+    ///
+    /// Fails with [`DatabaseError::Url`] for a wiki name that, normalized as
+    /// by [`Self::fix_wiki_db_name`], holds anything but lowercase ASCII
+    /// letters, digits and underscores.
     pub fn db_host_and_schema_for_wiki_cluster(
         &self,
         wiki: &str,
         cluster: DbCluster,
     ) -> Result<HostSchema, DatabaseError> {
-        let wiki = Self::fix_wiki_db_name(wiki);
+        let wiki = Self::checked_wiki_db_name(wiki)?;
         let cluster = match cluster.applies_to_wiki(&wiki) {
             true => cluster,
             false => DbCluster::Core,
@@ -819,6 +946,8 @@ mod tests {
     // THIS TEST REQUIRES THE ENVIRONMENT VARIABLE `TFDB` TO BE SET TO A MYSQL URL
     // ALSO, THE MYSQL SERVER MUST BE ACCESSIBLE FROM THE MACHINE RUNNING THE TEST, EG:
     // ssh magnus@tools-login.wmflabs.org -L 3308:tools-db:3306 -N &
+    // A local MariaDB works too, e.g.
+    // TFDB='mysql://user@localhost/mysql?socket=/tmp/mysql.sock'
     async fn test_db() {
         let url = match std::env::var("TFDB") {
             Ok(val) => val,
@@ -833,6 +962,27 @@ mod tests {
             .add_mysql_pool("test_bad", &json!({"url":"foobar"}))
             .is_err());
         assert!(db.get_connection("test_good").await.is_ok());
+
+        // The statement limit must still be in force on a connection the pool
+        // has reset and handed out again, not only on a fresh one. One
+        // connection at most, so the second checkout has to reuse the first.
+        use mysql_async::prelude::Queryable;
+        db.add_mysql_pool(
+            "limited",
+            &json!({"url": url, "min_connections": 0, "max_connections": 1, "max_statement_time": 42}),
+        )
+        .unwrap();
+        let mut ids = vec![];
+        for _ in 0..2 {
+            let mut conn = db.get_connection("limited").await.unwrap();
+            let limit: Option<f64> = conn
+                .query_first("SELECT @@max_statement_time")
+                .await
+                .unwrap();
+            assert_eq!(limit, Some(42.0));
+            ids.push(conn.id());
+        }
+        assert_eq!(ids[0], ids[1], "the connection was not reused");
     }
 
     #[test]
@@ -858,6 +1008,108 @@ mod tests {
             "be_x_oldwiki"
         );
         assert_eq!(ToolforgeDB::fix_wiki_db_name("enwiki"), "enwiki");
+    }
+
+    #[test]
+    fn test_fix_wiki_db_name_strips_suffix_and_case_first() {
+        // The be-tarask alias must apply after `_p` is stripped ...
+        for wiki in ["be-taraskwiki_p", "be_taraskwiki_p", "be-x-oldwiki_p"] {
+            assert_eq!(
+                ToolforgeDB::fix_wiki_db_name(wiki),
+                "be_x_oldwiki",
+                "{wiki}"
+            );
+        }
+        // ... and after lowercasing, which also catches an uppercase suffix.
+        assert_eq!(
+            ToolforgeDB::fix_wiki_db_name("Be-TaraskWiki"),
+            "be_x_oldwiki"
+        );
+        assert_eq!(ToolforgeDB::fix_wiki_db_name("ENWIKI_P"), "enwiki");
+        assert_eq!(ToolforgeDB::fix_wiki_db_name("CommonsWiki"), "commonswiki");
+        // A mixed-case Commons must still find its links split.
+        assert!(DbCluster::Links.applies_to_wiki("CommonsWiki"));
+        assert_eq!(
+            on_toolforge()
+                .db_host_and_schema_for_wiki_tables("CommonsWiki", &["pagelinks"])
+                .unwrap(),
+            HostSchema::new(
+                "links.commonswiki.web.db.svc.wikimedia.cloud",
+                "commonswiki_p"
+            )
+        );
+    }
+
+    #[test]
+    fn test_wiki_names_that_are_no_database_name_are_rejected() {
+        // The wiki name goes into a host name: anything that could redirect
+        // the connection, and the credentials with it, must be refused.
+        for db in [on_toolforge(), ToolforgeDB::default()] {
+            for wiki in [
+                "x.evil",
+                "evil.com#",
+                "en wiki",
+                "enwiki/",
+                "ünwiki",
+                "",
+                "_p",
+            ] {
+                let err = db
+                    .db_host_and_schema_for_wiki_cluster(wiki, DbCluster::Core)
+                    .unwrap_err();
+                assert!(
+                    matches!(
+                        &err,
+                        DatabaseError::Url(mysql_async::UrlError::InvalidParamValue { param, value })
+                            if param == "wiki" && value == wiki
+                    ),
+                    "{wiki:?}: expected an invalid wiki parameter, got: {err:?}"
+                );
+                assert!(db.db_host_and_schema_for_wiki(wiki).is_err());
+                assert!(db
+                    .db_host_and_schema_for_wiki_tables(wiki, &["page"])
+                    .is_err());
+            }
+        }
+        // Rejected before any credentials are looked for, so this holds off
+        // Toolforge too.
+        let mut db = on_toolforge();
+        assert!(matches!(
+            db.add_replica_pool("x", "x.evil", &["page"]),
+            Err(DatabaseError::Url(_))
+        ));
+        assert!(matches!(
+            db.add_replica_pool_for_cluster("x", "x.evil", DbCluster::Links),
+            Err(DatabaseError::Url(_))
+        ));
+        assert!(db.get_pool("x").is_none());
+        // Ordinary names, digits included, still pass.
+        assert!(db.db_host_and_schema_for_wiki("wikidatawiki").is_ok());
+        assert!(db.db_host_and_schema_for_wiki("de2wiki").is_ok());
+    }
+
+    #[test]
+    fn test_debug_does_not_leak_passwords() {
+        // `mysql_async::Pool`'s own `Debug` prints the connection password.
+        let mut db = on_toolforge();
+        db.add_pool_for(
+            "replica",
+            &HostSchema::new("enwiki.web.db.svc.wikimedia.cloud", "enwiki_p"),
+            &Credentials::new("u12345", "sekrit-one"),
+        )
+        .unwrap();
+        db.add_mysql_pool(
+            "json",
+            &json!({"url": "mysql://u2:sekrit-two@127.0.0.1:3306/d"}),
+        )
+        .unwrap();
+        let debug = format!("{db:?}");
+        assert!(!debug.contains("sekrit"), "{debug}");
+        assert!(debug.contains("\"json\""), "{debug}");
+        assert!(debug.contains("\"replica\""), "{debug}");
+        // The pool itself does leak, which is why it is kept out.
+        let pool_debug = format!("{:?}", db.get_pool("replica").unwrap());
+        assert!(pool_debug.contains("sekrit-one"), "{pool_debug}");
     }
 
     #[test]
@@ -1090,7 +1342,7 @@ mod tests {
         // One second, so connections are reused but not hoarded.
         assert_eq!(settings.keep_sec(), 1);
         assert_eq!(settings.max_statement_time(), None);
-        assert!(settings.init_commands().is_empty());
+        assert!(settings.setup_commands().is_empty());
     }
 
     #[test]
@@ -1125,16 +1377,74 @@ mod tests {
     }
 
     #[test]
-    fn test_max_statement_time_becomes_an_init_command() {
-        // The limit has to be set per connection, so it rides along as an init
+    fn test_max_statement_time_becomes_a_setup_command() {
+        // The limit has to be set per connection, so it rides along as a setup
         // statement rather than being applied once.
         let settings =
             PoolSettings::default().with_max_statement_time(Some(Duration::from_secs(300)));
-        assert_eq!(settings.init_commands(), ["SET max_statement_time = 300"]);
+        assert_eq!(settings.setup_commands(), ["SET max_statement_time = 300"]);
         // Sub-second limits are legal: MariaDB takes decimals.
         let settings =
             PoolSettings::default().with_max_statement_time(Some(Duration::from_millis(1500)));
-        assert_eq!(settings.init_commands(), ["SET max_statement_time = 1.5"]);
+        assert_eq!(settings.setup_commands(), ["SET max_statement_time = 1.5"]);
+    }
+
+    #[test]
+    fn test_zero_max_statement_time_is_no_limit() {
+        // MariaDB reads 0 as "no limit", so it must not be sent as if it were
+        // one -- whether it comes from code or from JSON.
+        let settings = PoolSettings::default().with_max_statement_time(Some(Duration::ZERO));
+        assert_eq!(settings.max_statement_time(), None);
+        assert!(settings.setup_commands().is_empty());
+        for value in [json!(0), json!(0.0), json!(1e-12)] {
+            let settings = PoolSettings::from_json(&json!({ "max_statement_time": value }));
+            assert_eq!(settings.max_statement_time(), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn test_tiny_max_statement_time_is_rounded_up() {
+        // MariaDB truncates to microseconds, which would turn a tiny positive
+        // limit into 0, i.e. none at all.
+        for limit in [Duration::from_nanos(1), Duration::from_nanos(100)] {
+            let settings = PoolSettings::default().with_max_statement_time(Some(limit));
+            assert_eq!(
+                settings.setup_commands(),
+                ["SET max_statement_time = 0.000001"]
+            );
+        }
+        let settings =
+            PoolSettings::default().with_max_statement_time(Some(Duration::from_nanos(1_000_001)));
+        assert_eq!(
+            settings.setup_commands(),
+            ["SET max_statement_time = 0.001001"]
+        );
+    }
+
+    #[test]
+    fn test_max_statement_time_survives_connection_reset() {
+        // `init` statements run only when a connection is opened, and the
+        // pool's reset on reuse wipes session variables; only `setup`
+        // statements are run again after it.
+        let settings =
+            PoolSettings::default().with_max_statement_time(Some(Duration::from_secs(60)));
+        let opts = ToolforgeDB::apply_pool_settings(
+            OptsBuilder::default(),
+            PoolOpts::default(),
+            &settings,
+        )
+        .unwrap();
+        assert_eq!(opts.setup(), ["SET max_statement_time = 60"]);
+        assert!(opts.init().is_empty());
+        // The same through the JSON path.
+        let opts = ToolforgeDB::default()
+            .opts_from_json(&json!({
+                "url": "mysql://u@127.0.0.1:3306/d",
+                "max_statement_time": 60
+            }))
+            .unwrap();
+        assert_eq!(opts.setup(), ["SET max_statement_time = 60"]);
+        assert!(opts.init().is_empty());
     }
 
     #[test]
@@ -1142,7 +1452,7 @@ mod tests {
         let err = PoolSettings::default()
             .with_min_connections(10)
             .with_max_connections(2)
-            .pool_opts()
+            .pool_opts(PoolOpts::default())
             .unwrap_err();
         assert!(
             matches!(
@@ -1370,6 +1680,87 @@ mod tests {
         db.add_mysql_pool("defaults", &json!({"url": "mysql://u@127.0.0.1:3306/d"}))
             .unwrap();
         assert!(db.get_pool("defaults").is_some());
+    }
+
+    /// The pool options `add_mysql_pool` would build for `config`.
+    fn json_pool_opts(db: &ToolforgeDB, config: Value) -> PoolOpts {
+        db.opts_from_json(&config).unwrap().pool_opts().clone()
+    }
+
+    #[test]
+    fn test_add_mysql_pool_without_settings_follows_the_policy() {
+        // Not `mysql_async`'s own defaults (min 10, max 100, TTL 0).
+        let opts = json_pool_opts(
+            &ToolforgeDB::default(),
+            json!({"url": "mysql://u@127.0.0.1:3306/d"}),
+        );
+        assert_eq!(opts.constraints().min(), 0);
+        assert_eq!(opts.constraints().max(), 10);
+        assert_eq!(opts.inactive_connection_ttl(), Duration::from_secs(1));
+        assert!(opts.reset_connection());
+    }
+
+    #[test]
+    fn test_add_mysql_pool_falls_back_to_pool_settings() {
+        // Keys missing from the JSON come from `set_pool_settings`, ...
+        let db = ToolforgeDB::default().with_pool_settings(
+            PoolSettings::default()
+                .with_max_connections(4)
+                .with_keep_sec(5)
+                .with_max_statement_time(Some(Duration::from_secs(30))),
+        );
+        let opts = db
+            .opts_from_json(&json!({"url": "mysql://u@127.0.0.1:3306/d", "keep_sec": 2}))
+            .unwrap();
+        assert_eq!(opts.pool_opts().constraints().max(), 4);
+        assert_eq!(opts.setup(), ["SET max_statement_time = 30"]);
+        // ... while the keys it does give win.
+        assert_eq!(
+            opts.pool_opts().inactive_connection_ttl(),
+            Duration::from_secs(2)
+        );
+        // An explicit 0 lifts the statement limit the fallback would set.
+        let opts = db
+            .opts_from_json(&json!({"url": "mysql://u@127.0.0.1:3306/d", "max_statement_time": 0}))
+            .unwrap();
+        assert!(opts.setup().is_empty());
+    }
+
+    #[test]
+    fn test_add_mysql_pool_keeps_url_pool_parameters() {
+        let db = ToolforgeDB::default();
+        let url = "mysql://u@127.0.0.1:3306/d?pool_min=0&pool_max=2\
+                   &inactive_connection_ttl=7&reset_connection=false&ttl_check_interval=9";
+        let opts = json_pool_opts(&db, json!({ "url": url }));
+        assert_eq!(opts.constraints().min(), 0);
+        assert_eq!(opts.constraints().max(), 2);
+        assert_eq!(opts.inactive_connection_ttl(), Duration::from_secs(7));
+        // Parameters `PoolSettings` has no say over are kept as well.
+        assert!(!opts.reset_connection());
+        assert_eq!(opts.ttl_check_interval(), Duration::from_secs(9));
+
+        // A key given in the JSON overrides the URL ...
+        let opts = json_pool_opts(
+            &db,
+            json!({ "url": url, "max_connections": 3, "keep_sec": 1 }),
+        );
+        assert_eq!(opts.constraints().max(), 3);
+        assert_eq!(opts.inactive_connection_ttl(), Duration::from_secs(1));
+        assert!(!opts.reset_connection());
+
+        // ... and a parameter the URL leaves out takes the policy default, not
+        // `mysql_async`'s maximum of 100.
+        let opts = json_pool_opts(&db, json!({"url": "mysql://u@127.0.0.1:3306/d?pool_min=0"}));
+        assert_eq!(opts.constraints().max(), 10);
+        assert_eq!(opts.inactive_connection_ttl(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_url_query_keys() {
+        let keys = |url| url_query_keys(url).collect::<Vec<_>>();
+        assert_eq!(keys("mysql://h/d?a=1&b&c=x=y#frag"), ["a", "b", "c"]);
+        assert_eq!(keys("mysql://h/d"), [""]);
+        assert!(!url_query_keys("mysql://h/d#pool_min=1").any(|key| key == "pool_min"));
     }
 
     #[tokio::test]

@@ -82,6 +82,9 @@ impl TelemetryRecorder {
     /// Current values. Histogram observations are drained, so each snapshot
     /// sees those made since the previous one; `histogram_totals` carries the
     /// running count and sum per histogram between snapshots.
+    ///
+    /// NaN and infinite values are left out: JSON has no way to send them,
+    /// and a single one would turn a histogram's running sum into NaN for good.
     pub(crate) fn snapshot(
         &self,
         histogram_totals: &mut HashMap<Key, (f64, f64)>,
@@ -96,16 +99,15 @@ impl TelemetryRecorder {
             ));
         });
         self.registry.visit_gauges(|key, gauge| {
-            ret.push(metric(
-                key.name(),
-                key,
-                MetricKind::Gauge,
-                f64::from_bits(gauge.load(Ordering::Relaxed)),
-            ));
+            let value = f64::from_bits(gauge.load(Ordering::Relaxed));
+            if value.is_finite() {
+                ret.push(metric(key.name(), key, MetricKind::Gauge, value));
+            }
         });
         self.registry.visit_histograms(|key, histogram| {
             let mut values = Vec::new();
-            histogram.clear_with(|chunk| values.extend_from_slice(chunk));
+            histogram
+                .clear_with(|chunk| values.extend(chunk.iter().copied().filter(|v| v.is_finite())));
             let totals = histogram_totals.entry(key.clone()).or_insert((0.0, 0.0));
             totals.0 += values.len() as f64;
             totals.1 += values.iter().sum::<f64>();
@@ -215,6 +217,27 @@ mod tests {
         let snap = recorder.snapshot(&mut totals);
         assert_eq!(find(&snap, "latency_count").unwrap().value, 4.0);
         assert!(find(&snap, "latency_p50").is_none());
+    }
+
+    #[test]
+    fn test_non_finite_values_are_left_out() {
+        let recorder = TelemetryRecorder::new(HashSet::new());
+        metrics::with_local_recorder(&recorder, || {
+            metrics::gauge!("broken").set(f64::NAN);
+            metrics::gauge!("infinite").set(f64::INFINITY);
+            for v in [1.0, f64::NAN, f64::NEG_INFINITY, 3.0] {
+                metrics::histogram!("latency").record(v);
+            }
+        });
+        let mut totals = HashMap::new();
+        let snap = recorder.snapshot(&mut totals);
+
+        assert!(find(&snap, "broken").is_none());
+        assert!(find(&snap, "infinite").is_none());
+        assert_eq!(find(&snap, "latency_count").unwrap().value, 2.0);
+        assert_eq!(find(&snap, "latency_sum").unwrap().value, 4.0);
+        assert_eq!(find(&snap, "latency_max").unwrap().value, 3.0);
+        assert!(snap.iter().all(|m| m.value.is_finite()));
     }
 
     #[test]

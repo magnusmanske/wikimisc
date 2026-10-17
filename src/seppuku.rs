@@ -47,7 +47,15 @@ impl Seppuku {
     }
 
     /// Arms the seppuku timer.
+    ///
+    /// Must be called from within a tokio runtime, which runs the timer.
+    /// Outside one, it prints a warning to stderr and stays unarmed, so the
+    /// process is never killed; a later call from within a runtime arms it.
     pub fn arm(&self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            eprintln!("Seppuku not armed: arm() was called outside a tokio runtime");
+            return;
+        };
         {
             let mut armed = lock(&self.armed);
             if *armed {
@@ -56,7 +64,7 @@ impl Seppuku {
             self.alive();
             *armed = true;
         }
-        self.start_timer();
+        self.start_timer(&runtime);
     }
 
     /// Disarms the seppuku timer.
@@ -77,7 +85,7 @@ impl Seppuku {
     /// sleeping for the full `max_seconds`. Without this, an `alive()` call
     /// late in the window could push the actual fire time out to nearly
     /// `2 * max_seconds` past the last activity.
-    fn start_timer(&self) {
+    fn start_timer(&self, runtime: &tokio::runtime::Handle) {
         let mut timer_running = lock(&self.timer_running);
         if *timer_running {
             // Already running
@@ -88,7 +96,7 @@ impl Seppuku {
         let last_activity = self.last_activity.clone();
         let armed = self.armed.clone();
         *timer_running = true;
-        tokio::spawn(async move {
+        runtime.spawn(async move {
             loop {
                 let elapsed = lock(&last_activity).elapsed();
                 if *lock(&armed) && elapsed >= max {
@@ -144,6 +152,24 @@ mod tests {
 
         let after = *seppuku.last_activity.lock().unwrap();
         assert!(after > before);
+    }
+
+    #[test]
+    fn test_arm_outside_a_runtime_does_nothing() {
+        // Must not panic (tokio::spawn would), and must not leave `armed` set
+        // without a timer, which would make a later arm() a no-op.
+        let seppuku = Seppuku::new(60);
+        seppuku.arm();
+        assert!(!*seppuku.armed.lock().unwrap());
+        assert!(!*seppuku.timer_running.lock().unwrap());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async { seppuku.arm() });
+        assert!(*seppuku.armed.lock().unwrap());
+        assert!(*seppuku.timer_running.lock().unwrap());
     }
 
     #[tokio::test]

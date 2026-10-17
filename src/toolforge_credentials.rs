@@ -17,6 +17,7 @@
 //! [`DbService`] keeps them apart because the docs say that may change.
 
 use crate::toolforge_db::DatabaseError;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Name of the credentials file in the tool's home directory.
@@ -101,22 +102,40 @@ impl Credentials {
     /// its variables are set and non-empty.
     pub fn from_env(service: DbService) -> Option<Self> {
         let (user_var, password_var) = service.env_vars();
-        let user = std::env::var(user_var).ok()?;
-        let password = std::env::var(password_var).ok()?;
-        match user.is_empty() {
-            true => None,
-            false => Some(Self::new(&user, &password)),
-        }
+        Self::from_non_empty(
+            std::env::var(user_var).ok(),
+            std::env::var(password_var).ok(),
+        )
+    }
+
+    /// Credentials from a user and password that are both present and
+    /// non-empty.
+    fn from_non_empty(user: Option<String>, password: Option<String>) -> Option<Self> {
+        let user = user.filter(|user| !user.is_empty())?;
+        let password = password.filter(|password| !password.is_empty())?;
+        Some(Self { user, password })
     }
 
     /// Where `replica.my.cnf` is, preferring `$TOOL_DATA_DIR` over `$HOME`.
     /// `None` if neither directory holds one.
     pub fn my_cnf_path() -> Option<PathBuf> {
-        ["TOOL_DATA_DIR", "HOME"]
-            .iter()
-            .filter_map(std::env::var_os)
+        Self::my_cnf_candidates(
+            ["TOOL_DATA_DIR", "HOME"]
+                .iter()
+                .filter_map(std::env::var_os),
+        )
+        .find(|path| path.is_file())
+    }
+
+    /// Where `replica.my.cnf` would be in each of `dirs`. An empty entry is
+    /// skipped rather than read as the current directory, which is what
+    /// joining onto an empty path would mean.
+    fn my_cnf_candidates(
+        dirs: impl IntoIterator<Item = OsString>,
+    ) -> impl Iterator<Item = PathBuf> {
+        dirs.into_iter()
+            .filter(|dir| !dir.is_empty())
             .map(|dir| Path::new(&dir).join(MY_CNF_FILE))
-            .find(|path| path.is_file())
     }
 
     /// Reads credentials from a `my.cnf`-style file.
@@ -124,7 +143,8 @@ impl Credentials {
     /// Only the `user` and `password` of the `[client]` section are read, and
     /// only as much of the format as Toolforge's generated file uses: one
     /// `key = value` per line, values optionally wrapped in single or double
-    /// quotes, `#` and `;` starting a comment.
+    /// quotes, `#` and `;` starting a comment, also after a section header. A
+    /// leading UTF-8 byte order mark is ignored.
     pub fn from_my_cnf(path: &Path) -> Result<Self, DatabaseError> {
         let contents =
             std::fs::read_to_string(path).map_err(|source| DatabaseError::CredentialsFile {
@@ -140,13 +160,18 @@ impl Credentials {
         let mut in_client_section = false;
         let mut user = None;
         let mut password = None;
+        let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
         for line in contents.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
                 continue;
             }
             if let Some(header) = line.strip_prefix('[') {
-                let section = header.trim_end_matches(']').trim();
+                // Anything after the `]`, such as a comment, is not the name.
+                let section = header
+                    .split_once(']')
+                    .map_or(header, |(name, _)| name)
+                    .trim();
                 in_client_section = section.eq_ignore_ascii_case("client");
                 continue;
             }
@@ -234,6 +259,54 @@ mod tests {
         let credentials =
             Credentials::parse_my_cnf("[client]\nuser=u1\npassword=a=b#c'd\"e\n").unwrap();
         assert_eq!(credentials.password(), "a=b#c'd\"e");
+    }
+
+    #[test]
+    fn test_parse_my_cnf_tolerates_bom_and_header_comment() {
+        // A byte order mark from an editor, and a comment after the header,
+        // must not hide the `[client]` section.
+        let credentials =
+            Credentials::parse_my_cnf("\u{feff}[client] # generated\nuser=u1\npassword=p1\n")
+                .unwrap();
+        assert_eq!(credentials, Credentials::new("u1", "p1"));
+        let credentials = Credentials::parse_my_cnf("[client];x\nuser=u1\npassword=p1\n").unwrap();
+        assert_eq!(credentials, Credentials::new("u1", "p1"));
+        // ... while another section with a comment is still another section.
+        assert!(Credentials::parse_my_cnf("[mysql] # client\nuser=u1\npassword=p1\n").is_none());
+    }
+
+    #[test]
+    fn test_env_credentials_need_user_and_password() {
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(
+            Credentials::from_non_empty(some("u1"), some("p1")),
+            Some(Credentials::new("u1", "p1"))
+        );
+        // Anything missing or empty falls through to `replica.my.cnf`.
+        assert_eq!(Credentials::from_non_empty(some("u1"), some("")), None);
+        assert_eq!(Credentials::from_non_empty(some(""), some("p1")), None);
+        assert_eq!(Credentials::from_non_empty(some("u1"), None), None);
+        assert_eq!(Credentials::from_non_empty(None, some("p1")), None);
+    }
+
+    #[test]
+    fn test_my_cnf_candidates_skip_empty_dirs() {
+        // An empty `TOOL_DATA_DIR` or `HOME` must not turn into a relative
+        // `replica.my.cnf`, i.e. one in the current directory.
+        let candidates: Vec<PathBuf> = Credentials::my_cnf_candidates([
+            OsString::new(),
+            OsString::from("/data/project/x"),
+            OsString::new(),
+            OsString::from("/home/x"),
+        ])
+        .collect();
+        assert_eq!(
+            candidates,
+            [
+                Path::new("/data/project/x/replica.my.cnf"),
+                Path::new("/home/x/replica.my.cnf")
+            ]
+        );
     }
 
     #[test]
