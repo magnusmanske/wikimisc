@@ -106,7 +106,7 @@ pub enum ExitReason {
     Shutdown(String),
     /// The work is done (one-off runs).
     Exit,
-    /// A fatal panic; the detail is its message and location.
+    /// A fatal panic; the detail is its location (the hook leaves the message out).
     Panic(String),
     /// Killed itself because it seemed stuck or idle.
     Watchdog(String),
@@ -369,7 +369,8 @@ pub fn global() -> Option<&'static Telemetry> {
     GLOBAL.get()
 }
 
-/// Records an event if telemetry is running; a no-op otherwise.
+/// Records an event if telemetry is running; a no-op otherwise. See
+/// [`Telemetry::event`] for what must not go into the message.
 pub fn event(level: Level, message: impl Into<String>) {
     if let Some(telemetry) = global() {
         telemetry.event(level, message);
@@ -434,6 +435,11 @@ impl Telemetry {
     }
 
     /// Queues an event (shown in the dashboard's event log) for the next push.
+    ///
+    /// Telemetry leaves the service, so the message must not identify anyone:
+    /// no user names or ids, page titles, query strings, IP addresses, or raw
+    /// error text that may contain them. The same goes for [`ExitReason`]
+    /// details, which the dashboard shows publicly. Log the specifics locally.
     pub fn event(&self, level: Level, message: impl Into<String>) {
         let mut state = lock(&self.inner.state);
         if state.events.len() >= MAX_QUEUED_EVENTS {
@@ -590,11 +596,11 @@ impl Telemetry {
         let me = self.clone();
         std::panic::set_hook(Box::new(move |info| {
             previous(info);
-            let message = panic_message(info);
+            let location = panic_location(info);
             me.inner.panics.fetch_add(1, Ordering::Relaxed);
-            me.event(Level::Error, format!("panic: {message}"));
+            me.event(Level::Error, format!("panic at {location}"));
             if this_panic_ends_process() {
-                me.shutdown_blocking(ExitReason::Panic(message));
+                me.shutdown_blocking(ExitReason::Panic(format!("at {location}")));
             }
         }));
     }
@@ -749,17 +755,13 @@ fn this_panic_ends_process() -> bool {
     )
 }
 
-fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
-    let payload = info.payload();
-    let message = payload
-        .downcast_ref::<&str>()
-        .map(|s| s.to_string())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "(non-string panic payload)".to_string());
-    match info.location() {
-        Some(location) => format!("{message} at {location}"),
-        None => message,
-    }
+/// Where a panic happened, e.g. `src/main.rs:12:5`. The message is left out on
+/// purpose: it can contain whatever the code was handling (titles, user names,
+/// query strings), and the location is enough to find the bug; the full panic
+/// still goes to stderr through the previous hook.
+fn panic_location(info: &std::panic::PanicHookInfo<'_>) -> String {
+    info.location()
+        .map_or_else(|| "an unknown location".to_string(), ToString::to_string)
 }
 
 fn is_valid_component(component: &str) -> bool {

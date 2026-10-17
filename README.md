@@ -74,6 +74,9 @@ async fn example() -> Result<(), wikimisc::telemetry::TelemetryError> {
   latency from their middleware. `ignore_label("route")` merges series split by
   a label with many values; `install_alongside(prometheus_recorder)` keeps an
   existing `/metrics` endpoint working.
+- Telemetry leaves the service: event messages and exit-reason details must not identify
+  anyone (no user names or ids, page titles, query strings, IPs, raw error text). A panic is
+  reported by its source location only. Keep the specifics in the local log.
 - Pushing never blocks or fails the service. Unchanged counters are not resent,
   and a failed push is caught up by the next one.
 
