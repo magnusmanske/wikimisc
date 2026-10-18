@@ -2,21 +2,16 @@
 //!
 //! [`Wikidata`] holds a configurable user-agent string and request timeout,
 //! and constructs `reqwest::Client` / `mediawiki::Api` instances with both
-//! applied consistently. New HTTP calls against Wikidata or WDQS should go
-//! through this struct rather than building a `reqwest::Client` directly, so
-//! that the project's UA and timeout policy stay uniform.
+//! applied consistently. New HTTP calls against Wikidata should go through
+//! this struct rather than building a `reqwest::Client` directly, so that the
+//! project's UA and timeout policy stay uniform. SPARQL queries go through
+//! `sparql_client::SparqlClient` (feature `sparql-client`).
 //!
 //! Also provides [`Wikidata::item2qs`] for converting an `ItemEntity` into a
 //! QuickStatements-compatible line list.
 
-use crate::content_type::may_be_csv;
 use crate::mediawiki::reqwest::{Client, ClientBuilder};
-use std::{
-    fs::File,
-    io::{Seek, Write},
-    time::Duration,
-};
-use tempfile::tempfile;
+use std::time::Duration;
 use thiserror::Error;
 use wikibase::mediawiki::media_wiki_error::MediaWikiError;
 use wikibase::{mediawiki::Api, EntityTrait, ItemEntity, SnakType};
@@ -29,19 +24,9 @@ pub enum WikidataError {
     #[error("item2qs: item ID is not empty")]
     ItemIdNotEmpty,
 
-    /// Buffering the SPARQL response to a temporary file failed — or, with
-    /// [`std::io::ErrorKind::InvalidData`], the endpoint reported success but
-    /// sent something other than CSV, such as a proxy's HTML error page.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-
-    /// The HTTP request to the SPARQL endpoint failed.
+    /// The HTTP client could not be built.
     #[error(transparent)]
     Http(#[from] reqwest::Error),
-
-    /// The `Accept` header could not be constructed.
-    #[error(transparent)]
-    InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
 
     /// Constructing the MediaWiki API client failed.
     #[error(transparent)]
@@ -51,14 +36,12 @@ pub enum WikidataError {
 const WIKIDATA_USER_AGENT: &str = "wikimisc-wikidata/0.1.0";
 const WIKIDATA_SPARQL_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_API_URL: &str = "https://www.wikidata.org/w/api.php";
-const DEFAULT_SPARQL_URL: &str = "https://query.wikidata.org/sparql";
 
 #[derive(Debug, Clone)]
 pub struct Wikidata {
     user_agent: String,
     timeout: Duration,
     api_url: String,
-    sparql_url: String,
 }
 
 impl Default for Wikidata {
@@ -73,7 +56,6 @@ impl Wikidata {
             user_agent: WIKIDATA_USER_AGENT.to_string(),
             timeout: WIKIDATA_SPARQL_TIMEOUT,
             api_url: DEFAULT_API_URL.to_string(),
-            sparql_url: DEFAULT_SPARQL_URL.to_string(),
         }
     }
 
@@ -93,50 +75,6 @@ impl Wikidata {
             .timeout(self.timeout)
     }
 
-    #[cfg(not(doctest))]
-    /// Queries SPARQL and returns the result as a CSV reader over a temp file.
-    /// USAGE:
-    /// ```rust
-    /// let mut reader = wikidata.load_sparql_csv(&sparql).await?;
-    /// for result in reader.records() {
-    ///     let record = result?; // a malformed row is an error, not a panic
-    ///     // ...
-    /// }
-    /// ```
-    pub async fn load_sparql_csv(&self, sparql: &str) -> Result<csv::Reader<File>, WikidataError> {
-        let mut f = tempfile()?;
-        let mut res = self
-            .reqwest_client()?
-            .get(&self.sparql_url)
-            .query(&[("query", sparql)])
-            .header(
-                reqwest::header::ACCEPT,
-                reqwest::header::HeaderValue::from_str("text/csv")?,
-            )
-            .send()
-            .await?;
-        // An HTML error page from a proxy, served with status 200, would
-        // otherwise come back as rows of "CSV".
-        if let Some(content_type) = res.headers().get(reqwest::header::CONTENT_TYPE) {
-            let content_type = String::from_utf8_lossy(content_type.as_bytes());
-            if !may_be_csv(&content_type) {
-                return Err(WikidataError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("SPARQL endpoint sent {content_type:?} where CSV was expected"),
-                )));
-            }
-        }
-        while let Some(chunk) = res.chunk().await? {
-            f.write_all(chunk.as_ref())?;
-        }
-        f.seek(std::io::SeekFrom::Start(0))?;
-        Ok(csv::ReaderBuilder::new()
-            .flexible(true)
-            .has_headers(true)
-            .delimiter(b',')
-            .from_reader(f))
-    }
-
     pub fn set_user_agent(&mut self, user_agent: &str) {
         self.user_agent = user_agent.to_string();
     }
@@ -152,19 +90,8 @@ impl Wikidata {
         self.api_url = api_url.to_string();
     }
 
-    /// Overrides the SPARQL endpoint used by [`Self::load_sparql_csv`].
-    /// Default: `https://query.wikidata.org/sparql`. Primarily a test seam
-    /// for pointing at a local mock server.
-    pub fn set_sparql_url(&mut self, sparql_url: &str) {
-        self.sparql_url = sparql_url.to_string();
-    }
-
     pub fn api_url(&self) -> &str {
         &self.api_url
-    }
-
-    pub fn sparql_url(&self) -> &str {
-        &self.sparql_url
     }
 
     pub fn item2qs(item: &ItemEntity) -> Result<Vec<String>, WikidataError> {
@@ -277,82 +204,6 @@ impl Wikidata {
 mod tests {
     use super::*;
     use wikibase::*;
-
-    #[tokio::test]
-    async fn test_load_sparql_csv() {
-        use crate::test_support::{mount_sparql_csv, wikidata_for};
-        use wiremock::MockServer;
-
-        let server = MockServer::start().await;
-        // Five data rows — the test counts rows excluding the CSV header.
-        let csv = "\
-item,itemLabel\r\n\
-http://www.wikidata.org/entity/Q1,one\r\n\
-http://www.wikidata.org/entity/Q2,two\r\n\
-http://www.wikidata.org/entity/Q3,three\r\n\
-http://www.wikidata.org/entity/Q4,four\r\n\
-http://www.wikidata.org/entity/Q5,five\r\n";
-        mount_sparql_csv(&server, csv).await;
-
-        let wd = wikidata_for(&server);
-        let sparql = "SELECT ?item ?itemLabel WHERE { ?item wdt:P31 wd:Q34038. } LIMIT 5";
-        let mut reader = wd.load_sparql_csv(sparql).await.unwrap();
-        let count = reader.records().count();
-        assert_eq!(count, 5);
-    }
-
-    #[tokio::test]
-    async fn test_load_sparql_csv_sends_query_param_and_accept_header() {
-        // Verify wire-level contract: the query string is sent as `query=…` and
-        // the request advertises `Accept: text/csv`. We do this by mounting a
-        // mock that requires both, with `expect(1)` to enforce a single hit.
-        use crate::test_support::{API_PATH, SPARQL_PATH};
-        use wiremock::matchers::{header, method, path, query_param};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        let sparql = "SELECT ?x WHERE { ?x ?y ?z } LIMIT 1";
-        Mock::given(method("GET"))
-            .and(path(SPARQL_PATH))
-            .and(query_param("query", sparql))
-            .and(header("accept", "text/csv"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("x\r\nv\r\n"))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let mut wd = Wikidata::new();
-        wd.set_sparql_url(&format!("{}{}", server.uri(), SPARQL_PATH));
-        wd.set_api_url(&format!("{}{}", server.uri(), API_PATH));
-        let _ = wd.load_sparql_csv(sparql).await.unwrap();
-        // expect(1) + drop runs the verifier and panics if the request did not arrive.
-    }
-
-    #[tokio::test]
-    async fn test_load_sparql_csv_rejects_html_served_as_success() {
-        use crate::test_support::{wikidata_for, SPARQL_PATH};
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(SPARQL_PATH))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                "<!DOCTYPE html>\n<title>Wikimedia Error</title>",
-                "text/html; charset=utf-8",
-            ))
-            .mount(&server)
-            .await;
-
-        let wd = wikidata_for(&server);
-        match wd.load_sparql_csv("SELECT ?x {}").await {
-            Err(WikidataError::Io(error)) => {
-                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-                assert!(error.to_string().contains("text/html"), "{error}");
-            }
-            other => panic!("got {other:?}"),
-        }
-    }
 
     #[test]
     fn test_item2qs_rejects_item_with_id() {
@@ -688,19 +539,15 @@ http://www.wikidata.org/entity/Q5,five\r\n";
     fn test_default_matches_new() {
         let wd = Wikidata::default();
         assert_eq!(wd.api_url(), Wikidata::new().api_url());
-        assert_eq!(wd.sparql_url(), Wikidata::new().sparql_url());
     }
 
     #[test]
     fn test_url_getters_reflect_the_defaults_and_overrides() {
         let mut wd = Wikidata::new();
         assert_eq!(wd.api_url(), DEFAULT_API_URL);
-        assert_eq!(wd.sparql_url(), DEFAULT_SPARQL_URL);
 
         wd.set_api_url("http://localhost:1234/w/api.php");
-        wd.set_sparql_url("http://localhost:1234/sparql");
         assert_eq!(wd.api_url(), "http://localhost:1234/w/api.php");
-        assert_eq!(wd.sparql_url(), "http://localhost:1234/sparql");
     }
 
     #[test]

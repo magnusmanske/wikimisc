@@ -1,9 +1,9 @@
 //! Test-only utilities for spinning up an in-process [`wiremock`] server that
-//! impersonates the Wikidata Action API and SPARQL endpoint, plus a [`Wikidata`]
-//! client preconfigured to talk to it.
+//! impersonates the Wikidata Action API, plus a [`Wikidata`] client
+//! preconfigured to talk to it.
 //!
 //! Lets the suite cover HTTP-driven paths (`SiteMatrix::new`, `Wikidata::api`,
-//! `Wikidata::load_sparql_csv`, `ExternalId::*`) deterministically and offline.
+//! `ExternalId::*`) deterministically and offline.
 //!
 //! Which helpers are actually reachable depends on the enabled features, so the
 //! module tolerates unused ones rather than gating each on a feature list that
@@ -15,17 +15,14 @@ use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 pub const API_PATH: &str = "/w/api.php";
-pub const SPARQL_PATH: &str = "/sparql";
 
-/// Build a [`crate::wikidata::Wikidata`] whose API and SPARQL endpoints point
-/// at `server`.
+/// Build a [`crate::wikidata::Wikidata`] whose API endpoint points at `server`.
 #[cfg(feature = "wikidata")]
 pub fn wikidata_for(server: &MockServer) -> crate::wikidata::Wikidata {
     use crate::wikidata::Wikidata;
 
     let mut wd = Wikidata::new();
     wd.set_api_url(&format!("{}{}", server.uri(), API_PATH));
-    wd.set_sparql_url(&format!("{}{}", server.uri(), SPARQL_PATH));
     wd
 }
 
@@ -74,19 +71,6 @@ pub async fn mount_list(server: &MockServer, list: &str, body: Value) {
         .and(path(API_PATH))
         .and(query_param("list", list))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .mount(server)
-        .await;
-}
-
-/// Mount a CSV response for the SPARQL endpoint.
-pub async fn mount_sparql_csv(server: &MockServer, csv: &str) {
-    Mock::given(method("GET"))
-        .and(path(SPARQL_PATH))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(csv.to_string())
-                .insert_header("content-type", "text/csv"),
-        )
         .mount(server)
         .await;
 }

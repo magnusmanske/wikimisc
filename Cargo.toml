@@ -42,8 +42,9 @@ wikibase = ["dep:wikibase"]
 
 # --- composite features ---
 
-# `sparql_value`, `sparql_results`, `sparql_endpoint`: typed SPARQL bindings,
-# result parsing, and endpoint/prefix configuration.
+# `sparql_value`, `sparql_results`, `sparql_tsv`, `sparql_endpoint`,
+# `sparql_rewrite`: typed SPARQL bindings, result parsing, endpoint/prefix
+# configuration and query rewriting.
 sparql = [
     "lat-lon",
     "dep:regex",
@@ -56,8 +57,8 @@ sparql = [
 # results.
 sparql-table = ["sparql", "dep:thiserror"]
 
-# `sparql_client`: HTTP client for WDQS (Blazegraph), QLever and other SPARQL
-# endpoints.
+# `sparql_client`, `sparql_retry`: HTTP client for WDQS (Blazegraph), QLever
+# and other SPARQL endpoints.
 sparql-client = [
     "sparql",
     "sparql-table",
@@ -68,17 +69,16 @@ sparql-client = [
     "dep:serde_json",
     "dep:tempfile",
     "dep:thiserror",
+    "dep:tokio",
 ]
 
 # `site_matrix`: MediaWiki site matrix lookups.
 site-matrix = ["wikibase", "dep:serde_json", "dep:thiserror"]
 
-# `wikidata`: Wikidata API/WDQS client with a fixed user agent and timeout.
+# `wikidata`: Wikidata API client with a fixed user agent and timeout.
 wikidata = [
     "wikibase",
-    "dep:csv",
     "dep:reqwest",
-    "dep:tempfile",
     "dep:thiserror",
 ]
 

@@ -20,11 +20,11 @@ wikimisc = { version = "0.1", default-features = false, features = ["item-merger
 | `process-stats` | `process_stats` | | |
 | `toolforge` | `toolforge_app`, re-export of `toolforge` | | `toolforge` |
 | `wikibase` | re-exports of `wikibase` and `wikibase::mediawiki` | | `wikibase` |
-| `sparql` | `sparql_value`, `sparql_results`, `sparql_endpoint`, `sparql_rewrite` | `lat-lon` | `regex`, `serde`, `serde_json`, `urlencoding` |
+| `sparql` | `sparql_value`, `sparql_results`, `sparql_tsv`, `sparql_endpoint`, `sparql_rewrite` | `lat-lon` | `regex`, `serde`, `serde_json`, `urlencoding` |
 | `sparql-table` | `sparql_table`, `sparql_table_trait`, `sparql_table_vec` | `sparql` | `thiserror` |
-| `sparql-client` | `sparql_client` | `sparql-table` | `csv`, `reqwest`, `tempfile`, `thiserror` |
+| `sparql-client` | `sparql_client`, `sparql_retry` | `sparql-table` | `csv`, `reqwest`, `tempfile`, `thiserror`, `tokio` |
 | `site-matrix` | `site_matrix` | `wikibase` | `serde_json`, `thiserror` |
-| `wikidata` | `wikidata` | `wikibase` | `csv`, `reqwest`, `tempfile`, `thiserror` |
+| `wikidata` | `wikidata` | `wikibase` | `reqwest`, `thiserror` |
 | `external-id` | `external_id` | `wikibase` | `chrono`, `regex`, `serde` |
 | `item-merger` | `item_merger`, `merge_diff` | `external-id` | `regex`, `serde`, `serde_json` |
 | `database` | `toolforge_db`, `toolforge_credentials`, re-export of `mysql_async` | `toolforge` | `mysql_async`, `serde_json`, `thiserror` |
@@ -83,19 +83,24 @@ async fn example() -> Result<(), wikimisc::telemetry::TelemetryError> {
 ## SPARQL: WDQS and QLever
 
 `SparqlClient` (feature `sparql-client`) queries any SPARQL 1.1 endpoint — the
-Wikidata Query Service (Blazegraph) and QLever in particular — and returns a
-`SparqlApiResult`, a `SparqlTableVec`, raw JSON, or a CSV reader. Where it is
+Wikidata Query Service (Blazegraph, and QLever as WDQS v2) in particular — and
+returns a `SparqlApiResult`, a `SparqlTableVec`, raw JSON, a boolean (`ask`), a
+CSV reader, or decoded TSV (`query_tsv`, for very large results). Where it is
 sent, and which prefixes go with it, is a `SparqlEndpoint`:
 
 ```rust
 use wikimisc::sparql_client::{SparqlClient, SparqlError};
 use wikimisc::sparql_endpoint::SparqlEndpoint;
 
+// Wikimedia's user-agent policy asks for contact information.
+const USER_AGENT: &str = "MyTool/1.0 (https://example.org/mytool; mytool@example.org)";
+
 async fn example() -> Result<(), SparqlError> {
-    // QLever declares no prefixes, so this preset prepends the ones WDQS
-    // declares implicitly; queries written for WDQS run unchanged.
-    let qlever = SparqlClient::new(SparqlEndpoint::qlever_wikidata())?;
-    let table = qlever
+    // Wikidata's main graph on WDQS v2. Scholarly articles are in a graph of
+    // their own: `SparqlEndpoint::wikidata_scholarly()`.
+    let wikidata = SparqlClient::new(SparqlEndpoint::wikidata_main(), USER_AGENT)?
+        .with_retries(2);
+    let table = wikidata
         .query_table("SELECT ?item ?coord WHERE { ?item wdt:P625 ?coord } LIMIT 10")
         .await?;
 
@@ -103,14 +108,23 @@ async fn example() -> Result<(), SparqlError> {
     // declares itself is not added again.
     let endpoint = SparqlEndpoint::new("https://example.org/sparql")
         .with_prefix("ex", "http://example.org/ns#");
-    let result = SparqlClient::new(endpoint)?.query("ASK { ?s ex:p ?o }").await?;
-    assert!(result.boolean().is_some());
+    let found = SparqlClient::new(endpoint, USER_AGENT)?
+        .ask("ASK { ?s ex:p ?o }")
+        .await?;
+    println!("{} rows; found: {found}", table.len());
     Ok(())
 }
 ```
 
-For WDQS, pass a client carrying your tool's own user agent, as Wikimedia's
-policy asks: `SparqlClient::with_client(SparqlEndpoint::wdqs(), wikidata.reqwest_client()?)`.
+The presets are named by graph, not by backend, so a host name change at the
+v2 cutover is a wikimisc update: `wikidata_main()` and `wikidata_scholarly()`
+(WDQS v2), `wdqs()` (WDQS v1, until it is shut down), and `qlever_wikidata()`
+(QLever's own instance in Freiburg, not Wikimedia's).
+
+`with_retries(n)` retries what may go away on its own — rate limiting (after
+the `Retry-After` wait, unless that is over a minute), other 5xx errors, failed
+connections — and never a timeout or a 4xx. `with_retry_policy` tunes the
+backoff and can log each retry.
 
 `SparqlError` tells apart what a caller may want to react to differently: a
 query timeout (`Timeout`), rate limiting with the requested wait
@@ -118,9 +132,10 @@ query timeout (`Timeout`), rate limiting with the requested wait
 (`Endpoint` — e.g. a syntax error), a body that is not a valid result
 (`InvalidResponse`), and one larger than the limit set with
 `with_max_response_bytes` (`ResponseTooLarge`) — a runaway query can make an
-endpoint stream hundreds of megabytes before its own timeout cuts it off. The two engines report these differently — QLever as JSON,
-and a timeout as HTTP 429; Blazegraph as a Java stack trace — and the client
-reads both.
+endpoint stream hundreds of megabytes before its own timeout cuts it off. The
+engines report these differently — QLever as JSON, and a timeout as HTTP 429;
+WDQS v2 as JSON, and a timeout as HTTP 504; Blazegraph as a Java stack trace —
+and the client reads all of them.
 
 Values parse the same from either engine (`Point(…)` and `POINT(…)`, a missing
 `Z` on very large years, and so on). Literals are otherwise passed through as

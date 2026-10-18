@@ -9,17 +9,25 @@
 //! - **Values.** Coordinates, dates and so on have different lexical forms;
 //!   [`crate::sparql_value::SparqlValue`] parses both.
 //! - **Errors.** QLever answers with a JSON object carrying an `exception`,
-//!   Blazegraph with a Java stack trace, and Wikimedia's front end with an
-//!   HTML page. [`SparqlError`] reads all three, and tells a query timeout
-//!   (which QLever reports as HTTP 429) from rate limiting (which WDQS
-//!   reports as HTTP 429).
+//!   WDQS v2 with one carrying `errorType` and `message`, Blazegraph with a
+//!   Java stack trace, and Wikimedia's front end with an HTML page.
+//!   [`SparqlError`] reads all of them, and tells a query timeout (which
+//!   QLever reports as HTTP 429, WDQS v2 as 504) from rate limiting (which
+//!   WDQS reports as HTTP 429).
+//!
+//! Failures that may go away on their own can be retried; see
+//! [`SparqlClient::with_retries`].
 //!
 //! ```rust,no_run
 //! use wikimisc::sparql_client::{SparqlClient, SparqlError};
 //! use wikimisc::sparql_endpoint::SparqlEndpoint;
 //!
 //! async fn humans() -> Result<usize, SparqlError> {
-//!     let client = SparqlClient::new(SparqlEndpoint::qlever_wikidata())?;
+//!     let client = SparqlClient::new(
+//!         SparqlEndpoint::wikidata_main(),
+//!         "MyTool/1.0 (https://example.org/mytool; mytool@example.org)",
+//!     )?
+//!     .with_retries(2);
 //!     let table = client
 //!         .query_table("SELECT ?item WHERE { ?item wdt:P31 wd:Q5 } LIMIT 10")
 //!         .await?;
@@ -27,31 +35,28 @@
 //! }
 //! ```
 
-use crate::content_type::may_be_csv;
+use crate::content_type::{may_be_csv, may_be_tsv};
 use crate::sparql_endpoint::SparqlEndpoint;
 use crate::sparql_results::SparqlApiResult;
+use crate::sparql_retry::{Retry, RetryPolicy};
 use crate::sparql_table::{SparqlTableError, SparqlTableVec};
+use crate::sparql_tsv::SparqlTsv;
 use regex::Regex;
 use reqwest::header::{HeaderMap, ACCEPT, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{Client, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use std::fs::File;
+use std::future::Future;
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::LazyLock;
 use std::time::Duration;
 use tempfile::tempfile;
 use thiserror::Error;
 
-const DEFAULT_USER_AGENT: &str = concat!(
-    "wikimisc/",
-    env!("CARGO_PKG_VERSION"),
-    " (",
-    env!("CARGO_PKG_REPOSITORY"),
-    ")"
-);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const ACCEPT_JSON: &str = "application/sparql-results+json";
 const ACCEPT_CSV: &str = "text/csv";
+const ACCEPT_TSV: &str = "text/tab-separated-values";
 /// How much of an unparseable response body an error quotes.
 const SNIPPET_CHARS: usize = 200;
 /// How much of an endpoint's error message an error keeps.
@@ -86,8 +91,9 @@ pub enum SparqlError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    /// The endpoint gave up on the query because it ran too long. Retrying the
-    /// same query is unlikely to help.
+    /// The endpoint, or the gateway in front of it (HTTP 504), gave up on the
+    /// query because it ran too long. Retrying the same query is unlikely to
+    /// help.
     #[error("SPARQL query timed out (HTTP {status}): {message}")]
     Timeout { status: u16, message: String },
 
@@ -115,14 +121,21 @@ pub enum SparqlError {
         snippet: String,
     },
 
-    /// The endpoint reported success but sent `content_type` where CSV was
-    /// expected — typically an HTML error page from a proxy. `message` is
-    /// that page's explanation, as for [`Self::Endpoint`].
-    #[error("SPARQL endpoint sent {content_type:?} where CSV was expected: {message}")]
+    /// The endpoint reported success but sent `content_type` where
+    /// `expected` (CSV or TSV) was asked for — typically an HTML error page
+    /// from a proxy. `message` is that page's explanation, as for
+    /// [`Self::Endpoint`].
+    #[error("SPARQL endpoint sent {content_type:?} where {expected} was expected: {message}")]
     UnexpectedContentType {
         content_type: String,
+        expected: &'static str,
         message: String,
     },
+
+    /// [`SparqlClient::ask`] got a result without a `boolean` — the query
+    /// was not an ASK query, or the endpoint answered something else.
+    #[error("SPARQL result has no boolean; was the query an ASK query?")]
+    NotBoolean,
 
     /// The response is larger than the limit set with
     /// [`SparqlClient::with_max_response_bytes`]; reading it was abandoned.
@@ -143,8 +156,11 @@ impl SparqlError {
         let message = error_message(body);
         // QLever says "Operation timed out."; Blazegraph throws a
         // `java.util.concurrent.TimeoutException` or a `QueryTimeoutException`.
-        let timed_out =
-            message.to_lowercase().contains("timed out") || body.contains("TimeoutException");
+        // WDQS v2 answers 504 with `errorType` "gateway_timeout" or
+        // "backend_timeout", whose message need not say "timed out".
+        let timed_out = status == StatusCode::GATEWAY_TIMEOUT.as_u16()
+            || message.to_lowercase().contains("timed out")
+            || body.contains("TimeoutException");
         if timed_out {
             Self::Timeout { status, message }
         } else if status == StatusCode::TOO_MANY_REQUESTS.as_u16() {
@@ -154,6 +170,19 @@ impl SparqlError {
             }
         } else {
             Self::Endpoint { status, message }
+        }
+    }
+
+    /// Whether the same query may succeed if sent again: rate limiting, an
+    /// error status of 500 or above other than a timeout, or a request that
+    /// failed on the way (but not by running into the client's own timeout,
+    /// which a slow query would hit again). [`RetryPolicy`] retries these.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } => true,
+            Self::Endpoint { status, .. } => *status >= 500,
+            Self::Http(error) => !error.is_timeout() && !error.is_builder(),
+            _ => false,
         }
     }
 }
@@ -167,31 +196,49 @@ pub struct SparqlClient {
     endpoint: SparqlEndpoint,
     client: Client,
     max_response_bytes: Option<usize>,
+    retry_policy: RetryPolicy,
 }
 
 impl SparqlClient {
-    /// A client with a generic `wikimisc` user agent and a 60-second timeout.
+    /// A client sending `user_agent`, with a 60-second timeout.
     ///
     /// Wikimedia's [user-agent policy](https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy)
-    /// asks every tool to identify itself, so for WDQS prefer
-    /// [`Self::with_client`] with a client carrying the tool's own user agent
-    /// — for example `Wikidata::reqwest_client()`.
-    pub fn new(endpoint: SparqlEndpoint) -> Result<Self, SparqlError> {
+    /// asks every tool to identify itself *with contact information*, in the
+    /// form `ToolName/1.0 (https://tool.example; tool@example.org)`, and WDQS
+    /// may refuse requests without it. Admission to WDQS v2 may additionally
+    /// depend on the user agent being known to Wikimedia.
+    pub fn new(endpoint: SparqlEndpoint, user_agent: &str) -> Result<Self, SparqlError> {
         let client = Client::builder()
-            .user_agent(DEFAULT_USER_AGENT)
+            .user_agent(user_agent)
             .timeout(DEFAULT_TIMEOUT)
             .build()?;
         Ok(Self::with_client(endpoint, client))
     }
 
     /// A client sending its requests through `client`, whose user agent,
-    /// timeout and other settings are used as they are.
+    /// timeout and other settings are used as they are. The user agent
+    /// should carry contact information; see [`Self::new`].
     pub fn with_client(endpoint: SparqlEndpoint, client: Client) -> Self {
         Self {
             endpoint,
             client,
             max_response_bytes: None,
+            retry_policy: RetryPolicy::default(),
         }
+    }
+
+    /// Retries a failed query up to `retries` times, if the failure may go
+    /// away on its own; see [`RetryPolicy`]. Without this, nothing is retried.
+    #[must_use]
+    pub fn with_retries(self, retries: u32) -> Self {
+        self.with_retry_policy(RetryPolicy::new(retries))
+    }
+
+    /// Retries failed queries as `policy` says.
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
+        self
     }
 
     /// Refuses responses larger than `limit` bytes with
@@ -216,10 +263,34 @@ impl SparqlClient {
         parse_json(&self.fetch_json(sparql).await?)
     }
 
+    /// Runs an ASK query. A result without a boolean is an error
+    /// ([`SparqlError::NotBoolean`]), never `false`.
+    pub async fn ask(&self, sparql: &str) -> Result<bool, SparqlError> {
+        self.query(sparql)
+            .await?
+            .boolean()
+            .ok_or(SparqlError::NotBoolean)
+    }
+
     /// Runs a query and returns the result as untyped JSON, for callers that
     /// process the bindings themselves.
     pub async fn query_json(&self, sparql: &str) -> Result<serde_json::Value, SparqlError> {
         parse_json(&self.fetch_json(sparql).await?)
+    }
+
+    /// Runs a SELECT query and returns the result decoded from TSV — a
+    /// third the size of JSON, for very large results. Values are plain
+    /// strings, as described in [`crate::sparql_tsv`].
+    pub async fn query_tsv(&self, sparql: &str) -> Result<SparqlTsv, SparqlError> {
+        let body = self
+            .retrying(|| async {
+                let response = self
+                    .send_text(sparql, ACCEPT_TSV, "TSV", may_be_tsv)
+                    .await?;
+                self.read_all(response).await
+            })
+            .await?;
+        Ok(SparqlTsv::parse(&String::from_utf8_lossy(&body)))
     }
 
     /// Runs a SELECT query and returns the result as a table.
@@ -232,19 +303,16 @@ impl SparqlClient {
     /// choice for a large result. Values are the engine's raw lexical forms
     /// (`Point(…)` from WDQS, `POINT(…)` from QLever) with IRIs unabbreviated.
     pub async fn query_csv(&self, sparql: &str) -> Result<csv::Reader<File>, SparqlError> {
-        let response = self.send(sparql, ACCEPT_CSV).await?;
-        if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
-            let content_type = String::from_utf8_lossy(content_type.as_bytes()).into_owned();
-            if !may_be_csv(&content_type) {
-                let message = error_message(&read_error_body(response).await);
-                return Err(SparqlError::UnexpectedContentType {
-                    content_type,
-                    message,
-                });
-            }
-        }
-        let mut file = tempfile()?;
-        self.read_body(response, |chunk| file.write_all(chunk))
+        let mut file = self
+            .retrying(|| async {
+                let response = self
+                    .send_text(sparql, ACCEPT_CSV, "CSV", may_be_csv)
+                    .await?;
+                let mut file = tempfile()?;
+                self.read_body(response, |chunk| file.write_all(chunk))
+                    .await?;
+                Ok(file)
+            })
             .await?;
         file.seek(SeekFrom::Start(0))?;
         Ok(csv::ReaderBuilder::new()
@@ -256,7 +324,12 @@ impl SparqlClient {
     /// The raw response body. Kept as bytes and parsed from there: decoding
     /// it into a `String` first would hold a large result in memory twice.
     async fn fetch_json(&self, sparql: &str) -> Result<Vec<u8>, SparqlError> {
-        let response = self.send(sparql, ACCEPT_JSON).await?;
+        self.retrying(|| async { self.read_all(self.send(sparql, ACCEPT_JSON).await?).await })
+            .await
+    }
+
+    /// The whole response body, within the configured maximum size.
+    async fn read_all(&self, response: Response) -> Result<Vec<u8>, SparqlError> {
         let declared = self.declared_length(&response)?;
         let mut body = Vec::with_capacity(declared.min(MAX_PREALLOCATION));
         self.read_body(response, |chunk| {
@@ -265,6 +338,57 @@ impl SparqlClient {
         })
         .await?;
         Ok(body)
+    }
+
+    /// Runs `attempt`, and again as long as the retry policy says so.
+    async fn retrying<T, F, Fut>(&self, mut attempt: F) -> Result<T, SparqlError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, SparqlError>>,
+    {
+        let mut retries_done = 0;
+        loop {
+            let error = match attempt().await {
+                Ok(value) => return Ok(value),
+                Err(error) => error,
+            };
+            let Some(wait) = self.retry_policy.delay(&error, retries_done) else {
+                return Err(error);
+            };
+            retries_done += 1;
+            self.retry_policy.notify(&Retry {
+                endpoint: self.endpoint.url(),
+                error: &error,
+                retry: retries_done,
+                wait,
+            });
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    /// Sends the query asking for a text format (`expected`, e.g. "CSV"),
+    /// and refuses a successful response whose content type `accepts` does
+    /// not allow.
+    async fn send_text(
+        &self,
+        sparql: &str,
+        accept: &str,
+        expected: &'static str,
+        accepts: fn(&str) -> bool,
+    ) -> Result<Response, SparqlError> {
+        let response = self.send(sparql, accept).await?;
+        if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
+            let content_type = String::from_utf8_lossy(content_type.as_bytes()).into_owned();
+            if !accepts(&content_type) {
+                let message = error_message(&read_error_body(response).await);
+                return Err(SparqlError::UnexpectedContentType {
+                    content_type,
+                    expected,
+                    message,
+                });
+            }
+        }
+        Ok(response)
     }
 
     /// Feeds the response body to `sink` chunk by chunk, giving up as soon
@@ -464,6 +588,7 @@ mod tests {
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     const SPARQL_PATH: &str = "/sparql";
+    const TEST_USER_AGENT: &str = "wikimisc-test/1.0 (https://github.com/magnusmanske/wikimisc)";
 
     // ── fixtures (captured from the live endpoints) ─────────────────────────
 
@@ -485,6 +610,13 @@ mod tests {
         "status": "ERROR",
         "time": {"computeResult": 10, "total": 10}
     }"#;
+
+    /// WDQS v2 timeouts, both HTTP 504: when QLever gives up (reconstructed
+    /// from its documented shape), and when the backend does not answer
+    /// within 60 s (captured 2026-10-17).
+    const WDQS_V2_GATEWAY_TIMEOUT: &str =
+        r#"{"errorType":"gateway_timeout","message":"Operation timed out.","details":{}}"#;
+    const WDQS_V2_BACKEND_TIMEOUT: &str = r#"{"errorType":"backend_timeout","message":"The timeout period of 60000ms has been exceeded while executing POST /sparql/sparql?timeout=60000ms for server wdqs-main-external-qlever-service:7001"}"#;
 
     const WDQS_V2_FEDERATION_ERROR: &str = r#"{"errorType":"federation_error","message":"Endpoint http://wikiba.se/ontology#label is not allowed for query federation.","details":{"rejectedEndpoint":"http://wikiba.se/ontology#label"}}"#;
 
@@ -520,7 +652,7 @@ p { margin: 0.7em 0 1em 0; }
     }
 
     fn client_for(server: &MockServer) -> SparqlClient {
-        SparqlClient::new(endpoint_for(server)).unwrap()
+        SparqlClient::new(endpoint_for(server), TEST_USER_AGENT).unwrap()
     }
 
     async fn mount(server: &MockServer, response: ResponseTemplate) {
@@ -576,7 +708,7 @@ p { margin: 0.7em 0 1em 0; }
             .await;
 
         let endpoint = endpoint_for(&server).with_prefix("wd", "http://www.wikidata.org/entity/");
-        let client = SparqlClient::new(endpoint).unwrap();
+        let client = SparqlClient::new(endpoint, TEST_USER_AGENT).unwrap();
         client
             .query("SELECT ?item { VALUES ?item { wd:Q64 } }")
             .await
@@ -587,7 +719,7 @@ p { margin: 0.7em 0 1em 0; }
     async fn test_query_sends_a_user_agent() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(header("user-agent", DEFAULT_USER_AGENT))
+            .and(header("user-agent", TEST_USER_AGENT))
             .respond_with(json_response(200, QLEVER_RESULT))
             .expect(1)
             .mount(&server)
@@ -634,6 +766,65 @@ p { margin: 0.7em 0 1em 0; }
         mount(&server, json_response(200, r#"{"boolean":true,"head":{}}"#)).await;
         let client = client_for(&server);
         assert_eq!(client.query("ASK {}").await.unwrap().boolean(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_ask() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            json_response(200, r#"{"boolean":false,"head":{}}"#),
+        )
+        .await;
+        assert!(!client_for(&server).ask("ASK {}").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_ask_without_boolean_is_an_error() {
+        let server = MockServer::start().await;
+        mount(&server, json_response(200, QLEVER_RESULT)).await;
+        assert!(matches!(
+            client_for(&server).ask("SELECT * {}").await,
+            Err(SparqlError::NotBoolean)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_query_tsv() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(SPARQL_PATH))
+            .and(header("accept", ACCEPT_TSV))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "?item\t?label\n<http://www.wikidata.org/entity/Q64>\t\"Berlin\"@en\n",
+                "text/tab-separated-values",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tsv = client_for(&server).query_tsv("SELECT * {}").await.unwrap();
+        assert_eq!(tsv.vars(), ["item", "label"]);
+        assert_eq!(
+            tsv.rows(),
+            [["http://www.wikidata.org/entity/Q64", "Berlin"]]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_tsv_rejects_html_served_as_success() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            ResponseTemplate::new(200).set_body_raw(WIKIMEDIA_RATE_LIMIT, "text/html"),
+        )
+        .await;
+        assert!(matches!(
+            client_for(&server).query_tsv("SELECT * {}").await,
+            Err(SparqlError::UnexpectedContentType {
+                expected: "TSV",
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -787,7 +978,7 @@ p { margin: 0.7em 0 1em 0; }
         // Reserving the declared 2^63 bytes would panic with a capacity
         // overflow; the body then ends early, which is an HTTP error.
         let url = overclaiming_server(1 << 63).await;
-        let client = SparqlClient::new(SparqlEndpoint::new(url)).unwrap();
+        let client = SparqlClient::new(SparqlEndpoint::new(url), TEST_USER_AGENT).unwrap();
         assert!(matches!(
             client.query("SELECT * {}").await,
             Err(SparqlError::Http(_))
@@ -797,7 +988,7 @@ p { margin: 0.7em 0 1em 0; }
     #[tokio::test]
     async fn test_huge_declared_length_over_limit_is_refused_unread() {
         let url = overclaiming_server(1 << 63).await;
-        let client = SparqlClient::new(SparqlEndpoint::new(url))
+        let client = SparqlClient::new(SparqlEndpoint::new(url), TEST_USER_AGENT)
             .unwrap()
             .with_max_response_bytes(1 << 30);
         assert!(matches!(
@@ -819,7 +1010,7 @@ p { margin: 0.7em 0 1em 0; }
             false,
         )
         .await;
-        let client = SparqlClient::new(SparqlEndpoint::new(url)).unwrap();
+        let client = SparqlClient::new(SparqlEndpoint::new(url), TEST_USER_AGENT).unwrap();
         let result = tokio::time::timeout(Duration::from_secs(10), client.query("ASK {}"))
             .await
             .expect("the error body is not read to its end");
@@ -835,7 +1026,7 @@ p { margin: 0.7em 0 1em 0; }
     #[tokio::test]
     async fn test_streamed_response_over_limit_is_abandoned() {
         let url = chunked_server(QLEVER_RESULT).await;
-        let client = SparqlClient::new(SparqlEndpoint::new(url))
+        let client = SparqlClient::new(SparqlEndpoint::new(url), TEST_USER_AGENT)
             .unwrap()
             .with_max_response_bytes(100);
         assert!(matches!(
@@ -847,7 +1038,7 @@ p { margin: 0.7em 0 1em 0; }
     #[tokio::test]
     async fn test_streamed_response_within_limit_is_read() {
         let url = chunked_server(QLEVER_RESULT).await;
-        let client = SparqlClient::new(SparqlEndpoint::new(url))
+        let client = SparqlClient::new(SparqlEndpoint::new(url), TEST_USER_AGENT)
             .unwrap()
             .with_max_response_bytes(QLEVER_RESULT.len());
         assert_eq!(
@@ -870,9 +1061,11 @@ p { margin: 0.7em 0 1em 0; }
         match client.query_csv("SELECT * {}").await {
             Err(SparqlError::UnexpectedContentType {
                 content_type,
+                expected,
                 message,
             }) => {
                 assert_eq!(content_type, "text/html; charset=utf-8");
+                assert_eq!(expected, "CSV");
                 assert!(
                     message.starts_with("Aggressively rate-limiting"),
                     "{message}"
@@ -945,6 +1138,25 @@ p { margin: 0.7em 0 1em 0; }
                 assert_eq!(message, "Operation timed out.");
             }
             other => panic!("got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wdqs_v2_timeouts() {
+        for (body, expected) in [
+            (WDQS_V2_GATEWAY_TIMEOUT, "Operation timed out."),
+            (
+                WDQS_V2_BACKEND_TIMEOUT,
+                "The timeout period of 60000ms has been exceeded",
+            ),
+        ] {
+            match error_for(json_response(504, body)).await {
+                SparqlError::Timeout { status, message } => {
+                    assert_eq!(status, 504);
+                    assert!(message.starts_with(expected), "{message}");
+                }
+                other => panic!("got {other:?}"),
+            }
         }
     }
 
@@ -1035,17 +1247,20 @@ p { margin: 0.7em 0 1em 0; }
         // Port 1 (tcpmux) is not served on any machine running the tests, so
         // the connection is refused. (A dropped `MockServer` would not do: it
         // goes back to wiremock's pool and keeps answering.)
-        let client = SparqlClient::new(SparqlEndpoint::new("http://127.0.0.1:1/sparql")).unwrap();
-        assert!(matches!(
-            client.query("ASK {}").await,
-            Err(SparqlError::Http(_))
-        ));
+        let client = SparqlClient::new(
+            SparqlEndpoint::new("http://127.0.0.1:1/sparql"),
+            TEST_USER_AGENT,
+        )
+        .unwrap();
+        let error = client.query("ASK {}").await.unwrap_err();
+        assert!(matches!(error, SparqlError::Http(_)));
+        assert!(error.is_retryable());
     }
 
     #[tokio::test]
     #[ignore = "queries the live QLever endpoint"]
     async fn test_live_qlever_wikidata() {
-        let client = SparqlClient::new(SparqlEndpoint::qlever_wikidata()).unwrap();
+        let client = SparqlClient::new(SparqlEndpoint::qlever_wikidata(), TEST_USER_AGENT).unwrap();
         // Written for WDQS: `wd:` and `wdt:` come from the endpoint's prefixes.
         let table = client
             .query_table(
@@ -1073,6 +1288,115 @@ p { margin: 0.7em 0 1em 0; }
             matches!(error, SparqlError::Endpoint { status: 400, .. }),
             "{error}"
         );
+    }
+
+    // ── retries ─────────────────────────────────────────────────────────────
+
+    /// A client retrying up to twice, without waiting long.
+    fn retrying_client_for(server: &MockServer) -> SparqlClient {
+        client_for(server)
+            .with_retry_policy(RetryPolicy::new(2).with_initial_backoff(Duration::from_millis(1)))
+    }
+
+    /// Answers the first request with `first`, any later one with `then`.
+    async fn mount_sequence(server: &MockServer, first: ResponseTemplate, then: ResponseTemplate) {
+        Mock::given(method("POST"))
+            .respond_with(first)
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(then)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_server_error_is_retried() {
+        let server = MockServer::start().await;
+        mount_sequence(
+            &server,
+            ResponseTemplate::new(503),
+            json_response(200, QLEVER_RESULT),
+        )
+        .await;
+        let result = retrying_client_for(&server).query("SELECT * {}").await;
+        assert_eq!(result.unwrap().bindings().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_is_retried() {
+        let server = MockServer::start().await;
+        let limited = ResponseTemplate::new(429).insert_header("retry-after", "0");
+        mount_sequence(
+            &server,
+            limited,
+            ResponseTemplate::new(200).set_body_raw("?x\n<a>\n", "text/tab-separated-values"),
+        )
+        .await;
+        let tsv = retrying_client_for(&server)
+            .query_tsv("SELECT * {}")
+            .await
+            .unwrap();
+        assert_eq!(tsv.rows(), [["a"]]);
+    }
+
+    #[tokio::test]
+    async fn test_retries_run_out() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(502))
+            .expect(3)
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            retrying_client_for(&server).query_csv("SELECT * {}").await,
+            Err(SparqlError::Endpoint { status: 502, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_timeouts_and_query_errors_are_not_retried() {
+        for response in [
+            json_response(504, WDQS_V2_BACKEND_TIMEOUT),
+            json_response(400, WDQS_V2_FEDERATION_ERROR),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            assert!(retrying_client_for(&server).query("ASK {}").await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_hook_is_called() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static RETRIES: AtomicU32 = AtomicU32::new(0);
+        fn record(retry: &Retry<'_>) {
+            assert!(retry.endpoint.ends_with(SPARQL_PATH));
+            assert!(matches!(
+                retry.error,
+                SparqlError::Endpoint { status: 500, .. }
+            ));
+            RETRIES.store(retry.retry, Ordering::SeqCst);
+        }
+        let server = MockServer::start().await;
+        mount_sequence(
+            &server,
+            ResponseTemplate::new(500),
+            json_response(200, r#"{"boolean":true,"head":{}}"#),
+        )
+        .await;
+        let client = client_for(&server).with_retry_policy(
+            RetryPolicy::new(1)
+                .with_initial_backoff(Duration::from_millis(1))
+                .on_retry(record),
+        );
+        assert!(client.ask("ASK {}").await.unwrap());
+        assert_eq!(RETRIES.load(Ordering::SeqCst), 1);
     }
 
     // ── error-message extraction ────────────────────────────────────────────

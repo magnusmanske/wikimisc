@@ -15,10 +15,22 @@ use std::collections::HashSet;
 use std::fmt::Write;
 use std::sync::LazyLock;
 
-/// The Wikidata Query Service, running Blazegraph.
+/// The Wikidata Query Service v1, running Blazegraph. To be shut down once
+/// v2 has replaced it.
 pub const WDQS_URL: &str = "https://query.wikidata.org/sparql";
 
-/// QLever's Wikidata endpoint. The older `qlever.cs.uni-freiburg.de` address
+/// Wikidata's main graph — everything except scholarly articles — on the
+/// Wikidata Query Service v2 (QLever). Named by graph rather than by
+/// backend: when v2 takes over another host name, only this changes.
+pub const WIKIDATA_MAIN_URL: &str = "https://query-next.wikidata.org/sparql";
+
+/// Wikidata's scholarly articles graph on the Wikidata Query Service v2.
+/// Scholarly articles are *only* here, and this graph has no labels for
+/// items that are not articles, so a query needing both has to be split.
+pub const WIKIDATA_SCHOLARLY_URL: &str = "https://query-scholarly-next.wikidata.org/sparql";
+
+/// QLever's own Wikidata endpoint at the University of Freiburg, not
+/// Wikimedia's; see [`WIKIDATA_MAIN_URL`] for that. The older `qlever.cs.uni-freiburg.de` address
 /// still works, but only as a redirect to this one.
 pub const QLEVER_WIKIDATA_URL: &str = "https://qlever.dev/api/wikidata";
 
@@ -98,10 +110,29 @@ impl SparqlEndpoint {
         Self::new(WDQS_URL)
     }
 
-    /// QLever's Wikidata endpoint, with [`WIKIDATA_PREFIXES`] added so that
-    /// queries written for WDQS run unchanged.
+    /// Wikidata's main graph on WDQS v2 ([`WIKIDATA_MAIN_URL`]). It declares
+    /// most of [`WIKIDATA_PREFIXES`] itself; all of them are added anyway, so
+    /// that queries written for WDQS v1 find every prefix it declared.
+    pub fn wikidata_main() -> Self {
+        Self::with_wikidata_prefixes(WIKIDATA_MAIN_URL)
+    }
+
+    /// Wikidata's scholarly articles graph on WDQS v2
+    /// ([`WIKIDATA_SCHOLARLY_URL`]), with prefixes as for
+    /// [`Self::wikidata_main`].
+    pub fn wikidata_scholarly() -> Self {
+        Self::with_wikidata_prefixes(WIKIDATA_SCHOLARLY_URL)
+    }
+
+    /// QLever's own Wikidata endpoint ([`QLEVER_WIKIDATA_URL`]), with
+    /// [`WIKIDATA_PREFIXES`] added so that queries written for WDQS run
+    /// unchanged.
     pub fn qlever_wikidata() -> Self {
-        Self::new(QLEVER_WIKIDATA_URL).with_prefixes(WIKIDATA_PREFIXES.iter().copied())
+        Self::with_wikidata_prefixes(QLEVER_WIKIDATA_URL)
+    }
+
+    fn with_wikidata_prefixes(url: &str) -> Self {
+        Self::new(url).with_prefixes(WIKIDATA_PREFIXES.iter().copied())
     }
 
     /// Adds a prefix, replacing any earlier one of the same name. Both
@@ -304,6 +335,17 @@ mod tests {
         assert!(prepared.contains("PREFIX wd: <http://www.wikidata.org/entity/>\n"));
         assert!(prepared.contains("PREFIX wdt: <http://www.wikidata.org/prop/direct/>\n"));
         assert!(prepared.ends_with(QUERY));
+    }
+
+    #[test]
+    fn test_wikidata_v2_presets() {
+        for (endpoint, url) in [
+            (SparqlEndpoint::wikidata_main(), WIKIDATA_MAIN_URL),
+            (SparqlEndpoint::wikidata_scholarly(), WIKIDATA_SCHOLARLY_URL),
+        ] {
+            assert_eq!(endpoint.url(), url);
+            assert_eq!(endpoint.prefixes().len(), WIKIDATA_PREFIXES.len());
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@
     warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
-#[cfg(any(feature = "sparql-client", feature = "wikidata"))]
+#[cfg(feature = "sparql-client")]
 mod content_type;
 #[cfg(feature = "date")]
 pub mod date;
@@ -41,6 +41,8 @@ pub mod sparql_endpoint;
 pub(crate) mod sparql_lexer;
 #[cfg(feature = "sparql")]
 pub mod sparql_results;
+#[cfg(feature = "sparql-client")]
+pub mod sparql_retry;
 #[cfg(feature = "sparql")]
 pub mod sparql_rewrite;
 #[cfg(feature = "sparql-table")]
@@ -49,6 +51,8 @@ pub mod sparql_table;
 pub mod sparql_table_trait;
 #[cfg(feature = "sparql-table")]
 pub mod sparql_table_vec;
+#[cfg(feature = "sparql")]
+pub mod sparql_tsv;
 #[cfg(feature = "sparql")]
 pub mod sparql_value;
 #[cfg(feature = "telemetry")]
