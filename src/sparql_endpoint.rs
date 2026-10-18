@@ -19,6 +19,10 @@ use std::sync::LazyLock;
 /// v2 has replaced it.
 pub const WDQS_URL: &str = "https://query.wikidata.org/sparql";
 
+/// The scholarly articles graph on WDQS v1. As on v2, scholarly articles are
+/// *only* here, not at [`WDQS_URL`].
+pub const WDQS_SCHOLARLY_URL: &str = "https://query-scholarly.wikidata.org/sparql";
+
 /// Wikidata's main graph — everything except scholarly articles — on the
 /// Wikidata Query Service v2 (QLever). Named by graph rather than by
 /// backend: when v2 takes over another host name, only this changes.
@@ -108,6 +112,12 @@ impl SparqlEndpoint {
     /// so none are added.
     pub fn wdqs() -> Self {
         Self::new(WDQS_URL)
+    }
+
+    /// The scholarly articles graph on WDQS v1 ([`WDQS_SCHOLARLY_URL`]),
+    /// which declares the Wikidata prefixes itself, like [`Self::wdqs`].
+    pub fn wdqs_scholarly() -> Self {
+        Self::new(WDQS_SCHOLARLY_URL)
     }
 
     /// Wikidata's main graph on WDQS v2 ([`WIKIDATA_MAIN_URL`]). It declares
@@ -320,10 +330,14 @@ mod tests {
     }
 
     #[test]
-    fn test_wdqs_preset() {
-        let endpoint = SparqlEndpoint::wdqs();
-        assert_eq!(endpoint.url(), WDQS_URL);
-        assert_eq!(endpoint.prepare_query(QUERY), QUERY);
+    fn test_wdqs_presets() {
+        for (endpoint, url) in [
+            (SparqlEndpoint::wdqs(), WDQS_URL),
+            (SparqlEndpoint::wdqs_scholarly(), WDQS_SCHOLARLY_URL),
+        ] {
+            assert_eq!(endpoint.url(), url);
+            assert_eq!(endpoint.prepare_query(QUERY), QUERY);
+        }
     }
 
     #[test]

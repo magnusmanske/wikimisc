@@ -118,7 +118,7 @@ async fn example() -> Result<(), SparqlError> {
 
 The presets are named by graph, not by backend, so a host name change at the
 v2 cutover is a wikimisc update: `wikidata_main()` and `wikidata_scholarly()`
-(WDQS v2), `wdqs()` (WDQS v1, until it is shut down), and `qlever_wikidata()`
+(WDQS v2), `wdqs()` and `wdqs_scholarly()` (WDQS v1, until it is shut down), and `qlever_wikidata()`
 (QLever's own instance in Freiburg, not Wikimedia's).
 
 `with_retries(n)` retries what may go away on its own — rate limiting (after
