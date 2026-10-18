@@ -149,7 +149,9 @@ so WDQS v2) rejects. `sparql_rewrite` (feature `sparql`) rewrites them into
 standard SPARQL 1.1, following Wikimedia's
 [migration guide](https://www.wikidata.org/wiki/Wikidata:SPARQL_query_service/WDQS_backend_update/Migrate).
 It splices the query text, so formatting and comments survive, and leaves a
-query it cannot rewrite unchanged. So far it handles `SERVICE wikibase:label`:
+query it cannot rewrite unchanged. So far it handles named subqueries
+(`rewrite_named_subqueries`, which inlines `WITH { … } AS %name` /
+`INCLUDE %name` as subqueries; run it first) and `SERVICE wikibase:label`:
 
 ```rust
 use wikimisc::sparql_rewrite::{LabelServiceRewrite, rewrite_label_service};

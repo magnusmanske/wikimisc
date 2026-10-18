@@ -56,13 +56,14 @@ impl SparqlTsv {
 /// anything else (numbers, booleans, blank nodes, an empty cell) as it is.
 ///
 /// Accepts plain values too, so a file that is "TSV" only in its separators
-/// reads the same.
+/// reads the same: a cell is only decoded as a literal if it is one whole, so
+/// `"Weird" Al` stays as it is.
 pub fn decode_cell(cell: &str) -> String {
     let cell = cell.trim();
     if let Some(iri) = cell.strip_prefix('<').and_then(|c| c.strip_suffix('>')) {
         iri.to_string()
-    } else if let Some(literal) = cell.strip_prefix('"') {
-        unescape_literal(literal)
+    } else if let Some(text) = cell.strip_prefix('"').and_then(unescape_literal) {
+        text
     } else {
         cell.to_string()
     }
@@ -70,13 +71,14 @@ pub fn decode_cell(cell: &str) -> String {
 
 /// The text of a literal, read up to its closing quote, with the Turtle
 /// escapes (`\t`, `\"`, `é`, …) resolved. An unknown or broken escape is
-/// kept as written.
-fn unescape_literal(literal: &str) -> String {
+/// kept as written. `None` unless the closing quote is followed by nothing, a
+/// language tag, or a datatype.
+fn unescape_literal(literal: &str) -> Option<String> {
     let mut out = String::with_capacity(literal.len());
     let mut chars = literal.chars();
     while let Some(c) = chars.next() {
         match c {
-            '"' => break,
+            '"' => return is_literal_suffix(chars.as_str()).then_some(out),
             '\\' => match chars.next() {
                 Some('t') => out.push('\t'),
                 Some('b') => out.push('\u{8}'),
@@ -108,7 +110,19 @@ fn unescape_literal(literal: &str) -> String {
             c => out.push(c),
         }
     }
-    out
+    None
+}
+
+/// Whether `rest` may follow a literal's closing quote: nothing, `@lang`, or
+/// `^^<datatype>`.
+fn is_literal_suffix(rest: &str) -> bool {
+    if let Some(tag) = rest.strip_prefix('@') {
+        !tag.is_empty() && tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    } else if let Some(datatype) = rest.strip_prefix("^^") {
+        datatype.starts_with('<') && datatype.ends_with('>')
+    } else {
+        rest.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -161,7 +175,12 @@ mod tests {
         assert_eq!(decode_cell(r#""a\tb\nc\"d\\e""#), "a\tb\nc\"d\\e");
         assert_eq!(decode_cell(r#""café \U0001F600""#), "café 😀");
         assert_eq!(decode_cell(r#""bad \uZZZZ \q""#), r"bad \uZZZZ \q");
-        assert_eq!(decode_cell(r#""cut \"#), r"cut \");
+        // Not a whole literal, so not decoded.
+        assert_eq!(decode_cell(r#""cut \"#), r#""cut \"#);
+        assert_eq!(decode_cell(r#""Weird" Al"#), r#""Weird" Al"#);
+        assert_eq!(decode_cell(r#""a"@"#), r#""a"@"#);
+        assert_eq!(decode_cell(r#""a"^^x"#), r#""a"^^x"#);
+        assert_eq!(decode_cell(r#""a"@de-CH"#), "a");
     }
 
     #[test]

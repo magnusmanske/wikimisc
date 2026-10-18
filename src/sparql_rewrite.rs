@@ -38,6 +38,18 @@
 //! - aliases (`skos:altLabel`) are not rewritten, as they need a copy of the
 //!   query's constraints in an aggregating subquery. A query needing one is
 //!   left unchanged.
+//!
+//! # Named subqueries
+//!
+//! [`rewrite_named_subqueries`] inlines Blazegraph's `WITH { … } AS %name` /
+//! `INCLUDE %name` as SPARQL 1.1 subqueries. The label service rewrite does
+//! not look into named subqueries, so run this one first.
+
+mod named_subqueries;
+
+pub use named_subqueries::{
+    rewrite_named_subqueries, NamedSubqueryRewrite, UnsupportedNamedSubquery,
+};
 
 use crate::sparql_endpoint::WIKIDATA_PREFIXES;
 use crate::sparql_lexer::{tokenize, Brackets, Token, TokenKind};
@@ -71,7 +83,8 @@ pub enum LabelServiceRewrite {
 pub enum UnsupportedLabelService {
     /// Brackets do not balance, or the service has no body.
     Syntax,
-    /// Blazegraph's named subqueries (`WITH { … } AS %name`, `INCLUDE %name`).
+    /// Blazegraph's named subqueries (`WITH { … } AS %name`, `INCLUDE %name`);
+    /// [`rewrite_named_subqueries`] inlines them.
     NamedSubqueries,
     /// The service is not inside a `SELECT` query or subquery.
     NotInSelect,
