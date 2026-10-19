@@ -5,6 +5,17 @@ use serde_json::json;
 use std::collections::HashMap;
 use wikibase::*;
 
+/// Whether `statement_id` (`<entity ID>$<GUID>`) names a statement of the
+/// entity `entity_id`. Wikibase rejects the whole edit if it carries a
+/// statement ID of another entity, and adds one of its own entity that it does
+/// not have yet as a new statement.
+pub(crate) fn statement_belongs_to(statement_id: &str, entity_id: &str) -> bool {
+    !entity_id.is_empty()
+        && statement_id
+            .split_once('$')
+            .is_some_and(|(entity, _)| entity.eq_ignore_ascii_case(entity_id))
+}
+
 /// This contains the wbeditentiry payload to ADD data to a base item, generated from a merge
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MergeDiff {
@@ -65,12 +76,17 @@ impl MergeDiff {
                 .extend(self.sitelinks.iter().cloned());
         }
         for (id, statement) in self.altered_statements.iter() {
+            // Wikibase adds a statement whose ID is unknown but belongs to the
+            // entity, as from a newer copy of the same item.
+            let belongs_to_item = statement_belongs_to(id, item.id());
             let existing_statement = item
                 .claims_mut()
                 .iter_mut()
-                .find(|s| s.id() == Some(id.to_string()));
-            if let Some(existing_statement) = existing_statement {
-                *existing_statement = statement.to_owned();
+                .find(|s| s.id().as_deref() == Some(id.as_str()));
+            match existing_statement {
+                Some(existing_statement) => *existing_statement = statement.to_owned(),
+                None if belongs_to_item => item.add_claim(statement.to_owned()),
+                None => {}
             }
         }
         for statement in &self.added_statements {
@@ -648,6 +664,32 @@ mod tests {
         // The existing claim must be untouched and no new claim must have appeared.
         assert_eq!(item.claims().len(), 1);
         assert_eq!(item.claims()[0].property(), "P1");
+    }
+
+    #[test]
+    fn test_statement_belongs_to() {
+        assert!(statement_belongs_to("Q1$abc", "Q1"));
+        assert!(statement_belongs_to("q1$abc", "Q1"));
+        assert!(!statement_belongs_to("Q2$abc", "Q1"));
+        assert!(!statement_belongs_to("Q12$abc", "Q1"));
+        assert!(!statement_belongs_to("Q1", "Q1"));
+        assert!(!statement_belongs_to("$abc", ""));
+    }
+
+    #[test]
+    fn test_merge_diff_apply_adds_unknown_altered_statement_of_the_item() {
+        // Wikibase adds a statement whose ID belongs to the entity but is not
+        // on it yet, so `apply` must too.
+        let mut item = ItemEntity::new_empty();
+        item.set_id("Q1".to_string());
+
+        let mut diff = MergeDiff::new();
+        let mut statement = Statement::new_normal(Snak::new_string("P1", "new"), vec![], vec![]);
+        statement.set_id("Q1$new");
+        diff.add_statement(statement.clone());
+
+        diff.apply(&mut item);
+        assert_eq!(item.claims(), &vec![statement]);
     }
 
     #[test]

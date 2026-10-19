@@ -23,7 +23,7 @@
 //! ```
 
 use crate::external_id::ExternalId;
-use crate::merge_diff::MergeDiff;
+use crate::merge_diff::{statement_belongs_to, MergeDiff};
 use regex::Regex;
 
 use std::cmp::Ordering;
@@ -153,6 +153,9 @@ impl ItemMerger {
     /// qualifiers it contributes are merged in. External-ID claims are never
     /// merged this way; a duplicate is simply dropped.
     ///
+    /// A claim added as new keeps its statement ID only if the ID belongs to
+    /// this item; Wikibase would reject another entity's.
+    ///
     /// Returns `Some(claim)` if a claim was added or changed, `None` otherwise.
     pub fn add_claim(&mut self, mut new_claim: Statement) -> Option<Statement> {
         let mut existing_claims_iter = self
@@ -197,8 +200,25 @@ impl ItemMerger {
 
         self.check_new_claim_for_dates(&mut new_claim);
 
-        // Claim does not exist, adding
-        self.item.add_claim(new_claim.clone());
+        // Claim does not exist, adding. A statement ID of another entity (as
+        // when merging Q2 into Q1) would fail the whole edit, so the claim
+        // goes in as a new statement. One of this entity (from a newer copy
+        // of the same item) is kept: Wikibase updates or adds that statement.
+        if new_claim
+            .id()
+            .is_some_and(|id| !statement_belongs_to(&id, self.item.id()))
+        {
+            new_claim.remove_id();
+        }
+        let same_id = self
+            .item
+            .claims_mut()
+            .iter_mut()
+            .find(|c| c.id().is_some() && c.id() == new_claim.id());
+        match same_id {
+            Some(existing_claim) => *existing_claim = new_claim.clone(),
+            None => self.item.add_claim(new_claim.clone()),
+        }
         Some(new_claim)
     }
 
@@ -1959,6 +1979,88 @@ mod tests {
 
         let second = im.merge(&other);
         assert_eq!(second, MergeDiff::new());
+    }
+
+    // ── Statement IDs of merged-in claims ───────────────────────────────────
+
+    fn item_with_id(id: &str, claims: Vec<(&str, Statement)>) -> ItemEntity {
+        let mut item = ItemEntity::new_empty();
+        item.set_id(id.to_string());
+        for (statement_id, mut claim) in claims {
+            claim.set_id(statement_id);
+            item.add_claim(claim);
+        }
+        item
+    }
+
+    fn p31(value: &str) -> Statement {
+        Statement::new_normal(Snak::new_item("P31", value), vec![], vec![])
+    }
+
+    #[test]
+    fn test_merge_drops_statement_id_of_another_entity() {
+        let base = item_with_id("Q1", vec![]);
+        let other = item_with_id("Q2", vec![("Q2$bbb", p31("Q5"))]);
+
+        let mut im = ItemMerger::new(base.clone());
+        let diff = im.merge(&other);
+
+        assert!(diff.altered_statements.is_empty(), "{diff:?}");
+        assert_eq!(diff.added_statements, vec![p31("Q5")]);
+        let payload = serde_json::to_value(&diff).unwrap();
+        assert!(payload["claims"][0].get("id").is_none(), "{payload}");
+        assert_eq!(im.item().claims(), &vec![p31("Q5")]);
+
+        let mut applied = base;
+        diff.apply(&mut applied);
+        assert_eq!(applied.claims(), im.item().claims());
+    }
+
+    #[test]
+    fn test_merge_drops_statement_ids_into_a_new_item() {
+        let other = item_with_id("Q2", vec![("Q2$bbb", p31("Q5"))]);
+        let diff = ItemMerger::new(ItemEntity::new_empty()).merge(&other);
+        assert_eq!(diff.added_statements, vec![p31("Q5")]);
+    }
+
+    #[test]
+    fn test_merge_fresh_copy_of_same_item_keeps_its_statement_ids() {
+        let base = item_with_id("Q1", vec![("Q1$aaa", p31("Q5"))]);
+        let fresh = item_with_id("Q1", vec![("Q1$aaa", p31("Q5")), ("q1$bbb", p31("Q6"))]);
+
+        let mut im = ItemMerger::new(base.clone());
+        let diff = im.merge(&fresh);
+
+        // Wikibase adds a statement with an unknown ID of the same entity.
+        assert!(diff.added_statements.is_empty(), "{diff:?}");
+        assert_eq!(diff.altered_statements.len(), 1);
+        assert!(diff.altered_statements.contains_key("q1$bbb"));
+        assert_eq!(im.item().claims().len(), 2);
+
+        let mut applied = base;
+        diff.apply(&mut applied);
+        assert_eq!(applied.claims(), im.item().claims());
+    }
+
+    #[test]
+    fn test_merge_fresh_copy_with_changed_value_replaces_the_statement() {
+        let base = item_with_id("Q1", vec![("Q1$aaa", p31("Q5"))]);
+        let fresh = item_with_id("Q1", vec![("Q1$aaa", p31("Q6"))]);
+
+        let mut im = ItemMerger::new(base.clone());
+        let diff = im.merge(&fresh);
+
+        assert_eq!(diff.altered_statements.len(), 1);
+        // The merged item must not hold two statements with the same ID.
+        assert_eq!(im.item().claims().len(), 1);
+        assert_eq!(
+            *im.item().claims()[0].main_snak(),
+            Snak::new_item("P31", "Q6")
+        );
+
+        let mut applied = base;
+        diff.apply(&mut applied);
+        assert_eq!(applied.claims(), im.item().claims());
     }
 
     #[test]
