@@ -263,7 +263,7 @@ impl<'a> LabelServiceRewriter<'a> {
         self.brackets = Brackets::new(&self.tokens).ok_or(UnsupportedLabelService::Syntax)?;
         self.selects = self.select_scopes();
         let services = self.services()?;
-        let mut taken: HashSet<String> = self.occurrences.keys().map(|v| v.to_string()).collect();
+        let mut names = FreshNames::new(self.occurrences.keys().copied());
         let mut edits: Vec<Edit> = self
             .removed_runs(&services)
             .into_iter()
@@ -296,7 +296,7 @@ impl<'a> LabelServiceRewriter<'a> {
             {
                 return Err(UnsupportedLabelService::PreboundOutput);
             }
-            let lines = self.replacement(service, &needed, &mut taken);
+            let lines = self.replacement(service, &needed, &mut names);
             insertions.entry(service.group.1).or_default().extend(lines);
         }
         for (group_close, lines) in insertions {
@@ -346,47 +346,64 @@ impl<'a> LabelServiceRewriter<'a> {
     // ── analysis ────────────────────────────────────────────────────────────
 
     fn select_scopes(&self) -> HashMap<usize, SelectScope<'a>> {
-        let mut scopes = HashMap::new();
+        let next_groups = self.next_groups();
+        // By the `{` of their `WHERE` group. Should several `SELECT`s claim
+        // the same `{` (which is not valid SPARQL), the last one has it.
+        let mut selects: HashMap<usize, usize> = HashMap::new();
         for (i, token) in self.tokens.iter().enumerate() {
-            if !token.is_keyword("SELECT") {
-                continue;
-            }
-            // The WHERE group is the first `{` outside parentheses; a
-            // projection may contain `(EXISTS { … } AS ?x)`.
-            let mut depth = 0usize;
-            let mut open = None;
-            for (j, t) in self.tokens.iter().enumerate().skip(i + 1) {
-                if t.is_punct('(') {
-                    depth += 1;
-                } else if t.is_punct(')') {
-                    depth = depth.saturating_sub(1);
-                } else if t.is_punct('{') && depth == 0 {
-                    open = Some(j);
-                    break;
+            if token.is_keyword("SELECT") {
+                if let Some(open) = next_groups.get(i + 1).copied().flatten() {
+                    selects.insert(open, i);
                 }
             }
-            let Some(open) = open else { continue };
-            let Some(close) = self.brackets.partner(open) else {
-                continue;
-            };
-            let projection = (i + 1, open);
-            let group_by = self.group_by_clause(close + 1);
-            scopes.insert(
-                open,
-                SelectScope {
-                    projection,
-                    group_by,
-                    distinct: self
-                        .tokens
-                        .get(i + 1)
-                        .is_some_and(|t| t.is_keyword("DISTINCT") || t.is_keyword("REDUCED")),
-                    projected: self.bare_vars(projection).collect(),
-                    grouped: group_by.map_or_else(HashSet::new, |c| self.bare_vars(c).collect()),
-                    automatic: self.automatic_outputs(projection),
-                },
-            );
         }
-        scopes
+        selects
+            .into_iter()
+            .filter_map(|(open, select)| Some((open, self.select_scope(select, open)?)))
+            .collect()
+    }
+
+    /// For each token, the first `{` from it on that is not inside
+    /// parentheses opened from it on. For the token after a `SELECT`, that
+    /// is the `{` of its `WHERE` group: a projection may contain
+    /// `(EXISTS { … } AS ?x)`. Worked out back to front in one pass, so that
+    /// it takes linear time however many `SELECT`s there are.
+    fn next_groups(&self) -> Vec<Option<usize>> {
+        let mut next: Vec<Option<usize>> = vec![None; self.tokens.len() + 1];
+        for (j, token) in self.tokens.iter().enumerate().rev() {
+            let found = if token.is_punct('{') {
+                Some(j)
+            } else if token.is_punct('(') {
+                self.brackets
+                    .partner(j)
+                    .and_then(|close| next.get(close + 1).copied().flatten())
+            } else {
+                next.get(j + 1).copied().flatten()
+            };
+            if let Some(slot) = next.get_mut(j) {
+                *slot = found;
+            }
+        }
+        next
+    }
+
+    /// The scope of the `SELECT` at `tokens[select]`, whose `WHERE` group
+    /// opens at `tokens[open]`.
+    fn select_scope(&self, select: usize, open: usize) -> Option<SelectScope<'a>> {
+        let close = self.brackets.partner(open)?;
+        let projection = (select + 1, open);
+        let group_by = self.group_by_clause(close + 1);
+        Some(SelectScope {
+            projection,
+            group_by,
+            distinct: self
+                .tokens
+                .get(select + 1)
+                .is_some_and(|t| t.is_keyword("DISTINCT") || t.is_keyword("REDUCED")),
+            projected: self.bare_vars(projection).collect(),
+            grouped: group_by.map_or_else(HashSet::new, |c| self.bare_vars(c).collect()),
+            automatic: self.automatic_outputs(projection),
+        })
     }
 
     fn group_by_clause(&self, start: usize) -> Option<(usize, usize)> {
@@ -646,7 +663,7 @@ impl<'a> LabelServiceRewriter<'a> {
         &self,
         service: &Service,
         needed: &[&Output],
-        taken: &mut HashSet<String>,
+        names: &mut FreshNames,
     ) -> Vec<String> {
         let languages = normalized_languages(&service.languages);
         let label = self.term("rdfs:label", RDFS_LABEL);
@@ -662,7 +679,7 @@ impl<'a> LabelServiceRewriter<'a> {
             let subject = match subjects.get(entity) {
                 Some(subject) => subject.clone(),
                 None if is_var => {
-                    let subject = fresh(taken, &format!("{base}__label_subject"));
+                    let subject = names.fresh(&format!("{base}__label_subject"));
                     lines.push(format!(
                         "BIND(IF(BOUND({entity}), {entity}, \"unbound\") AS ?{subject})"
                     ));
@@ -686,7 +703,7 @@ impl<'a> LabelServiceRewriter<'a> {
             let value = match values.get(&(entity, output.kind)) {
                 Some(value) => value.clone(),
                 None => {
-                    let value = fresh(taken, &format!("{base}__{suffix}"));
+                    let value = names.fresh(&format!("{base}__{suffix}"));
                     for language in &kind_languages {
                         lines.push(format!(
                             "OPTIONAL {{ {subject} {predicate} ?{value} . FILTER(LANG(?{value}) = \"{language}\") }}"
@@ -853,16 +870,38 @@ fn with_mul(languages: &[String]) -> Vec<String> {
     out
 }
 
-/// `name`, or `name_2`, `name_3`, … — whichever is not yet a variable.
-fn fresh(taken: &mut HashSet<String>, name: &str) -> String {
-    let mut candidate = name.to_string();
-    let mut n = 1;
-    while taken.contains(&candidate) {
-        n += 1;
-        candidate = format!("{name}_{n}");
+/// Hands out variable names the query does not use yet.
+struct FreshNames {
+    taken: HashSet<String>,
+    /// For each name asked for, the number of the suffix to try next, so
+    /// that asking for the same name again and again takes no longer each
+    /// time.
+    next_suffix: HashMap<String, usize>,
+}
+
+impl FreshNames {
+    /// Names other than those of the query's `variables`.
+    fn new<'v>(variables: impl IntoIterator<Item = &'v str>) -> Self {
+        Self {
+            taken: variables.into_iter().map(str::to_string).collect(),
+            next_suffix: HashMap::new(),
+        }
     }
-    taken.insert(candidate.clone());
-    candidate
+
+    /// `name`, or `name_2`, `name_3`, … — the first that is not taken yet.
+    fn fresh(&mut self, name: &str) -> String {
+        let n = self.next_suffix.entry(name.to_string()).or_insert(1);
+        loop {
+            let candidate = match *n {
+                1 => name.to_string(),
+                n => format!("{name}_{n}"),
+            };
+            *n += 1;
+            if self.taken.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1243,5 +1282,60 @@ mod tests {
         };
         assert_valid(&query);
         assert!(matches!(needed, LabelServiceRewrite::Rewritten(q) if q.contains("AS ?l1999)")));
+    }
+
+    #[test]
+    fn test_many_selects_are_scoped_quickly() {
+        // About 700 KB. When each `SELECT` scanned ahead for its `WHERE`
+        // group, this took minutes in a debug build; now it takes
+        // milliseconds. Not valid SPARQL, so the result is not parsed.
+        let selects = "SELECT ".repeat(100_000);
+        let projected: String = (0..100).map(|n| format!("?v{n}Label ")).collect();
+        let sparql = format!(
+            "{selects}{projected}WHERE {{ ?v0 wdt:P31 wd:Q5 . SERVICE wikibase:label {{ bd:serviceParam wikibase:language \"en\" }} }}"
+        );
+        let started = std::time::Instant::now();
+        let result = rewrite_label_service(&sparql, |_| true);
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_secs() < 10, "took {elapsed:?}");
+        assert!(
+            matches!(&result, LabelServiceRewrite::Rewritten(q) if q.contains("AS ?v99Label)")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn test_services_for_one_entity_are_named_quickly() {
+        // About 1 MB. When each generated name counted up from `_2`, the
+        // services for one entity took quadratic time; now it is linear.
+        const SERVICES: usize = 10_000;
+        let services: String = (0..SERVICES)
+            .map(|n| {
+                format!("SERVICE wikibase:label {{ bd:serviceParam wikibase:language \"en\" . ?item rdfs:label ?l{n} }}\n")
+            })
+            .collect();
+        let sparql = format!("SELECT * WHERE {{\n?item wdt:P31 wd:Q5 .\n{services}}}");
+        let started = std::time::Instant::now();
+        let result = rewrite_label_service(&sparql, |_| true);
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_secs() < 10, "took {elapsed:?}");
+        let LabelServiceRewrite::Rewritten(query) = result else {
+            panic!("expected a rewrite, got {result:?}");
+        };
+        assert!(
+            query.contains(&format!("AS ?item__label_subject_{SERVICES})")),
+            "{query}"
+        );
+        assert!(query.contains(&format!("?item__label_value_{SERVICES} .")));
+    }
+
+    #[test]
+    fn test_fresh_names_skip_taken_ones() {
+        let mut names = FreshNames::new(["a", "a_3", "b_2"]);
+        let fresh: Vec<String> = ["a", "a", "a", "b", "b", "a"]
+            .iter()
+            .map(|name| names.fresh(name))
+            .collect();
+        assert_eq!(fresh, ["a_2", "a_4", "a_5", "b", "b_3", "a_6"]);
     }
 }
