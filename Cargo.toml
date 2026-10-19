@@ -150,7 +150,7 @@ serde_json = { version = "1", optional = true }
 tempfile = { version = "3", optional = true }
 thiserror = { version = "2", optional = true }
 tokio = { version = "1.41", features = ["rt", "time"], optional = true }
-toolforge = { version = "5", optional = true }
+toolforge = { version = "6", optional = true }
 urlencoding = { version = "^2", optional = true }
 wikibase = { version = "0.7.8", optional = true }
 
