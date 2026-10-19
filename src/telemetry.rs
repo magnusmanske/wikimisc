@@ -48,6 +48,17 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 const MIN_INTERVAL: Duration = Duration::from_secs(20);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 const FINAL_PUSH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the final push waits for a regular push in flight before it is
+/// sent anyway. The regular push may never finish: after a panic on the main
+/// thread of a `current_thread` runtime, its task is stuck on the runtime the
+/// panicking thread drives, and that thread waits for the final push.
+///
+/// Sending both at once is harmless. The final push carries everything the
+/// regular one did (counters are totals, unacknowledged events are resent),
+/// so the worst case is an event shown twice; a regular push arriving after
+/// the final one is rejected and acknowledges nothing; and no regular push
+/// follows the final one.
+const FINAL_PUSH_LOCK_WAIT: Duration = Duration::from_secs(1);
 /// The dashboard's per-push limits.
 const MAX_METRICS: usize = 500;
 const MAX_EVENTS: usize = 50;
@@ -339,7 +350,8 @@ struct Inner {
     panics: AtomicU64,
     failing: AtomicBool,
     ended: AtomicBool,
-    /// One push at a time, so the final push cannot overtake a regular one.
+    /// One push at a time, so the final push does not normally overtake a
+    /// regular one; it waits only briefly, though (see [`FINAL_PUSH_LOCK_WAIT`]).
     push_lock: tokio::sync::Mutex<()>,
     state: Mutex<PushState>,
 }
@@ -525,7 +537,19 @@ impl Telemetry {
         client: &reqwest::Client,
         exit: Option<&ExitReason>,
     ) -> Result<(), TelemetryError> {
-        let _push_lock = self.inner.push_lock.lock().await;
+        let _push_lock = if exit.is_some() {
+            // Sent without the lock if need be; see FINAL_PUSH_LOCK_WAIT.
+            tokio::time::timeout(FINAL_PUSH_LOCK_WAIT, self.inner.push_lock.lock())
+                .await
+                .ok()
+        } else {
+            let guard = self.inner.push_lock.lock().await;
+            if self.inner.ended.load(Ordering::SeqCst) {
+                // The dashboard would reject it after the final push anyway.
+                return Ok(());
+            }
+            Some(guard)
+        };
         let (payload, sent) = self.payload(exit);
         let response = client
             .post(&self.inner.url)
@@ -880,7 +904,7 @@ fn started_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method};
+    use wiremock::matchers::{body_string_contains, header, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn telemetry(url: &str) -> Telemetry {
@@ -1130,6 +1154,85 @@ mod tests {
         .unwrap();
         let pushes = received(&server).await;
         assert_eq!(pushes[0]["exit"]["reason"], "panic");
+    }
+
+    const SLOW_PUSH: Duration = Duration::from_secs(2);
+
+    /// A server that takes `SLOW_PUSH` to answer regular pushes, but answers
+    /// final pushes at once.
+    async fn slow_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"exit\""))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(SLOW_PUSH))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Starts a regular push and waits until the server has it, so it holds the push lock.
+    async fn start_slow_push(
+        t: &Telemetry,
+        server: &MockServer,
+    ) -> tokio::task::JoinHandle<Result<(), TelemetryError>> {
+        let push = tokio::spawn({
+            let t = t.clone();
+            async move { t.push(&t.inner.client, None).await }
+        });
+        wait_for_requests(server, 1).await;
+        assert!(t.inner.push_lock.try_lock().is_err());
+        push
+    }
+
+    async fn assert_final_push_arrived(
+        server: &MockServer,
+        regular: &tokio::task::JoinHandle<Result<(), TelemetryError>>,
+    ) {
+        assert!(
+            !regular.is_finished(),
+            "the final push waited for the regular one"
+        );
+        let pushes = received(server).await;
+        assert!(pushes.iter().any(|p| p["exit"]["reason"] == "panic"));
+    }
+
+    #[test]
+    fn test_final_push_from_panic_hook_does_not_wait_for_a_stuck_push() {
+        // A panic in the main future of #[tokio::main(flavor = "current_thread")]:
+        // the hook blocks the thread that drives the runtime, so a regular
+        // push in flight on it cannot finish and release the lock.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let server = slow_server().await;
+            let t = telemetry(&server.uri());
+            let regular = start_slow_push(&t, &server).await;
+
+            t.shutdown_blocking(ExitReason::Panic("at src/main.rs:1:1".to_string()));
+            assert_final_push_arrived(&server, &regular).await;
+
+            // The regular push can still finish; nothing follows the final push.
+            regular.await.unwrap().unwrap();
+            t.push(&t.inner.client, None).await.unwrap();
+            assert_eq!(received(&server).await.len(), 2);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_does_not_wait_for_a_slow_push() {
+        let server = slow_server().await;
+        let t = telemetry(&server.uri());
+        let regular = start_slow_push(&t, &server).await;
+
+        t.shutdown(ExitReason::Panic("at src/main.rs:1:1".to_string()))
+            .await;
+        assert_final_push_arrived(&server, &regular).await;
     }
 
     #[test]
