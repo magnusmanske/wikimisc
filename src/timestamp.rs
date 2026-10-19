@@ -1,6 +1,6 @@
 //! TimeStamp convertes from and to YYYYMMDDHHMMSS format
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Timelike, Utc};
 
 #[derive(Debug, Clone, Default)]
 pub struct TimeStamp {}
@@ -16,18 +16,21 @@ impl TimeStamp {
         utc.format("%Y%m%d%H%M%S").to_string()
     }
 
+    /// Parses a 14-digit `YYYYMMDDHHMMSS` timestamp; `None` unless it names an
+    /// existing date and time.
     pub fn str2naive(ts: &str) -> Option<NaiveDateTime> {
-        NaiveDateTime::parse_from_str(ts, "%Y%m%d%H%M%S").ok()
+        // chrono would also take a field with fewer or (the year) more digits.
+        if ts.len() != 14 || !ts.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let naive = NaiveDateTime::parse_from_str(ts, "%Y%m%d%H%M%S").ok()?;
+        // chrono reads a second of 60 as a leap second, at any minute of any
+        // day; a MediaWiki timestamp never has one.
+        (naive.nanosecond() < 1_000_000_000).then_some(naive)
     }
 
     pub fn str2utc(ts: &str) -> Option<DateTime<Utc>> {
-        match NaiveDateTime::parse_from_str(ts, "%Y%m%d%H%M%S")
-            .ok()?
-            .and_local_timezone(Utc)
-        {
-            chrono::offset::LocalResult::Single(d) => Some(d),
-            _ => None,
-        }
+        Some(Self::str2naive(ts)?.and_utc())
     }
 }
 
@@ -105,5 +108,26 @@ mod tests {
         assert!(TimeStamp::str2utc("not-a-timestamp").is_none());
         assert!(TimeStamp::str2utc("").is_none());
         assert!(TimeStamp::str2utc("20231399000000").is_none()); // month 13 is invalid
+    }
+
+    #[test]
+    fn test_impossible_dates_and_times_rejected() {
+        for impossible in [
+            "20230229000000", // not a leap year
+            "21000229000000", // not a leap year either
+            "20230230000000",
+            "20230431000000",
+            "20230100000000",
+            "20230101240000",
+            "20230101006000",
+            "20230101000060",
+            "2023010100000",   // too short
+            "202301010000000", // too long
+        ] {
+            assert!(TimeStamp::str2naive(impossible).is_none(), "{impossible}");
+            assert!(TimeStamp::str2utc(impossible).is_none(), "{impossible}");
+        }
+        assert!(TimeStamp::str2utc("20240229235959").is_some());
+        assert!(TimeStamp::str2utc("20000229000000").is_some());
     }
 }
