@@ -71,8 +71,7 @@ impl ItemMerger {
     /// [`MergeDiff`] and `extend` it on each call.
     pub fn merge(&mut self, other: &ItemEntity) -> MergeDiff {
         let mut diff = MergeDiff::new();
-        let mut new_aliases =
-            Self::merge_locale_strings(self.item.labels_mut(), other.labels(), &mut diff.labels);
+        let mut new_aliases = self.merge_labels(other.labels(), &mut diff.labels);
 
         // Descriptions
         let mut new_ones: Vec<LocaleString> = other
@@ -445,38 +444,42 @@ impl ItemMerger {
         }
     }
 
-    fn merge_locale_strings(
-        mine: &mut Vec<LocaleString>,
+    /// Adds the labels of `other` the item can take to it and to `diff`, and
+    /// returns the ones it cannot as alias candidates.
+    fn merge_labels(
+        &mut self,
         other: &[LocaleString],
         diff: &mut Vec<LocaleString>,
     ) -> Vec<LocaleString> {
-        let mut ret = vec![];
-        let mul_label = mine
+        let labels = self.item.labels();
+        let mul_label = labels
             .iter()
-            .find(|x| x.language() == "mul")
+            .find(|l| l.language() == "mul")
             .map(|l| l.value());
-        let mut new_ones: Vec<LocaleString> = other
-            .iter()
-            .filter_map(|x| {
-                match mine.iter().find(|y| x.language() == y.language()) {
-                    Some(y) => {
-                        if x.value() != y.value() {
-                            ret.push(x.clone()); // Labels for which a language already exists, as aliases
-                        }
-                        None
+        let mut demoted = vec![];
+        let mut new_ones = vec![];
+        for label in other {
+            match labels.iter().find(|l| l.language() == label.language()) {
+                // The language has a label already; a different one is an alias.
+                Some(existing) => {
+                    if existing.value() != label.value() {
+                        demoted.push(label.clone());
                     }
-                    None => Some(x.clone()),
                 }
-            })
-            // Filter out labels identical to the existing "mul" one
-            .filter(|x| match mul_label {
-                Some(mul) => x.value() != mul,
-                None => true,
-            })
-            .collect();
-        diff.append(&mut new_ones.clone());
-        mine.append(&mut new_ones);
-        ret
+                // Redundant next to the identical "mul" label.
+                None if mul_label == Some(label.value()) => {}
+                // Wikibase refuses a label equal to the description in its
+                // language, failing the whole edit. Such a label is treated
+                // like a clashing one and demoted; the alias filters in
+                // `merge` then drop it as well, as they keep no alias equal to
+                // a description.
+                None if self.item.descriptions().contains(label) => demoted.push(label.clone()),
+                None => new_ones.push(label.clone()),
+            }
+        }
+        diff.extend(new_ones.iter().cloned());
+        self.item.labels_mut().extend(new_ones);
+        demoted
     }
 
     pub fn set_properties_ignore_qualifier_match(
@@ -1979,6 +1982,28 @@ mod tests {
 
         let second = im.merge(&other);
         assert_eq!(second, MergeDiff::new());
+    }
+
+    #[test]
+    fn test_merge_label_equal_to_existing_description_is_not_added() {
+        // Wikibase rejects an edit that makes a label equal to the description
+        // in the same language.
+        let mut base = ItemEntity::new_empty();
+        base.descriptions_mut().push(LocaleString::new("de", "Foo"));
+        let mut other = ItemEntity::new_empty();
+        other.labels_mut().push(LocaleString::new("de", "Foo"));
+        other.labels_mut().push(LocaleString::new("en", "Foo"));
+
+        let mut im = ItemMerger::new(base);
+        let diff = im.merge(&other);
+
+        assert_eq!(diff.labels, vec![LocaleString::new("en", "Foo")]);
+        assert!(diff.aliases.is_empty(), "{:?}", diff.aliases);
+        let payload = serde_json::to_value(&diff).unwrap();
+        assert!(payload["labels"].get("de").is_none(), "{payload}");
+        assert!(payload.get("aliases").is_none(), "{payload}");
+        assert_eq!(*im.item().labels(), vec![LocaleString::new("en", "Foo")]);
+        assert!(im.item().aliases().is_empty());
     }
 
     // ── Statement IDs of merged-in claims ───────────────────────────────────
