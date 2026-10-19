@@ -7,6 +7,8 @@
 //! oversized result fails the same way every time, so it is returned at once.
 
 use crate::sparql_client::SparqlError;
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -32,12 +34,27 @@ pub struct Retry<'a> {
 /// rate-limited request waits at least as long as the endpoint's
 /// `Retry-After`; if that is longer than the maximum wait, the error is
 /// returned instead, since retrying sooner would only be refused again.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct RetryPolicy {
     retries: u32,
     initial_backoff: Duration,
     max_wait: Duration,
-    on_retry: Option<fn(&Retry<'_>)>,
+    on_retry: Option<RetryHook>,
+}
+
+/// Shared, so that a policy and the clients holding it stay cheap to clone.
+type RetryHook = Arc<dyn Fn(&Retry<'_>) + Send + Sync>;
+
+impl fmt::Debug for RetryPolicy {
+    // Hand-written because a closure has no `Debug`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetryPolicy")
+            .field("retries", &self.retries)
+            .field("initial_backoff", &self.initial_backoff)
+            .field("max_wait", &self.max_wait)
+            .field("on_retry", &self.on_retry.as_ref().map(|_| "Fn(&Retry)"))
+            .finish()
+    }
 }
 
 impl Default for RetryPolicy {
@@ -73,10 +90,14 @@ impl RetryPolicy {
         self
     }
 
-    /// Calls `hook` before each retry, e.g. to log it.
+    /// Calls `hook` before each retry, e.g. to log it. A plain function
+    /// works, as does a closure that captures state such as a counter.
     #[must_use]
-    pub fn on_retry(mut self, hook: fn(&Retry<'_>)) -> Self {
-        self.on_retry = Some(hook);
+    pub fn on_retry<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(&Retry<'_>) + Send + Sync + 'static,
+    {
+        self.on_retry = Some(Arc::new(hook));
         self
     }
 
@@ -104,7 +125,7 @@ impl RetryPolicy {
     }
 
     pub(crate) fn notify(&self, retry: &Retry<'_>) {
-        if let Some(hook) = self.on_retry {
+        if let Some(hook) = &self.on_retry {
             hook(retry);
         }
     }
@@ -182,6 +203,29 @@ mod tests {
         assert_eq!(policy.delay(&timeout, 0), None);
         let too_large = SparqlError::ResponseTooLarge { limit: 1 };
         assert_eq!(policy.delay(&too_large, 0), None);
+    }
+
+    #[test]
+    fn test_on_retry_accepts_a_capturing_closure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&count);
+        let policy = RetryPolicy::new(3).on_retry(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let error = endpoint(503);
+        let retry = Retry {
+            endpoint: "http://localhost/sparql",
+            error: &error,
+            retry: 1,
+            wait: Duration::ZERO,
+        };
+        policy.notify(&retry);
+        // A clone shares the hook.
+        policy.clone().notify(&retry);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert!(format!("{policy:?}").contains("on_retry: Some"));
+        assert!(format!("{:?}", RetryPolicy::new(1)).contains("on_retry: None"));
     }
 
     #[test]
