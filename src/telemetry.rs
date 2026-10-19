@@ -66,6 +66,7 @@ const MAX_EVENTS: usize = 50;
 const MAX_QUEUED_EVENTS: usize = 200;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TelemetryError {
     #[error("no telemetry token configured (set {TOKEN_ENV})")]
     NoToken,
