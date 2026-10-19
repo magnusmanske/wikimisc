@@ -182,7 +182,11 @@ impl MergeDiff {
             .map(|l| {
                 (
                     l.site().to_owned(),
-                    json!({"site":l.site(),"title":l.title()}),
+                    if l.badges().is_empty() {
+                        json!({"site":l.site(),"title":l.title()})
+                    } else {
+                        json!({"site":l.site(),"title":l.title(),"badges":l.badges()})
+                    },
                 )
             })
             .collect();
@@ -908,6 +912,26 @@ mod tests {
         assert_eq!(sitelinks["enwiki"]["site"], "enwiki");
         assert_eq!(sitelinks["enwiki"]["title"], "Douglas Adams");
         assert_eq!(sitelinks["dewiki"]["title"], "Douglas Adams");
+        assert!(
+            sitelinks["enwiki"].get("badges").is_none(),
+            "no badges, no key: {serialized}"
+        );
+    }
+
+    #[test]
+    fn test_serialize_sitelinks_keeps_badges() {
+        let mut diff = MergeDiff::new();
+        diff.sitelinks.push(SiteLink::new(
+            "enwiki",
+            "Douglas Adams",
+            vec!["Q17437796".to_string(), "Q17437798".to_string()],
+        ));
+
+        let serialized = serde_json::to_value(&diff).unwrap();
+        assert_eq!(
+            serialized["sitelinks"]["enwiki"],
+            json!({"site":"enwiki","title":"Douglas Adams","badges":["Q17437796","Q17437798"]})
+        );
     }
 
     #[test]
