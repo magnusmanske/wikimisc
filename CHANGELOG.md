@@ -4,7 +4,122 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.2] - unreleased
+## [0.2.0] - 2026-10-19
+
+### Removed
+- **Breaking:** the `toolforge_db` and `toolforge_credentials` modules
+  (`ToolforgeDB`, `DbCluster`, `DbServerGroup`, `DbSection`, `HostSchema`,
+  `PoolSettings`, `DatabaseError`, `Credentials`, `DbService`). Database
+  access now comes from the [`toolforge`](https://crates.io/crates/toolforge)
+  crate (6.1), re-exported as `wikimisc::toolforge`: `WikiPool`,
+  `ToolsDbPool` and `CustomPool` in `toolforge::pool`, extension-database
+  routing in `toolforge::db::ExtensionDb`, and errors as `toolforge::Error`.
+  Mapping: `DbServerGroup` → `toolforge::db::Cluster`, `DbCluster` →
+  `Option<toolforge::db::ExtensionDb>`, `ToolforgeDB::add_mysql_pool` →
+  `CustomPool::builder_from_url`, `ToolforgeDB::fix_wiki_db_name` →
+  `toolforge::db::normalize_dbname`.
+
+### Changed
+- **Breaking:** the `database` feature now enables `toolforge`'s `wikipool`
+  feature, and `wikimisc::mysql_async` re-exports `toolforge::pool::mysql_async`,
+  which is `mysql_async` **0.37** (was 0.36), built without TLS and without the
+  `derive` macros.
+- **Breaking:** the error enums `DateError`, `LatLonError`,
+  `SparqlTableError`, `SiteMatrixError`, `WikidataError` and `TelemetryError`
+  are `#[non_exhaustive]`, like `SparqlError` already was, so matches on them
+  need a `_` arm; future variants won't be breaking changes.
+- **Breaking:** `RetryPolicy::on_retry` accepts any
+  `Fn(&Retry) + Send + Sync + 'static`, including closures that capture state;
+  plain functions work as before. `RetryPolicy` is no longer `Copy`.
+- `Wikidata::item2qs` skips values QuickStatements would reject or misread
+  (units other than Wikidata items, asymmetric quantity bounds, calendars
+  other than Gregorian/Julian, non-zero timezone/before/after, non-Earth or
+  altitude-carrying coordinates, text containing tabs, line breaks, `||` or
+  `/*`) instead of emitting them. A skipped main value drops the statement, a
+  skipped qualifier or reference snak only that snak.
+- `Date::from_str` rejects days that don't exist in their month (e.g.
+  `1999-02-29`, `1999-04-31`) and month `00` at month precision (`1999-00`).
+- `TimeStamp::str2naive` / `str2utc` accept only 14-digit timestamps and
+  reject a seconds value of 60.
+- `MergeDiff::apply` adds an altered statement whose ID belongs to the item
+  but which the item doesn't have yet, as Wikibase does.
+- Panic locations sent to the telemetry dashboard no longer contain absolute
+  build paths: they start at the crate's directory (e.g.
+  `serde_json-1.0.154/src/value/index.rs`).
+
+### Security
+- `rewrite_named_subqueries` no longer builds unbounded output or overflows
+  the stack on crafted queries: a query whose inlined form would be more than
+  16 times its length (and over 1 MiB), or that nests named subqueries more
+  than 64 deep, is left unchanged with the new reason
+  `UnsupportedNamedSubquery::TooLarge`. A 1.3 KB query used to expand to
+  117 MB, and deep `INCLUDE` chains aborted the process.
+- `rewrite_label_service` runs in linear time for queries with very many
+  `SELECT` keywords or many label services on the same entity, which used to
+  take minutes.
+
+### Fixed
+- `Wikidata::item2qs` put item, property and lexeme values in quotes, which
+  QuickStatements reads as strings; IDs are now bare. It also dropped quantity
+  units and tolerances and the Julian calendar; it now emits `U<n>`,
+  `~<tolerance>` and `/J`.
+- `ItemMerger` kept another entity's statement IDs on merged-in claims, so
+  Wikibase rejected the whole `wbeditentity` edit and `MergeDiff::apply`
+  dropped the statement; such claims are now added as new statements without
+  an ID.
+- `ItemMerger` could add a label equal to the existing description in the
+  same language, which Wikibase rejects.
+- `MergeDiff` dropped sitelink badges from the payload.
+- `rewrite_named_subqueries` reported invalid SPARQL as rewritten: nested
+  `WITH … AS %name` definitions and `INCLUDE %name JOIN ON (…)` hints are left
+  unchanged with the new reasons `UnsupportedNamedSubquery::Nested` and
+  `UnsupportedNamedSubquery::JoinHint`.
+- `SparqlEndpoint::prepare_query` mistook a local name ending in `-prefix` /
+  `.prefix` (e.g. `vcard:honorific-prefix`), or `PREFIX` inside a comment,
+  string or IRI, for a prefix declaration, and left out a prefix the query
+  needed.
+- A Commons file IRI whose percent-encoding isn't valid UTF-8 is kept as
+  `SparqlValue::Uri` instead of failing deserialization of the whole result.
+- `SparqlTable::from_api_result` accepts results with zero variables (e.g. a
+  matching `SELECT * { wd:Q42 wdt:P31 wd:Q5 }`) instead of failing with
+  `HeaderNotSet`.
+- Telemetry: an event queued while a push was in flight, with the queue
+  full, could make the acknowledgement drop an event that was never sent.
+- Telemetry: the final push was lost when a regular push was still in flight
+  on the runtime the exiting thread drives (e.g. a panic in the main future of
+  a `current_thread` runtime). It now waits at most a second for the regular
+  push, then sends anyway; a regular push that gets its turn after shutdown
+  began no longer sends.
+
+## [0.1.4] - 2026-10-18
+
+### Added
+- `sparql_retry`: `RetryPolicy` with exponential backoff, honouring
+  `Retry-After`, enabled with `SparqlClient::with_retries` /
+  `with_retry_policy`; `SparqlError::is_retryable` decides what is retried.
+- `SparqlClient::ask` and `SparqlClient::query_tsv`, with `sparql_tsv`
+  (`SparqlTsv`, `decode_cell`).
+- Endpoint presets `SparqlEndpoint::wikidata_main()` /
+  `wikidata_scholarly()` (WDQS v2) and `wdqs_scholarly()` (v1).
+- `sparql_rewrite::rewrite_named_subqueries`: inlines Blazegraph's named
+  subqueries (`WITH { … } AS %name` / `INCLUDE %name`) for other engines.
+
+### Changed
+- **Breaking:** `SparqlClient::new` takes the user agent as a required
+  argument.
+
+### Removed
+- **Breaking:** SPARQL methods on `Wikidata` (`load_sparql_csv`,
+  `sparql_url`, `set_sparql_url`); use `SparqlClient`.
+
+## [0.1.3] - 2026-10-17
+
+### Changed
+- Telemetry reports non-reclaimable resident memory (`RssAnon` + `RssShmem`)
+  as `process_resident_memory_bytes`, so pages of mmap'd files don't look like
+  memory pressure.
+
+## [0.1.2] - 2026-10-17
 
 ### Added
 - Feature `sparql-client`: `SparqlClient`, an HTTP client for WDQS
@@ -113,6 +228,9 @@ Fixes to code added in this release, listed for anyone who tracked `main`:
 
 Initial release.
 
-[0.1.2]: https://github.com/magnusmanske/wikimisc/compare/7bc0382...HEAD
+[0.2.0]: https://crates.io/crates/wikimisc/0.2.0
+[0.1.4]: https://crates.io/crates/wikimisc/0.1.4
+[0.1.3]: https://crates.io/crates/wikimisc/0.1.3
+[0.1.2]: https://crates.io/crates/wikimisc/0.1.2
 [0.1.1]: https://crates.io/crates/wikimisc/0.1.1
 [0.1.0]: https://crates.io/crates/wikimisc/0.1.0

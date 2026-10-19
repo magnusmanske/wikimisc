@@ -9,7 +9,7 @@ you pull in only the code — and only the dependencies — you actually use:
 
 ```toml
 [dependencies]
-wikimisc = { version = "0.1", default-features = false, features = ["item-merger", "wikidata"] }
+wikimisc = { version = "0.2", default-features = false, features = ["item-merger", "wikidata"] }
 ```
 
 | Feature | Modules | Enables | Extra dependencies |
