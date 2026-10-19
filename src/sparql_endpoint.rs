@@ -10,10 +10,9 @@
 //! This is plain configuration with no I/O; `sparql_client::SparqlClient`
 //! (feature `sparql-client`) sends the prepared query.
 
-use regex::Regex;
+use crate::sparql_lexer::{tokenize, TokenKind};
 use std::collections::HashSet;
 use std::fmt::Write;
-use std::sync::LazyLock;
 
 /// The Wikidata Query Service v1, running Blazegraph. To be shut down once
 /// v2 has replaced it.
@@ -83,14 +82,6 @@ pub const WIKIDATA_PREFIXES: &[(&str, &str)] = &[
     ("ontolex", "http://www.w3.org/ns/lemon/ontolex#"),
     ("dct", "http://purl.org/dc/terms/"),
 ];
-
-// A `PREFIX name:` declaration; the keyword is case-insensitive, the name is
-// not. The keyword must not continue a variable or prefixed name, so that
-// `?prefix wdt:P31` is not taken for a declaration of `wdt:`. Like the statics in `sparql_value`, an unavailable regex degrades to
-// "matches nothing" — every configured prefix is then prepended — rather than
-// panicking; `test_static_regex_compiles` keeps the literal honest.
-static RE_PREFIX_DECL: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?:^|[^\w?$:])(?i:PREFIX)\s+([^\s:]*):").ok());
 
 /// A SPARQL endpoint URL and the prefixes to declare in every query sent to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,9 +172,8 @@ impl SparqlEndpoint {
     /// configured prefix the query does not already declare. The query's own
     /// declaration wins.
     ///
-    /// Declarations are found textually, so one inside a comment or string
-    /// literal also counts — the query then fails exactly as it would have
-    /// without this endpoint's prefixes.
+    /// Declarations are found on the query's tokens, so `PREFIX` inside a
+    /// comment, string, IRI, variable or prefixed name does not count.
     pub fn prepare_query(&self, sparql: &str) -> String {
         let declared = declared_prefixes(sparql);
         let mut query = String::new();
@@ -198,14 +188,13 @@ impl SparqlEndpoint {
     }
 }
 
-/// Names of the prefixes `sparql` declares itself.
+/// Names of the prefixes `sparql` declares itself: `PREFIX name: <iri>`, with
+/// the keyword case-insensitive and the name not.
 fn declared_prefixes(sparql: &str) -> HashSet<&str> {
-    let Some(re) = RE_PREFIX_DECL.as_ref() else {
-        return HashSet::new();
-    };
-    re.captures_iter(sparql)
-        .filter_map(|caps| caps.get(1))
-        .map(|name| name.as_str())
+    tokenize(sparql)
+        .windows(3)
+        .filter(|w| w[0].is_keyword("PREFIX") && w[2].kind == TokenKind::Iri)
+        .filter_map(|w| w[1].text.strip_suffix(':'))
         .collect()
 }
 
@@ -214,11 +203,6 @@ mod tests {
     use super::*;
 
     const QUERY: &str = "SELECT ?x WHERE { ?x wdt:P31 wd:Q5 }";
-
-    #[test]
-    fn test_static_regex_compiles() {
-        assert!(RE_PREFIX_DECL.is_some());
-    }
 
     #[test]
     fn test_no_prefixes_leaves_query_unchanged() {
@@ -282,6 +266,11 @@ mod tests {
             "SELECT * { $prefix wdt:P31 ?x }",
             "SELECT * { ex:prefix wdt:P31 ?x }",
             "SELECT * { ?x myprefix wdt:P31 }",
+            "SELECT * { ?x vcard:honorific-prefix wdt:P31 }",
+            "SELECT * { ?x ex:a.prefix wdt:P31 }",
+            "SELECT * { ?x <http://ex/PREFIX> wdt:P31 }",
+            "SELECT * { ?x rdfs:label 'PREFIX wdt: <http://b/>' }",
+            "# PREFIX wdt: <http://b/>\nSELECT * { ?x wdt:P31 ?y }",
         ] {
             assert!(
                 endpoint.prepare_query(query).starts_with("PREFIX wdt:"),
@@ -292,6 +281,7 @@ mod tests {
         for query in [
             "PREFIX wdt: <http://b/> ASK {}",
             "#x\nPREFIX wdt: <http://b/> ASK {}",
+            "BASE <http://a/>\nprefix wdt:<http://b/> ASK {}",
         ] {
             assert_eq!(endpoint.prepare_query(query), query);
         }
