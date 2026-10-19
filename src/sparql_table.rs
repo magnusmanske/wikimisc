@@ -15,6 +15,7 @@ use thiserror::Error;
 
 /// Failure modes of the tabular SPARQL result types.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SparqlTableError {
     /// A row was pushed before the header list was established, so its cells
     /// cannot be assigned to columns.
@@ -53,7 +54,9 @@ impl RowStorage for Vec<SparqlRow> {
 /// Tabular SPARQL result set. Generic over the row container.
 #[derive(Debug, Clone)]
 pub struct SparqlTable<S: RowStorage> {
-    headers: Vec<String>,
+    /// `None` until headers are set; `Some(vec![])` is a valid zero-variable
+    /// result (`SELECT *` over a pattern without variables).
+    headers: Option<Vec<String>>,
     rows: S,
     main_variable: Option<String>,
 }
@@ -71,7 +74,7 @@ impl<S: RowStorage> SparqlTable<S> {
     /// Create a new empty table.
     pub fn new() -> Self {
         Self {
-            headers: Vec::new(),
+            headers: None,
             rows: S::default(),
             main_variable: None,
         }
@@ -107,7 +110,7 @@ impl<S: RowStorage> SparqlTable<S> {
     /// Zero-based column index of a variable name (case-insensitive).
     pub fn get_var_index(&self, var: &str) -> Option<usize> {
         let var = var.to_lowercase();
-        self.headers
+        self.headers()
             .iter()
             .position(|name| name.to_lowercase() == var)
     }
@@ -126,14 +129,11 @@ impl<S: RowStorage> SparqlTable<S> {
         &mut self,
         row: &HashMap<String, SparqlValue>,
     ) -> Result<(), SparqlTableError> {
-        if self.headers.is_empty() {
-            return Err(SparqlTableError::HeaderNotSet);
-        }
-        let new_row: SparqlRow = self
+        let headers = self
             .headers
-            .iter()
-            .map(|name| row.get(name).cloned())
-            .collect();
+            .as_ref()
+            .ok_or(SparqlTableError::HeaderNotSet)?;
+        let new_row: SparqlRow = headers.iter().map(|name| row.get(name).cloned()).collect();
         self.push(new_row)
     }
 
@@ -150,23 +150,27 @@ impl<S: RowStorage> SparqlTable<S> {
     /// Column index of the main variable, if set.
     pub fn main_column(&self) -> Option<usize> {
         let mv = self.main_variable.as_ref()?;
-        self.headers.iter().position(|header| header == mv)
+        self.headers().iter().position(|header| header == mv)
+    }
+
+    /// The column names; empty if none have been set.
+    fn headers(&self) -> &[String] {
+        self.headers.as_deref().unwrap_or_default()
     }
 
     /// Replace the header list.
     pub fn set_headers(&mut self, headers: Vec<String>) {
-        self.headers = headers;
+        self.headers = Some(headers);
     }
 
     /// Build a table from a deserialised SPARQL API result. Consumes `result`.
     pub fn from_api_result(result: SparqlApiResult) -> Result<Self, SparqlTableError> {
         let mut table = Self::new();
-        let headers = result
-            .head()
-            .get("vars")
-            .map(|v| v.to_owned())
-            .unwrap_or_default();
-        table.set_headers(headers);
+        // Without `vars` the headers stay unset and any row is an error; an
+        // empty `vars` list is a valid zero-variable result.
+        if let Some(headers) = result.head().get("vars") {
+            table.set_headers(headers.to_owned());
+        }
         for row in result.bindings() {
             table.push_sparql_result_row(row)?;
         }
@@ -345,6 +349,19 @@ mod tests {
             ]}
         }));
         assert!(SparqlTableVec::from_api_result(result).is_err());
+    }
+
+    #[test]
+    fn test_from_api_result_zero_variables() {
+        // Blazegraph's answer to a matching `SELECT * { wd:Q42 wdt:P31 wd:Q5 }`.
+        let result = make_api_result(serde_json::json!({
+            "head": {"vars": []},
+            "results": {"bindings": [{}]}
+        }));
+        let table: SparqlTableVec = SparqlTable::from_api_result(result).unwrap();
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.get(0), Some(vec![]));
+        assert_eq!(table.get_row_col(0, 0), None);
     }
 
     #[test]
