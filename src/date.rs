@@ -14,6 +14,10 @@
 //!   are not recognised and fail.
 //! - **Two-digit years are rejected.** The patterns require `\d{3,}`, so a
 //!   bare `99` will not parse. This avoids ambiguity between, e.g., 1999 and 99.
+//! - **Impossible dates are rejected.** A month of `00` is accepted only at
+//!   year precision (9), and at day precision (11) the day must exist in its
+//!   month in the proleptic Gregorian calendar: `1999-02-29` and `1999-04-31`
+//!   fail, `2000-02-29` parses.
 
 use chrono::Datelike;
 use regex::Regex;
@@ -149,12 +153,14 @@ impl FromStr for Date {
             return Err(unparsable());
         }
 
+        // Month precision (10) and finer need a month; year precision (9)
+        // keeps Wikidata's `00` placeholder.
         let month = parts
             .get(1)
             .ok_or_else(unparsable)?
-            .parse::<u8>()
+            .parse::<u32>()
             .map_err(not_a_number)?;
-        if month > 12 || (month == 0 && precision >= 11) {
+        if month > 12 || (month == 0 && precision >= 10) {
             return Err(unparsable());
         }
 
@@ -163,9 +169,12 @@ impl FromStr for Date {
             .split('T')
             .next()
             .ok_or_else(unparsable)?
-            .parse::<u8>()
+            .parse::<u32>()
             .map_err(not_a_number)?;
-        if precision >= 11 && !(1..=31).contains(&day) {
+        // Day precision (11) needs a day that exists in that month, leap years
+        // included (proleptic Gregorian, as chrono and Wikidata's default
+        // calendar count; years here are never negative).
+        if precision >= 11 && chrono::NaiveDate::from_ymd_opt(year, month, day).is_none() {
             return Err(unparsable());
         }
         Ok(Self { time, precision })
@@ -288,6 +297,43 @@ mod tests {
         assert!(Date::from_str("1234-13").is_err());
         assert!(Date::from_str("1234-99").is_err());
         // Month 00 is valid for year-only precision (gets converted to precision 9)
+    }
+
+    #[test]
+    fn test_month_00_rejected_at_month_precision() {
+        assert!(Date::from_str("1999-00").is_err());
+        assert!(Date::from_str("+1999-00-00T00:00:00Z/10").is_err());
+        assert!(Date::from_str("1999-00-00T00:00:00Z/10").is_err());
+        // Year precision keeps its placeholder month.
+        assert_eq!(
+            Date::from_str("+1999-00-00T00:00:00Z/9").unwrap().as_qs(),
+            "+1999-00-00T00:00:00Z/9"
+        );
+    }
+
+    #[test]
+    fn test_day_must_exist_in_its_month() {
+        for impossible in [
+            "1999-02-29",
+            "1999-02-30",
+            "1999-04-31",
+            "1900-02-29",
+            "+1999-06-31T00:00:00Z/11",
+        ] {
+            assert!(Date::from_str(impossible).is_err(), "{impossible}");
+        }
+        for possible in ["2000-02-29", "1996-02-29", "1999-04-30", "1999-12-31"] {
+            assert_eq!(
+                Date::from_str(possible).unwrap().precision(),
+                11,
+                "{possible}"
+            );
+        }
+        // Coarser precisions do not look at the day.
+        assert_eq!(
+            Date::from_str("1999-02-00T00:00:00Z/10").unwrap().time(),
+            "+1999-02-00T00:00:00Z"
+        );
     }
 
     #[test]
