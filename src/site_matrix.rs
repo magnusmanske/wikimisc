@@ -9,6 +9,7 @@ use wikibase::mediawiki::prelude::*;
 
 /// Failure modes of [`SiteMatrix`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SiteMatrixError {
     /// The `sitematrix` key of the API response is not a JSON object, so the
     /// site list cannot be walked.

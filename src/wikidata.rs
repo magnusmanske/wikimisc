@@ -20,6 +20,7 @@ use wikibase::{
 
 /// Failure modes of [`Wikidata`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum WikidataError {
     /// [`Wikidata::item2qs`] was handed an item that already exists on Wikidata.
     /// QuickStatements can only create new items, so the ID must be empty.

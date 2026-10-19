@@ -28,6 +28,7 @@ use thiserror::Error;
 
 /// Failure modes of [`Date::from_str`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DateError {
     /// The string does not look like any date this module recognises, or it
     /// does but the resulting date is not a valid one (month 13, day 32, a year
