@@ -6,6 +6,7 @@ use thiserror::Error;
 
 /// Failure modes of [`LatLon::from_str`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum LatLonError {
     /// The latitude is absent or not a number.
     #[error("cannot parse latitude from '{0}'")]
