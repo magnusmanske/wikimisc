@@ -139,6 +139,10 @@ pub enum Level {
 
 #[derive(Debug, Clone, Serialize)]
 struct Event {
+    /// Position in the queue's history, for acknowledging exactly the events
+    /// a push carried: the queue may drop its oldest entries meanwhile.
+    #[serde(skip)]
+    seq: u64,
     ts: u64,
     level: Level,
     message: String,
@@ -360,6 +364,42 @@ struct PushState {
     acked: HashMap<CounterKey, f64>,
     histogram_totals: HashMap<Key, (f64, f64)>,
     events: VecDeque<Event>,
+    next_event_seq: u64,
+}
+
+/// What a push carried, to be acknowledged once the dashboard accepted it.
+#[derive(Debug, Default)]
+struct Sent {
+    counters: Vec<(CounterKey, f64)>,
+    /// Sequence number of the last event sent, if any.
+    last_event: Option<u64>,
+}
+
+impl PushState {
+    fn queue_event(&mut self, level: Level, message: String) {
+        if self.events.len() >= MAX_QUEUED_EVENTS {
+            self.events.pop_front();
+        }
+        let seq = self.next_event_seq;
+        // Cannot overflow in practice; saturating so that it can never panic.
+        self.next_event_seq = seq.saturating_add(1);
+        self.events.push_back(Event {
+            seq,
+            ts: unix_now(),
+            level,
+            message,
+        });
+    }
+
+    /// Goes by sequence number, not position: an event queued while the push
+    /// was in flight may have dropped sent events from the front, and
+    /// counting off the front would then remove unsent ones.
+    fn acknowledge(&mut self, sent: Sent) {
+        self.acked.extend(sent.counters);
+        if let Some(last) = sent.last_event {
+            self.events.retain(|e| e.seq > last);
+        }
+    }
 }
 
 static GLOBAL: OnceLock<Telemetry> = OnceLock::new();
@@ -441,15 +481,7 @@ impl Telemetry {
     /// error text that may contain them. The same goes for [`ExitReason`]
     /// details, which the dashboard shows publicly. Log the specifics locally.
     pub fn event(&self, level: Level, message: impl Into<String>) {
-        let mut state = lock(&self.inner.state);
-        if state.events.len() >= MAX_QUEUED_EVENTS {
-            state.events.pop_front();
-        }
-        state.events.push_back(Event {
-            ts: unix_now(),
-            level,
-            message: message.into(),
-        });
+        lock(&self.inner.state).queue_event(level, message.into());
     }
 
     /// Sends the final push, telling the dashboard why the process is
@@ -494,7 +526,7 @@ impl Telemetry {
         exit: Option<&ExitReason>,
     ) -> Result<(), TelemetryError> {
         let _push_lock = self.inner.push_lock.lock().await;
-        let (payload, sent_counters, sent_events) = self.payload(exit);
+        let (payload, sent) = self.payload(exit);
         let response = client
             .post(&self.inner.url)
             .bearer_auth(&self.inner.token)
@@ -509,18 +541,12 @@ impl Telemetry {
                 message: message.chars().take(200).collect(),
             });
         }
-        let mut state = lock(&self.inner.state);
-        state.acked.extend(sent_counters);
-        let sent_events = sent_events.min(state.events.len());
-        state.events.drain(..sent_events);
+        lock(&self.inner.state).acknowledge(sent);
         Ok(())
     }
 
-    /// The payload, the counter values it contains, and how many queued events it carries.
-    fn payload<'a>(
-        &'a self,
-        exit: Option<&'a ExitReason>,
-    ) -> (Payload<'a>, Vec<(CounterKey, f64)>, usize) {
+    /// The payload, and what it carries that needs acknowledging.
+    fn payload<'a>(&'a self, exit: Option<&'a ExitReason>) -> (Payload<'a>, Sent) {
         let mut state = lock(&self.inner.state);
         let mut metrics = self.system_metrics(exit.is_none());
         let recorded = self.inner.recorder.snapshot(&mut state.histogram_totals);
@@ -531,13 +557,15 @@ impl Telemetry {
                 || state.acked.get(&(m.name.clone(), m.labels.clone())) != Some(&m.value)
         });
         metrics.truncate(MAX_METRICS);
-        let sent_counters = metrics
-            .iter()
-            .filter(|m| m.kind == MetricKind::Counter)
-            .map(|m| ((m.name.clone(), m.labels.clone()), m.value))
-            .collect();
         let events: Vec<Event> = state.events.iter().take(MAX_EVENTS).cloned().collect();
-        let sent_events = events.len();
+        let sent = Sent {
+            counters: metrics
+                .iter()
+                .filter(|m| m.kind == MetricKind::Counter)
+                .map(|m| ((m.name.clone(), m.labels.clone()), m.value))
+                .collect(),
+            last_event: events.last().map(|e| e.seq),
+        };
         let payload = Payload {
             v: 1,
             instance: &self.inner.instance,
@@ -545,7 +573,7 @@ impl Telemetry {
             events,
             exit: exit.map(ExitReason::wire),
         };
-        (payload, sent_counters, sent_events)
+        (payload, sent)
     }
 
     /// Process readings, first in the list so the per-push limit never cuts them.
@@ -992,6 +1020,49 @@ mod tests {
         assert!(metric(&pushes[1], "jobs_total").is_none());
         assert!(metric(&pushes[1], "queue").is_some());
         assert_eq!(pushes[1]["events"].as_array().unwrap().len(), 0);
+    }
+
+    /// Waits until the server has received `count` requests.
+    async fn wait_for_requests(server: &MockServer, count: usize) {
+        for _ in 0..500 {
+            if server.received_requests().await.unwrap().len() >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the server never received {count} requests");
+    }
+
+    #[tokio::test]
+    async fn test_event_queued_during_a_push_is_not_lost() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(500)))
+            .mount(&server)
+            .await;
+        let t = telemetry(&server.uri());
+        for i in 0..MAX_QUEUED_EVENTS {
+            t.event(Level::Info, format!("event {i}"));
+        }
+
+        let push = tokio::spawn({
+            let t = t.clone();
+            async move { t.push(&t.inner.client, None).await }
+        });
+        wait_for_requests(&server, 1).await;
+        // The queue is full, so this drops "event 0", which is in flight.
+        t.event(Level::Warn, "queued during the push");
+        push.await.unwrap().unwrap();
+
+        // The push carried events 0..MAX_EVENTS; all others must remain.
+        let state = lock(&t.inner.state);
+        let messages: Vec<&str> = state.events.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages.len(), MAX_QUEUED_EVENTS - MAX_EVENTS + 1);
+        assert_eq!(
+            messages.first(),
+            Some(&format!("event {MAX_EVENTS}").as_str())
+        );
+        assert_eq!(messages.last(), Some(&"queued during the push"));
     }
 
     #[tokio::test]
