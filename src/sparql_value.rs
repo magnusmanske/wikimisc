@@ -78,13 +78,12 @@ impl SparqlValue {
                 .get(1)
                 .map(|entity| SparqlValue::Entity(entity.as_str().to_string()));
         }
-        match captures(&RE_FILE, value) {
-            Some(caps) => {
-                let file = urlencoding::decode(caps.get(1)?.as_str()).ok()?;
-                Some(SparqlValue::File(file.replace('_', " ")))
-            }
-            None => Some(SparqlValue::Uri(value.to_string())),
-        }
+        // A file name whose percent-encoding is not UTF-8 cannot be decoded,
+        // so it stays a plain URI rather than failing the whole result.
+        let file = captures(&RE_FILE, value)
+            .and_then(|caps| urlencoding::decode(caps.get(1)?.as_str()).ok())
+            .map(|file| SparqlValue::File(file.replace('_', " ")));
+        Some(file.unwrap_or_else(|| SparqlValue::Uri(value.to_string())))
     }
 
     fn from_literal(value: &str, datatype: Option<&str>) -> Self {
@@ -335,6 +334,15 @@ mod tests {
         let json = r#"{"type":"uri","value":"http://commons.wikimedia.org/wiki/Special:FilePath/My%20File.jpg"}"#;
         let value = SparqlValue::new_from_json(&serde_json::from_str(json).unwrap());
         assert_eq!(value, Some(SparqlValue::File("My File.jpg".to_string())));
+    }
+
+    #[test]
+    fn test_new_from_json_file_with_non_utf8_encoding_stays_uri() {
+        // `%E9` is Latin-1 for "é"; it does not decode as UTF-8.
+        let uri = "http://commons.wikimedia.org/wiki/Special:FilePath/Caf%E9.jpg";
+        let json = serde_json::json!({"type": "uri", "value": uri});
+        let value = SparqlValue::new_from_json(&json);
+        assert_eq!(value, Some(SparqlValue::Uri(uri.to_string())));
     }
 
     #[test]
