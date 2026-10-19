@@ -95,13 +95,9 @@ item-merger = [
     "dep:serde_json",
 ]
 
-# `toolforge_db` plus the `mysql_async` re-export: Toolforge database pools.
-database = [
-    "toolforge",
-    "dep:mysql_async",
-    "dep:serde_json",
-    "dep:thiserror",
-]
+# The `toolforge` crate's database pools (`toolforge::db`, `toolforge::pool`),
+# plus the re-export of the `mysql_async` they are built on.
+database = ["toolforge", "toolforge/wikipool"]
 
 # `telemetry` plus the `metrics` re-export: pushes metrics, process readings
 # and exit reasons to the Buggregator service dashboard.
@@ -142,7 +138,6 @@ chrono = { version = "0.4", optional = true }
 csv = { version = "1", optional = true }
 metrics = { version = "0.24", optional = true }
 metrics-util = { version = "0.20", default-features = false, features = ["layers", "registry"], optional = true }
-mysql_async = { version = "0.36", optional = true }
 regex = { version = "1", optional = true }
 reqwest = { version = "0.13", features = ["form", "json"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
@@ -150,7 +145,7 @@ serde_json = { version = "1", optional = true }
 tempfile = { version = "3", optional = true }
 thiserror = { version = "2", optional = true }
 tokio = { version = "1.41", features = ["rt", "time"], optional = true }
-toolforge = { version = "6", optional = true }
+toolforge = { version = "6.1", optional = true }
 urlencoding = { version = "^2", optional = true }
 wikibase = { version = "0.7.8", optional = true }
 

@@ -63,10 +63,6 @@ mod telemetry_recorder;
 pub mod timestamp;
 #[cfg(feature = "toolforge")]
 pub mod toolforge_app;
-#[cfg(feature = "database")]
-pub mod toolforge_credentials;
-#[cfg(feature = "database")]
-pub mod toolforge_db;
 #[cfg(feature = "wikidata")]
 pub mod wikidata;
 
@@ -75,10 +71,10 @@ pub(crate) mod test_support;
 
 #[cfg(feature = "telemetry")]
 pub use metrics;
-#[cfg(feature = "database")]
-pub use mysql_async;
 #[cfg(feature = "toolforge")]
 pub use toolforge;
+#[cfg(feature = "database")]
+pub use toolforge::pool::mysql_async;
 #[cfg(feature = "wikibase")]
 pub use wikibase;
 #[cfg(feature = "wikibase")]
