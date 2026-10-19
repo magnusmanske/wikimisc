@@ -810,13 +810,51 @@ fn this_panic_ends_process() -> bool {
     )
 }
 
-/// Where a panic happened, e.g. `src/main.rs:12:5`. The message is left out on
+/// Where a panic happened, e.g. `src/main.rs:12:5`, with the path reduced by
+/// [`anonymous_path`] since the dashboard is public. The message is left out on
 /// purpose: it can contain whatever the code was handling (titles, user names,
 /// query strings), and the location is enough to find the bug; the full panic
 /// still goes to stderr through the previous hook.
 fn panic_location(info: &std::panic::PanicHookInfo<'_>) -> String {
-    info.location()
-        .map_or_else(|| "an unknown location".to_string(), ToString::to_string)
+    info.location().map_or_else(
+        || "an unknown location".to_string(),
+        |l| format!("{}:{}:{}", anonymous_path(l.file()), l.line(), l.column()),
+    )
+}
+
+/// A source path without the machine's directories, which can name the user
+/// who built the binary (`/home/<name>/...`). Relative paths (the crate's
+/// own code, as cargo builds it) are kept as they are. Absolute ones are cut
+/// down to start at the crate's directory:
+///
+/// - crates.io: `…/registry/src/<index>/serde_json-1.0.1/src/lib.rs` →
+///   `serde_json-1.0.1/src/lib.rs`
+/// - git: `…/git/checkouts/<repo>-<hash>/<rev>/src/lib.rs` →
+///   `<repo>-<hash>/<rev>/src/lib.rs`
+/// - anything else: from the directory holding the last `src`
+///   (`/home/me/tool/src/main.rs` → `tool/src/main.rs`), else the file name.
+///
+/// Both separators are understood, whatever the platform, and the result uses `/`.
+fn anonymous_path(path: &str) -> String {
+    let is_absolute = path.starts_with(['/', '\\']) || path.get(1..2) == Some(":");
+    if !is_absolute {
+        return path.to_string();
+    }
+    let parts: Vec<&str> = path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    let after = |dirs: [&str; 2]| parts.windows(2).rposition(|w| w == dirs);
+    let start = if let Some(i) = after(["registry", "src"]) {
+        i.saturating_add(3) // past `registry/src/<index>`
+    } else if let Some(i) = after(["git", "checkouts"]) {
+        i.saturating_add(2)
+    } else if let Some(i) = parts.iter().rposition(|p| *p == "src") {
+        i.saturating_sub(1)
+    } else {
+        parts.len().saturating_sub(1)
+    };
+    match parts.get(start..) {
+        Some(rest) if !rest.is_empty() => rest.join("/"),
+        _ => parts.last().copied().unwrap_or_default().to_string(),
+    }
 }
 
 fn is_valid_component(component: &str) -> bool {
@@ -1271,6 +1309,54 @@ mod tests {
             (true, false),
             "the main future's panics are fatal, a task's are not"
         );
+    }
+
+    #[test]
+    fn test_panic_locations_do_not_show_the_build_machine() {
+        for (path, expected) in [
+            // Relative paths stay as they are.
+            ("src/main.rs", "src/main.rs"),
+            ("crates/bot/src/lib.rs", "crates/bot/src/lib.rs"),
+            (r"src\main.rs", r"src\main.rs"),
+            // crates.io
+            (
+                "/Users/name/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.154/src/value/index.rs",
+                "serde_json-1.0.154/src/value/index.rs",
+            ),
+            (
+                "/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/a-1.0.0/build/x.rs",
+                "a-1.0.0/build/x.rs",
+            ),
+            (
+                r"C:\Users\name\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.0\src\de.rs",
+                "serde-1.0.0/src/de.rs",
+            ),
+            // git
+            (
+                "/home/name/.cargo/git/checkouts/wikibase-1a2b3c4d5e6f7a8b/0abc123/src/lib.rs",
+                "wikibase-1a2b3c4d5e6f7a8b/0abc123/src/lib.rs",
+            ),
+            (
+                r"C:\Users\name\.cargo\git\checkouts\tools-1a2b3c4d\0abc123\crates\x\src\lib.rs",
+                "tools-1a2b3c4d/0abc123/crates/x/src/lib.rs",
+            ),
+            // Anything else, e.g. the service's own crate built with absolute
+            // paths, a path dependency, or the standard library.
+            ("/home/name/src/mytool/src/main.rs", "mytool/src/main.rs"),
+            ("/home/name/mytool/src/bin/cli.rs", "mytool/src/bin/cli.rs"),
+            ("/workspace/src/main.rs", "workspace/src/main.rs"),
+            ("/src/main.rs", "src/main.rs"),
+            (
+                "/rustc/0123abcd/library/core/src/option.rs",
+                "core/src/option.rs",
+            ),
+            (r"D:\a\tool\src\main.rs", "tool/src/main.rs"),
+            ("/home/name/target/release/build/x-1234/out/gen.rs", "gen.rs"),
+            ("/home/name/.cargo/registry/src/", "src"),
+            ("/", ""),
+        ] {
+            assert_eq!(anonymous_path(path), expected, "{path}");
+        }
     }
 
     #[test]
