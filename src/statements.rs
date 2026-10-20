@@ -9,7 +9,6 @@
 //! - coordinates get a precision ([`coordinate_snak`]); `Snak::new_coordinate`
 //!   leaves it out, and `wbeditentity` rejects a coordinate without one;
 //! - quantities can carry a unit ([`quantity_snak`]);
-//! - monolingual text keeps language and text apart ([`monolingual_snak`]);
 //! - the usual references: "stated in" with an identifier and "retrieved"
 //!   ([`stated_in_reference`]), a reference URL ([`reference_url`]), and
 //!   "imported from" a wiki revision ([`imported_from_revision`]).

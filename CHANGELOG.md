@@ -78,6 +78,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** the `sparql` feature enables `entity-id`; `external-id`
   enables `entity-id` and `statements`; the `wikibase` re-exports now come with
   the `mediawiki` feature (same crate as before).
+- Requires `wikibase` 0.7.9, whose `Snak::new_monolingual_text` no longer
+  swaps language and text.
 
 ### Deprecated
 - The `ExternalId` search methods without a `Wikidata` argument; use the

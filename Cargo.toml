@@ -243,7 +243,7 @@ tower-http = { version = "0.7", features = ["catch-panic", "compression-gzip", "
 tracing-log = { version = "0.2", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"], optional = true }
 urlencoding = { version = "^2", optional = true }
-wikibase = { version = "0.7.8", optional = true }
+wikibase = { version = "0.7.9", optional = true }
 
 [dev-dependencies]
 # Test-only deps, needed regardless of which features are enabled: several
