@@ -15,22 +15,42 @@
     warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+#[cfg(feature = "title")]
+pub mod commons;
 #[cfg(feature = "sparql-client")]
 mod content_type;
 #[cfg(feature = "date")]
 pub mod date;
+#[cfg(feature = "entity-id")]
+pub mod entity_id;
+#[cfg(feature = "escape")]
+pub mod escape;
 #[cfg(feature = "external-id")]
 pub mod external_id;
+#[cfg(feature = "http")]
+pub mod http;
 #[cfg(feature = "item-merger")]
 pub mod item_merger;
+#[cfg(feature = "jsonp")]
+pub mod jsonp;
+#[cfg(feature = "labels")]
+pub mod labels;
 #[cfg(feature = "lat-lon")]
 pub mod lat_lon;
+#[cfg(feature = "logging")]
+pub mod logging;
 #[cfg(feature = "item-merger")]
 pub mod merge_diff;
 #[cfg(feature = "process-stats")]
 pub mod process_stats;
+#[cfg(feature = "retry")]
+pub mod retry;
 #[cfg(feature = "seppuku")]
 pub mod seppuku;
+#[cfg(feature = "server")]
+pub mod server;
+#[cfg(feature = "shutdown")]
+pub mod shutdown;
 #[cfg(feature = "site-matrix")]
 pub mod site_matrix;
 #[cfg(feature = "sparql-client")]
@@ -54,13 +74,19 @@ pub mod sparql_table_vec;
 #[cfg(feature = "sparql")]
 pub mod sparql_tsv;
 #[cfg(feature = "sparql")]
+pub mod sparql_util;
+#[cfg(feature = "sparql")]
 pub mod sparql_value;
+#[cfg(feature = "statements")]
+pub mod statements;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 #[cfg(feature = "telemetry")]
 mod telemetry_recorder;
 #[cfg(feature = "date")]
 pub mod timestamp;
+#[cfg(feature = "title")]
+pub mod title;
 #[cfg(feature = "toolforge")]
 pub mod toolforge_app;
 #[cfg(feature = "wikidata")]
@@ -75,7 +101,9 @@ pub use metrics;
 pub use toolforge;
 #[cfg(feature = "database")]
 pub use toolforge::pool::mysql_async;
+// The direct `mediawiki` dependency has the same version requirement as
+// `wikibase`'s, so this is the very crate `wikibase` is built on.
+#[cfg(feature = "mediawiki")]
+pub use mediawiki;
 #[cfg(feature = "wikibase")]
 pub use wikibase;
-#[cfg(feature = "wikibase")]
-pub use wikibase::mediawiki;

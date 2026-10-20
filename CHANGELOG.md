@@ -4,6 +4,85 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - Unreleased
+
+### Added
+- `entity-id` feature: typed entity IDs (`entity_id::{ItemId, PropertyId,
+  LexemeId, MediaInfoId, EntitySchemaId, FormId, SenseId, EntityId,
+  EntityKind}`) with strict (`FromStr`), lenient (`parse_lenient`) and URI
+  (`from_uri`) parsing, string serde (and `serde_numeric` for numbers), and
+  numeric `mysql_async` binding with `database`.
+- `retry` feature: `RetryPolicy<E>` for any error type (`Retryable`, `run`,
+  `run_if`, jitter, clamped `Retry-After`).
+- `http` feature: `user_agent!()`, `client_builder`, `client`, `retry_after`
+  (seconds or HTTP date), `HttpError`, `HttpRetryPolicy::send`,
+  `read_body_capped`, `snippet`.
+- `title` feature: `title` (DB-key/display forms, `normalize`, `ucfirst`,
+  `strip_namespace`, `wiki_urlencode`, `page_url`, `index_url`, `permalink`,
+  `title_from_url`, percent coding) and `commons` (FilePath, Redirect, upload
+  and thumbnail URLs, file names from URLs).
+- `escape` feature: `escape::{html, html_text, xml, unescape_html}`.
+- `logging` feature: `logging::Logging` / `logging::init()` (`tracing`
+  subscriber plus `log` bridge; stderr by default or `.stdout()`; colour only
+  on a terminal or as set with `.ansi()`; an explicit `.filter()` beats the
+  environment variable, `.default_filter()` is the fallback).
+- `shutdown` feature: `shutdown::{shutdown_signal, ShutdownSignal}` without a
+  web framework; `jsonp` feature: `jsonp::{is_valid_callback, wrap,
+  CallbackRules, CONTENT_TYPE}`. `server` enables both and re-exports them.
+- `server` feature: `server::{shutdown_signal, listen_addr, serve,
+  serve_with_connect_info}`, router layers (`standard_layers`, `catch_panic`,
+  `compression`, `trace`, `timeout`, `cors_any`, `cors_wikimedia`),
+  `is_wikimedia_origin` (`cors_wikimedia` also admits the `Api-User-Agent`
+  header gadgets send), `server::health`, `server::jsonp` (adds the axum
+  `Jsonp<T>` response); with `telemetry`, `request_metrics`.
+- `labels` feature: label/description lookup with language fallback,
+  `base_language`, `RankFilter`, best-ranked statements, for raw entity JSON
+  (needs only `serde_json`) and, with `wikibase`, for `wikibase` entities.
+- `statements` feature: typed snak builders (times with calendar models,
+  coordinates with precision, …) and the usual references (`stated_in_reference`,
+  `retrieved_today`, `reference_url`, `imported_from_revision`).
+- `mediawiki` feature: the `mediawiki` re-export without `wikibase`.
+- `sparql_util`: `values_clause`, `entity_term`, `string_literal`,
+  `label_pattern`, `not_deprecated`; `SparqlValue::entity_id`.
+- `Date`: `new`, `new_in`, `from_wikibase`, `from_qs`, `today`, parts,
+  `Calendar`, `with_calendar`, `with_precision`, `describe`.
+- `TimeStamp::{naive, ago, days_ago, start_of_today, rfc3339}`.
+- `LatLon::{try_new, from_wkt, to_wkt, distance_km, distance_m}`,
+  `lat_lon::{BoundingBox, parse_distance_m}`; `FromStr` accepts `lat/lon` and `@…`.
+- `Wikidata::{get_entities, items_for_titles, search, search_items,
+  search_single_item, set_concurrency, user_agent}` and `wikidata::CirrusQuery`.
+- `SiteMatrix::{get_api_url_for_wiki, get_api_for_wiki_with_builder,
+  cached_api_for_wiki, languages, from_value}`; `SiteMatrixLanguage`.
+- `ExternalId::{is_case_insensitive, property_id, search_query}`.
+- `Seppuku::watch` with `Verdict` (probe-based watchdog);
+  `process_stats::MemoryStats`; `TelemetryBuilder::{component, install_or_log,
+  install_alongside_or_log}`.
+
+### Changed
+- **Breaking:** `Wikidata::new` takes the user agent, and `Wikidata` no longer
+  implements `Default`. The old default (`wikimisc-wikidata/0.1.0`) did not
+  follow Wikimedia's user-agent policy and shared one rate-limit budget across
+  every tool.
+- `Wikidata::api()` and the `Api`s `SiteMatrix` builds now actually send the
+  configured user agent (the `mediawiki` crate overrides the client's header
+  per request unless `Api::set_user_agent` is called).
+- **Breaking:** `sparql_retry::RetryPolicy` and `sparql_retry::Retry` are now
+  aliases of `retry::RetryPolicy<SparqlError>` / `retry::Retry<'_, SparqlError>`;
+  existing calls compile unchanged.
+- `SparqlClient` honours a `Retry-After` given as an HTTP date, and its default
+  client adds a 10 s connect timeout and gzip.
+- `ExternalId` normalises more values: P244 (`+`, `%20`), P1207 (`+`), P1368
+  (`LNC10-` prefix), P8034 (`_` → `/`). `ExternalId::as_reference` is built by
+  `statements::stated_in_reference`.
+- `SparqlApiResult` accepts a response without `head`.
+- **Breaking:** the `sparql` feature enables `entity-id`; `external-id`
+  enables `entity-id` and `statements`; the `wikibase` re-exports now come with
+  the `mediawiki` feature (same crate as before).
+
+### Deprecated
+- The `ExternalId` search methods without a `Wikidata` argument; use the
+  `_with` variants so requests carry your user agent.
+
 ## [0.2.0] - 2026-10-19
 
 ### Removed

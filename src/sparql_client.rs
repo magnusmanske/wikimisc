@@ -36,13 +36,15 @@
 //! ```
 
 use crate::content_type::{may_be_csv, may_be_tsv};
+use crate::http::{client_builder, retry_after};
+use crate::retry::Retryable;
 use crate::sparql_endpoint::SparqlEndpoint;
 use crate::sparql_results::SparqlApiResult;
-use crate::sparql_retry::{Retry, RetryPolicy};
+use crate::sparql_retry::RetryPolicy;
 use crate::sparql_table::{SparqlTableError, SparqlTableVec};
 use crate::sparql_tsv::SparqlTsv;
 use regex::Regex;
-use reqwest::header::{HeaderMap, ACCEPT, CONTENT_TYPE, RETRY_AFTER};
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::{Client, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use std::fs::File;
@@ -53,7 +55,6 @@ use std::time::Duration;
 use tempfile::tempfile;
 use thiserror::Error;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const ACCEPT_JSON: &str = "application/sparql-results+json";
 const ACCEPT_CSV: &str = "text/csv";
 const ACCEPT_TSV: &str = "text/tab-separated-values";
@@ -187,6 +188,19 @@ impl SparqlError {
     }
 }
 
+impl Retryable for SparqlError {
+    fn is_retryable(&self) -> bool {
+        SparqlError::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+}
+
 /// Sends SPARQL queries to one [`SparqlEndpoint`].
 ///
 /// Queries are POSTed form-encoded, so their length is not limited by the
@@ -200,7 +214,8 @@ pub struct SparqlClient {
 }
 
 impl SparqlClient {
-    /// A client sending `user_agent`, with a 60-second timeout.
+    /// A client sending `user_agent`, with a 60-second timeout (see
+    /// [`crate::http::client_builder`]).
     ///
     /// Wikimedia's [user-agent policy](https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy)
     /// asks every tool to identify itself *with contact information*, in the
@@ -208,10 +223,7 @@ impl SparqlClient {
     /// may refuse requests without it. Admission to WDQS v2 may additionally
     /// depend on the user agent being known to Wikimedia.
     pub fn new(endpoint: SparqlEndpoint, user_agent: &str) -> Result<Self, SparqlError> {
-        let client = Client::builder()
-            .user_agent(user_agent)
-            .timeout(DEFAULT_TIMEOUT)
-            .build()?;
+        let client = client_builder(user_agent).build()?;
         Ok(Self::with_client(endpoint, client))
     }
 
@@ -341,29 +353,12 @@ impl SparqlClient {
     }
 
     /// Runs `attempt`, and again as long as the retry policy says so.
-    async fn retrying<T, F, Fut>(&self, mut attempt: F) -> Result<T, SparqlError>
+    async fn retrying<T, F, Fut>(&self, attempt: F) -> Result<T, SparqlError>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, SparqlError>>,
     {
-        let mut retries_done = 0;
-        loop {
-            let error = match attempt().await {
-                Ok(value) => return Ok(value),
-                Err(error) => error,
-            };
-            let Some(wait) = self.retry_policy.delay(&error, retries_done) else {
-                return Err(error);
-            };
-            retries_done += 1;
-            self.retry_policy.notify(&Retry {
-                endpoint: self.endpoint.url(),
-                error: &error,
-                retry: retries_done,
-                wait,
-            });
-            tokio::time::sleep(wait).await;
-        }
+        self.retry_policy.run(self.endpoint.url(), attempt).await
     }
 
     /// Sends the query asking for a text format (`expected`, e.g. "CSV"),
@@ -497,19 +492,6 @@ fn parse_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, SparqlError> {
             snippet: repaired.trim().chars().take(SNIPPET_CHARS).collect(),
         })
     })
-}
-
-/// The `Retry-After` header, if it gives a number of seconds. (The HTTP-date
-/// form is not used by either engine.)
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let seconds = headers
-        .get(RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    Some(Duration::from_secs(seconds))
 }
 
 /// The human-readable part of an error response body, whichever engine (or
@@ -1373,6 +1355,7 @@ p { margin: 0.7em 0 1em 0; }
 
     #[tokio::test]
     async fn test_retry_hook_is_called() {
+        use crate::sparql_retry::Retry;
         use std::sync::atomic::{AtomicU32, Ordering};
         static RETRIES: AtomicU32 = AtomicU32::new(0);
         fn record(retry: &Retry<'_>) {
@@ -1444,16 +1427,20 @@ p { margin: 0.7em 0 1em 0; }
         ));
     }
 
-    #[test]
-    fn test_retry_after_ignores_http_date_form() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            RETRY_AFTER,
-            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
-        );
-        assert_eq!(retry_after(&headers), None);
-        headers.insert(RETRY_AFTER, " 30 ".parse().unwrap());
-        assert_eq!(retry_after(&headers), Some(Duration::from_secs(30)));
+    #[tokio::test]
+    async fn test_rate_limit_with_http_date_retry_after_in_the_past_retries_at_backoff() {
+        let server = MockServer::start().await;
+        mount_sequence(
+            &server,
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT")
+                .set_body_string("slow down"),
+            json_response(200, r#"{"boolean":true,"head":{}}"#),
+        )
+        .await;
+        let client = client_for(&server)
+            .with_retry_policy(RetryPolicy::new(1).with_initial_backoff(Duration::from_millis(1)));
+        assert!(client.ask("ASK {}").await.unwrap());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "wikimisc"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
 authors = ["Magnus Manske <magnusmanske@googlemail.com>"]
@@ -23,6 +23,9 @@ readme = "README.md"
 # `date`, `timestamp`: Wikibase/MediaWiki date and timestamp parsing.
 date = ["dep:chrono", "dep:regex", "dep:thiserror"]
 
+# `entity_id`: typed Wikibase entity IDs (`ItemId`, `PropertyId`, `EntityId`, …).
+entity-id = ["dep:serde", "dep:thiserror"]
+
 # `lat_lon`: coordinate pair type.
 lat-lon = ["dep:serde", "dep:thiserror"]
 
@@ -33,19 +36,70 @@ seppuku = ["dep:tokio"]
 # cgroup (Linux; empty elsewhere).
 process-stats = []
 
+# `retry`: when to try a failed operation again, and how long to wait first.
+retry = ["dep:tokio"]
+
+# `title`, `commons`: MediaWiki page titles, page URLs and Commons file URLs.
+title = ["dep:md5"]
+
+# `escape`: HTML/XML escaping.
+escape = []
+
+# `jsonp`: JSONP callback validation and wrapping (no web framework).
+jsonp = []
+
+# `shutdown`: waiting for SIGTERM/SIGINT.
+shutdown = ["dep:log", "dep:tokio", "tokio/macros", "tokio/signal"]
+
+# `logging`: one-call `tracing` subscriber setup for tools.
+logging = ["dep:tracing-log", "dep:tracing-subscriber"]
+
 # `toolforge_app` plus the `toolforge` crate re-export.
 toolforge = ["dep:toolforge"]
 
-# The `wikibase` and `wikibase::mediawiki` re-exports. Implied by every
-# feature that exposes Wikibase types in its public API.
-wikibase = ["dep:wikibase"]
+# The `mediawiki` re-export, for tools that use the MediaWiki API client
+# without Wikibase.
+mediawiki = ["dep:mediawiki"]
+
+# The `wikibase` and `mediawiki` re-exports. Implied by every feature that
+# exposes Wikibase types in its public API.
+wikibase = ["mediawiki", "dep:mediawiki", "dep:wikibase"]
 
 # --- composite features ---
+
+# `http`: user agents, HTTP clients and retried requests.
+http = [
+    "retry",
+    "dep:httpdate",
+    "dep:reqwest",
+    "dep:serde",
+    "dep:serde_json",
+    "reqwest/gzip",
+    "dep:thiserror",
+    "dep:tokio",
+]
+
+# `server`: axum service glue (graceful shutdown, listen address, standard
+# layers, CORS, health checks, JSONP). With `telemetry`, also request metrics.
+server = [
+    "jsonp",
+    "shutdown",
+    "toolforge",
+    "dep:axum",
+    "dep:log",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tokio",
+    "dep:tower-http",
+    "tokio/net",
+    "tokio/signal",
+]
 
 # `sparql_value`, `sparql_results`, `sparql_tsv`, `sparql_endpoint`,
 # `sparql_rewrite`: typed SPARQL bindings, result parsing, endpoint/prefix
 # configuration and query rewriting.
 sparql = [
+    "entity-id",
     "lat-lon",
     "dep:regex",
     "dep:serde",
@@ -60,6 +114,8 @@ sparql-table = ["sparql", "dep:thiserror"]
 # `sparql_client`, `sparql_retry`: HTTP client for WDQS (Blazegraph), QLever
 # and other SPARQL endpoints.
 sparql-client = [
+    "http",
+    "retry",
     "sparql",
     "sparql-table",
     "dep:csv",
@@ -73,18 +129,34 @@ sparql-client = [
 ]
 
 # `site_matrix`: MediaWiki site matrix lookups.
-site-matrix = ["wikibase", "dep:serde_json", "dep:thiserror"]
+site-matrix = ["wikibase", "dep:serde_json", "dep:thiserror", "dep:tokio", "tokio/sync"]
 
-# `wikidata`: Wikidata API client with a fixed user agent and timeout.
+# `wikidata`: Wikidata API client with a user agent, a timeout, batched entity
+# loading and search.
 wikidata = [
+    "entity-id",
     "wikibase",
+    "dep:futures",
     "dep:reqwest",
+    "reqwest/gzip",
+    "dep:serde",
+    "dep:serde_json",
     "dep:thiserror",
+    "dep:tokio",
+    "tokio/sync",
 ]
+
+# `labels`: labels, descriptions and best-ranked values with language
+# fallback, for raw entity JSON; with `wikibase`, for `wikibase` entities too.
+labels = ["dep:serde_json"]
+
+# `statements`: statement, snak and reference builders (times with calendar
+# models, coordinates with precision, "stated in"/"retrieved" references).
+statements = ["date", "entity-id", "wikibase", "dep:chrono"]
 
 # `external_id`: external-identifier property/value pairs. Enabling `wikidata`
 # additionally exposes the Wikidata-search methods on `ExternalId`.
-external-id = ["wikibase", "dep:chrono", "dep:regex", "dep:serde"]
+external-id = ["entity-id", "statements", "wikibase", "dep:chrono", "dep:regex", "dep:serde"]
 
 # `item_merger`, `merge_diff`: merging Wikibase items into `wbeditentity` diffs.
 item-merger = [
@@ -103,6 +175,7 @@ database = ["toolforge", "toolforge/wikipool"]
 # and exit reasons to the Buggregator service dashboard.
 telemetry = [
     "process-stats",
+    "dep:log",
     "dep:metrics",
     "dep:metrics-util",
     "dep:reqwest",
@@ -116,26 +189,46 @@ telemetry = [
 # Convenience umbrella enabling every feature above; also what the test suite
 # and `cargo doc` are run with.
 full = [
-    "database", # Actually used
-    "date", # Actually used
+    "database",
+    "date",
+    "entity-id",
+    "escape",
     "external-id",
-    "item-merger", # Actually used
-    "lat-lon", # Actually used
+    "http",
+    "item-merger",
+    "jsonp",
+    "labels",
+    "lat-lon",
+    "logging",
+    "mediawiki",
     "process-stats",
-    "seppuku", # Actually used
-    "site-matrix", # Actually used
-    "sparql", # Actually used
+    "retry",
+    "seppuku",
+    "server",
+    "shutdown",
+    "site-matrix",
+    "sparql",
     "sparql-client",
-    "sparql-table", # Actually used
+    "sparql-table",
+    "statements",
     "telemetry",
+    "title",
     "toolforge",
-    "wikibase", # Actually used
-    "wikidata", # Actually used
+    "wikibase",
+    "wikidata",
 ]
 
 [dependencies]
+axum = { version = "0.8", optional = true }
 chrono = { version = "0.4", optional = true }
 csv = { version = "1", optional = true }
+futures = { version = "0.3", optional = true }
+httpdate = { version = "1", optional = true }
+log = { version = "0.4", optional = true }
+md5 = { version = "0.7", optional = true }
+# Same requirement as `wikibase`'s, so both resolve to one crate and
+# `wikimisc::mediawiki` is the `mediawiki` that `wikibase` uses.
+mediawiki = { version = "0.5", optional = true }
 metrics = { version = "0.24", optional = true }
 metrics-util = { version = "0.20", default-features = false, features = ["layers", "registry"], optional = true }
 regex = { version = "1", optional = true }
@@ -146,6 +239,9 @@ tempfile = { version = "3", optional = true }
 thiserror = { version = "2", optional = true }
 tokio = { version = "1.41", features = ["rt", "time"], optional = true }
 toolforge = { version = "6.1", optional = true }
+tower-http = { version = "0.7", features = ["catch-panic", "compression-gzip", "compression-br", "cors", "timeout", "trace", "set-header"], optional = true }
+tracing-log = { version = "0.2", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"], optional = true }
 urlencoding = { version = "^2", optional = true }
 wikibase = { version = "0.7.8", optional = true }
 
@@ -159,6 +255,8 @@ serde_json = "1"
 spargebra = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Calls axum routers directly in the `server` tests.
+tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
 
 [package.metadata.docs.rs]

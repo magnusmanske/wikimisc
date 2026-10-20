@@ -20,6 +20,10 @@
 //! # Ok(()) }
 //! ```
 //!
+//! A service that should run without telemetry as well (no token configured
+//! in development, say) uses [`TelemetryBuilder::install_or_log`], which logs
+//! the outcome through the `log` crate and returns an `Option`.
+//!
 //! Pushing never blocks or fails the service: it runs in its own task with a
 //! timeout, a failed push is retried with the next one (counters are totals,
 //! so no counts are lost), and failures are only logged to stderr when pushes
@@ -331,6 +335,48 @@ impl TelemetryBuilder {
             .map_err(|_| TelemetryError::RecorderAlreadyInstalled)?;
         telemetry.start()?;
         Ok(telemetry)
+    }
+
+    /// The component this telemetry reports as.
+    pub fn component(&self) -> &str {
+        &self.component
+    }
+
+    /// [`Self::install`] for services that run fine without telemetry: the
+    /// outcome is logged (through the `log` crate) instead of returned. No
+    /// token configured is logged at info level, any other failure as a
+    /// warning.
+    pub fn install_or_log(self) -> Option<Telemetry> {
+        let component = self.component.clone();
+        log_install(&component, self.install())
+    }
+
+    /// [`Self::install_alongside`], logging the outcome like
+    /// [`Self::install_or_log`]. On failure `other` is dropped, so a service
+    /// that still needs it has to install it itself.
+    pub fn install_alongside_or_log<R>(self, other: R) -> Option<Telemetry>
+    where
+        R: Recorder + Send + Sync + 'static,
+    {
+        let component = self.component.clone();
+        log_install(&component, self.install_alongside(other))
+    }
+}
+
+fn log_install(component: &str, result: Result<Telemetry, TelemetryError>) -> Option<Telemetry> {
+    match result {
+        Ok(telemetry) => {
+            log::info!("telemetry enabled as '{component}'");
+            Some(telemetry)
+        }
+        Err(e @ TelemetryError::NoToken) => {
+            log::info!("telemetry disabled: {e}");
+            None
+        }
+        Err(e) => {
+            log::warn!("telemetry disabled: {e}");
+            None
+        }
     }
 }
 
@@ -994,6 +1040,19 @@ mod tests {
             !format!("{t:?}").contains("from-config"),
             "Debug must not show the token"
         );
+    }
+
+    #[test]
+    fn test_install_or_log_returns_none_instead_of_an_error() {
+        // Both fail in `build()`, before anything global is installed.
+        let builder = Telemetry::builder("Web Server").token("x");
+        assert_eq!(builder.component(), "Web Server");
+        assert!(builder.install_or_log().is_none());
+        assert!(Telemetry::builder("web")
+            .token("x")
+            .url("ftp://example.org/ingest")
+            .install_or_log()
+            .is_none());
     }
 
     #[test]

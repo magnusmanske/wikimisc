@@ -1,4 +1,5 @@
 /// Parses and stores values from a SPARQL JSON result.
+use crate::entity_id::EntityId;
 use crate::lat_lon::LatLon;
 use regex::Regex;
 use serde::ser::{Serialize, SerializeStruct, Serializer};
@@ -15,18 +16,6 @@ static RE_ENTITY: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r#"^https{0,1}://[^/]+/entity/([A-Z]\d+)$"#).ok());
 static RE_FILE: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r#"^https{0,1}://[^/]+/wiki/Special:FilePath/(.+?)$"#).ok());
-// Blazegraph writes `Point(…)`, QLever `POINT(…)`; WKT keywords are
-// case-insensitive. A coordinate on another globe carries the globe's IRI in
-// front (`<http://www.wikidata.org/entity/Q405> Point(…)`, the Moon) and is
-// deliberately not matched — a `LatLon` has no globe, so it would read as a
-// place on Earth. Wikidata leaves the globe out for Earth, but one that spells
-// out Q2 explicitly is still on Earth.
-static RE_POINT: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?i)^(?:<https?://www\.wikidata\.org/entity/Q2>\s*)?Point\s*\(\s*(-?\d+(?:\.\d*)?(?:e[+-]?\d+)?)\s+(-?\d+(?:\.\d*)?(?:e[+-]?\d+)?)\s*\)$"#,
-    )
-    .ok()
-});
 // Midnight UTC is how both engines encode a date of day precision or coarser,
 // so the time part is dropped. QLever omits the `Z` on years outside xsd's
 // four-digit range (the Big Bang is `-13798000000-01-01T00:00:00`), so those
@@ -56,6 +45,14 @@ pub enum SparqlValue {
 }
 
 impl SparqlValue {
+    /// The entity, for an [`SparqlValue::Entity`] with a valid ID.
+    pub fn entity_id(&self) -> Option<EntityId> {
+        match self {
+            SparqlValue::Entity(id) => id.parse().ok(),
+            _ => None,
+        }
+    }
+
     /// Parses one binding of a SPARQL JSON result. The lexical forms of WDQS
     /// (Blazegraph) and QLever differ in places, and both are understood.
     pub fn new_from_json(j: &Value) -> Option<Self> {
@@ -90,7 +87,10 @@ impl SparqlValue {
         match datatype {
             // Geometries other than a point on Earth have no typed
             // representation, so they keep their WKT text.
-            Some(WKT_LITERAL) => Self::parse_point(value)
+            // `LatLon::from_wkt` reads Blazegraph's `Point(…)` and QLever's
+            // `POINT(…)`, and rejects a point on another globe: a `LatLon` has
+            // none, so it would read as a place on Earth.
+            Some(WKT_LITERAL) => LatLon::from_wkt(value)
                 .map(SparqlValue::Location)
                 .unwrap_or_else(|| SparqlValue::Literal(value.to_string())),
             Some(XSD_DATE_TIME) => {
@@ -101,14 +101,6 @@ impl SparqlValue {
             }
             _ => SparqlValue::Literal(value.to_string()),
         }
-    }
-
-    /// WKT puts longitude first: `Point(lon lat)`.
-    fn parse_point(value: &str) -> Option<LatLon> {
-        let caps = captures(&RE_POINT, value)?;
-        let lon: f64 = caps.get(1)?.as_str().parse().ok()?;
-        let lat: f64 = caps.get(2)?.as_str().parse().ok()?;
-        Some(LatLon::new(lat, lon))
     }
 }
 
@@ -127,10 +119,7 @@ impl Serialize for SparqlValue {
             SparqlValue::File(file) => {
                 let mut s = serializer.serialize_struct("File", 2)?;
                 s.serialize_field("type", "uri")?;
-                s.serialize_field(
-                    "value",
-                    &format!("http://commons.wikimedia.org/wiki/Special:FilePath/{file}"),
-                )?;
+                s.serialize_field("value", &crate::sparql_util::commons_media_iri(file))?;
                 s.end()
             }
             SparqlValue::Uri(uri) => {
@@ -244,11 +233,20 @@ mod tests {
         let json = serde_json::to_string(&file).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"uri","value":"http://commons.wikimedia.org/wiki/Special:FilePath/File:Example.jpg"}"#
+            r#"{"type":"uri","value":"http://commons.wikimedia.org/wiki/Special:FilePath/File%3AExample.jpg"}"#
         );
         let file2: SparqlValue = serde_json::from_str(&json).unwrap();
         assert_eq!(file, file2);
         assert_eq!(file2, SparqlValue::File(file_str.to_string()));
+
+        // A name with spaces becomes a valid IRI, as WDQS writes it.
+        let file = SparqlValue::File("My File (1).jpg".to_string());
+        let json = serde_json::to_string(&file).unwrap();
+        assert!(
+            json.contains("Special:FilePath/My%20File%20%281%29.jpg"),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<SparqlValue>(&json).unwrap(), file);
     }
 
     #[test]
@@ -537,7 +535,20 @@ mod tests {
         // assert here that they are in fact available.
         assert!(RE_ENTITY.is_some());
         assert!(RE_FILE.is_some());
-        assert!(RE_POINT.is_some());
         assert!(RE_DATE.is_some());
+    }
+
+    #[test]
+    fn test_entity_id() {
+        let value = SparqlValue::Entity("Q42".to_string());
+        assert_eq!(value.entity_id(), "Q42".parse().ok());
+        assert_eq!(
+            SparqlValue::Entity("P31".to_string())
+                .entity_id()
+                .map(|id| id.kind()),
+            Some(crate::entity_id::EntityKind::Property)
+        );
+        assert_eq!(SparqlValue::Entity("Q042".to_string()).entity_id(), None);
+        assert_eq!(SparqlValue::Literal("Q42".to_string()).entity_id(), None);
     }
 }

@@ -5,135 +5,25 @@
 //! (after the wait the endpoint asks for), a 5xx other than a timeout, and a
 //! request that failed on the way. A timeout, a malformed query (4xx) or an
 //! oversized result fails the same way every time, so it is returned at once.
+//!
+//! These are the generic [`crate::retry`] types, fixed to [`SparqlError`]; see
+//! there for the waits and the builder methods.
 
 use crate::sparql_client::SparqlError;
-use std::fmt;
-use std::sync::Arc;
-use std::time::Duration;
 
-const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(60);
+/// How often, and after what wait, a failed query is retried; see
+/// [`crate::retry::RetryPolicy`].
+pub type RetryPolicy = crate::retry::RetryPolicy<SparqlError>;
 
 /// One retry about to happen, as passed to [`RetryPolicy::on_retry`].
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct Retry<'a> {
-    /// The endpoint URL.
-    pub endpoint: &'a str,
-    /// Why the attempt failed.
-    pub error: &'a SparqlError,
-    /// Which retry this is, from 1.
-    pub retry: u32,
-    /// How long the client waits before it.
-    pub wait: Duration,
-}
-
-/// How often, and after what wait, a failed query is retried.
-///
-/// The wait doubles with each retry, starting from the initial backoff. A
-/// rate-limited request waits at least as long as the endpoint's
-/// `Retry-After`; if that is longer than the maximum wait, the error is
-/// returned instead, since retrying sooner would only be refused again.
-#[derive(Clone)]
-pub struct RetryPolicy {
-    retries: u32,
-    initial_backoff: Duration,
-    max_wait: Duration,
-    on_retry: Option<RetryHook>,
-}
-
-/// Shared, so that a policy and the clients holding it stay cheap to clone.
-type RetryHook = Arc<dyn Fn(&Retry<'_>) + Send + Sync>;
-
-impl fmt::Debug for RetryPolicy {
-    // Hand-written because a closure has no `Debug`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RetryPolicy")
-            .field("retries", &self.retries)
-            .field("initial_backoff", &self.initial_backoff)
-            .field("max_wait", &self.max_wait)
-            .field("on_retry", &self.on_retry.as_ref().map(|_| "Fn(&Retry)"))
-            .finish()
-    }
-}
-
-impl Default for RetryPolicy {
-    /// No retries.
-    fn default() -> Self {
-        Self::new(0)
-    }
-}
-
-impl RetryPolicy {
-    /// Up to `retries` retries after the first attempt, waiting 1 s, 2 s,
-    /// 4 s, … but never more than 60 s.
-    pub fn new(retries: u32) -> Self {
-        Self {
-            retries,
-            initial_backoff: DEFAULT_INITIAL_BACKOFF,
-            max_wait: DEFAULT_MAX_WAIT,
-            on_retry: None,
-        }
-    }
-
-    /// The wait before the first retry.
-    #[must_use]
-    pub fn with_initial_backoff(mut self, backoff: Duration) -> Self {
-        self.initial_backoff = backoff;
-        self
-    }
-
-    /// The longest single wait, including one the endpoint asks for.
-    #[must_use]
-    pub fn with_max_wait(mut self, max_wait: Duration) -> Self {
-        self.max_wait = max_wait;
-        self
-    }
-
-    /// Calls `hook` before each retry, e.g. to log it. A plain function
-    /// works, as does a closure that captures state such as a counter.
-    #[must_use]
-    pub fn on_retry<F>(mut self, hook: F) -> Self
-    where
-        F: Fn(&Retry<'_>) + Send + Sync + 'static,
-    {
-        self.on_retry = Some(Arc::new(hook));
-        self
-    }
-
-    /// The wait before retrying after `error`, when `retries_done` retries
-    /// have already been made; `None` if it is not to be retried.
-    pub fn delay(&self, error: &SparqlError, retries_done: u32) -> Option<Duration> {
-        if retries_done >= self.retries || !error.is_retryable() {
-            return None;
-        }
-        let backoff = self
-            .initial_backoff
-            .saturating_mul(2u32.saturating_pow(retries_done))
-            .min(self.max_wait);
-        match error {
-            SparqlError::RateLimited {
-                retry_after: Some(asked),
-                ..
-            } if *asked > self.max_wait => None,
-            SparqlError::RateLimited {
-                retry_after: Some(asked),
-                ..
-            } => Some(backoff.max(*asked)),
-            _ => Some(backoff),
-        }
-    }
-
-    pub(crate) fn notify(&self, retry: &Retry<'_>) {
-        if let Some(hook) = &self.on_retry {
-            hook(retry);
-        }
-    }
-}
+pub type Retry<'a> = crate::retry::Retry<'a, SparqlError>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retry::DEFAULT_MAX_WAIT;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     fn rate_limited(retry_after: Option<u64>) -> SparqlError {
         SparqlError::RateLimited {

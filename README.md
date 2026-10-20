@@ -9,32 +9,90 @@ you pull in only the code — and only the dependencies — you actually use:
 
 ```toml
 [dependencies]
-wikimisc = { version = "0.2", default-features = false, features = ["item-merger", "wikidata"] }
+wikimisc = { version = "0.3", default-features = false, features = ["item-merger", "wikidata"] }
 ```
 
 | Feature | Modules | Enables | Extra dependencies |
 | --- | --- | --- | --- |
 | `date` | `date`, `timestamp` | | `chrono`, `regex`, `thiserror` |
+| `entity-id` | `entity_id` | | `serde`, `thiserror` |
 | `lat-lon` | `lat_lon` | | `serde`, `thiserror` |
 | `seppuku` | `seppuku` | | `tokio` |
 | `process-stats` | `process_stats` | | |
+| `retry` | `retry` | | `tokio` |
+| `title` | `title`, `commons` | | `md5` |
+| `escape` | `escape` | | |
+| `logging` | `logging` | | `tracing-log`, `tracing-subscriber` |
 | `toolforge` | `toolforge_app`, re-export of `toolforge` | | `toolforge` |
-| `wikibase` | re-exports of `wikibase` and `wikibase::mediawiki` | | `wikibase` |
-| `sparql` | `sparql_value`, `sparql_results`, `sparql_tsv`, `sparql_endpoint`, `sparql_rewrite` | `lat-lon` | `regex`, `serde`, `serde_json`, `urlencoding` |
+| `mediawiki` | re-export of `mediawiki` | | `mediawiki` |
+| `wikibase` | re-exports of `wikibase` and `mediawiki` | `mediawiki` | `wikibase` |
+| `http` | `http` (`user_agent!`, clients, retried requests) | `retry` | `httpdate`, `reqwest`, `serde`, `serde_json`, `thiserror`, `tokio` |
+| `shutdown` | `shutdown` (`shutdown_signal`: SIGTERM/SIGINT) | | `log`, `tokio` |
+| `jsonp` | `jsonp` (callback validation, wrapping) | | |
+| `server` | `server` (axum glue: graceful serve, listen address, layers, CORS, health, JSONP responses) | `jsonp`, `shutdown`, `toolforge` | `axum`, `log`, `serde`, `serde_json`, `tokio`, `tower-http` |
+| `sparql` | `sparql_value`, `sparql_results`, `sparql_tsv`, `sparql_endpoint`, `sparql_rewrite`, `sparql_util` | `entity-id`, `lat-lon` | `regex`, `serde`, `serde_json`, `urlencoding` |
 | `sparql-table` | `sparql_table`, `sparql_table_trait`, `sparql_table_vec` | `sparql` | `thiserror` |
-| `sparql-client` | `sparql_client`, `sparql_retry` | `sparql-table` | `csv`, `reqwest`, `tempfile`, `thiserror`, `tokio` |
-| `site-matrix` | `site_matrix` | `wikibase` | `serde_json`, `thiserror` |
-| `wikidata` | `wikidata` | `wikibase` | `reqwest`, `thiserror` |
-| `external-id` | `external_id` | `wikibase` | `chrono`, `regex`, `serde` |
+| `sparql-client` | `sparql_client`, `sparql_retry` | `http`, `retry`, `sparql-table` | `csv`, `reqwest`, `tempfile`, `thiserror`, `tokio` |
+| `site-matrix` | `site_matrix` | `wikibase` | `serde_json`, `thiserror`, `tokio` |
+| `wikidata` | `wikidata` | `entity-id`, `wikibase` | `futures`, `reqwest`, `serde`, `serde_json`, `thiserror`, `tokio` |
+| `labels` | `labels` | | `serde_json` |
+| `statements` | `statements` | `date`, `entity-id`, `wikibase` | `chrono` |
+| `external-id` | `external_id` | `entity-id`, `statements`, `wikibase` | `chrono`, `regex`, `serde` |
 | `item-merger` | `item_merger`, `merge_diff` | `external-id` | `regex`, `serde`, `serde_json` |
 | `database` | `toolforge`'s `db` and `pool` modules, re-export of `mysql_async` (from `toolforge::pool`) | `toolforge` | `toolforge` (feature `wikipool`) |
-| `telemetry` | `telemetry`, re-export of `metrics` | `process-stats` | `metrics`, `metrics-util`, `reqwest`, `serde`, `thiserror`, `tokio` |
+| `telemetry` | `telemetry`, re-export of `metrics` | `process-stats` | `log`, `metrics`, `metrics-util`, `reqwest`, `serde`, `thiserror`, `tokio` |
 | `full` | everything above | all | all |
 
-Note that `external-id` and `wikidata` interact: enabling both additionally
-exposes the Wikidata-search methods on `ExternalId`
-(`search_wikidata_single_item`, `get_item_for_external_id_value`, …), which need
-the `Wikidata` API client.
+Some features interact:
+
+- `external-id` + `wikidata` adds the Wikidata-search methods on `ExternalId`
+  (`search_wikidata_single_item_with`, `get_item_for_external_id_value_with`, …).
+- `server` + `telemetry` adds `server::request_metrics`, and makes
+  `server::serve` report the shutdown to the dashboard.
+- `labels` alone works on entity JSON (`json_term`, `best_statements_json`,
+  `RankFilter::apply_json`, …) and language codes; with `wikibase` it also
+  takes `wikibase` entities and statements (`label_in`, `best_statements`,
+  `RankFilter::apply`, `rank_from_uri`).
+- `shutdown` and `jsonp` are the framework-free parts of `server`, for tools
+  that only need to catch SIGTERM or check a JSONP callback; `server`
+  re-exports them as `server::shutdown_signal` and `server::jsonp`.
+- `entity-id` + `database` lets the ID types bind as numbers in `mysql_async`
+  queries; `entity-id` + `wikibase` converts `EntityKind` to `wikibase::EntityType`.
+
+## Shared helpers for tools
+
+Code that several tools used to carry their own copy of:
+
+- **Entity IDs** (`entity_id`): `ItemId`, `PropertyId`, `LexemeId`,
+  `MediaInfoId`, `EntitySchemaId`, `FormId`, `SenseId` and the `EntityId` enum.
+  `"Q42".parse()` accepts the canonical form only; `ItemId::parse_lenient`
+  takes what users type or paste (`q42`, `42`, entity URIs, page URLs, `wd:Q42`);
+  `from_uri` takes SPARQL/RDF entity URIs. Displayed IDs are always canonical,
+  so they are safe to splice into SPARQL and URLs.
+- **HTTP** (`http`, `retry`): `user_agent!()` builds a policy-conformant user
+  agent from the calling crate's metadata; `client_builder(ua)` sets timeouts
+  and gzip; `HttpRetryPolicy::new(3).send(request)` retries rate limiting,
+  5xx and transport failures, honouring `Retry-After` (seconds or HTTP date).
+  `RetryPolicy<E>` works for any error type.
+- **Titles and URLs** (`title`, `commons`): DB-key/display forms, MediaWiki
+  normalisation and `ucfirst`, namespace stripping, `wfUrlencode`-style page
+  URLs, permalinks, and Commons file, `Special:FilePath`, upload and thumbnail
+  URLs. **Escaping** (`escape`): HTML, HTML text, XML.
+- **Wikibase data**: `date::Date` builds and parses Wikibase times both ways
+  (BCE, Julian, precisions); `statements` builds snaks and the usual references
+  from typed IDs; `labels` picks labels and best-ranked statements with language
+  fallback; `lat_lon` parses WKT and computes distances and bounding boxes;
+  `sparql_util` builds `VALUES` clauses, literals and QLever-compatible label
+  patterns.
+- **Wikidata API** (`wikidata`): batched `get_entities`, `items_for_titles`,
+  `search` with `CirrusQuery`. `Wikidata::new` takes your user agent.
+- **Services** (`server`, `logging`): `shutdown_signal`, `listen_addr`,
+  graceful `serve`, standard layers, Wikimedia CORS (including gadgets'
+  `Api-User-Agent` header), health checks and JSONP; `logging` can write to
+  stdout and take an explicit filter that beats the environment variable;
+  `logging::init()` sets up `tracing` with a `log` bridge. With `telemetry`:
+  `TelemetryBuilder::install_or_log`, request metrics, and `Seppuku::watch`
+  for probe-based watchdogs.
 
 ## Telemetry: the service dashboard
 
@@ -200,6 +258,8 @@ the shape of another feature's error type:
 | Feature | Error type |
 | --- | --- |
 | `date` | `date::DateError` |
+| `entity-id` | `entity_id::EntityIdError` |
+| `http` | `http::HttpError` |
 | `lat-lon` | `lat_lon::LatLonError` |
 | `sparql-table` | `sparql_table::SparqlTableError` |
 | `sparql-client` | `sparql_client::SparqlError` |

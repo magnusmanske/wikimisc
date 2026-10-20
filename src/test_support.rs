@@ -11,17 +11,20 @@
 #![allow(dead_code)]
 
 use serde_json::{json, Value};
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 pub const API_PATH: &str = "/w/api.php";
+
+/// The user agent the test clients send.
+pub const TEST_USER_AGENT: &str = "wikimisc-tests/0 (https://github.com/magnusmanske/wikimisc)";
 
 /// Build a [`crate::wikidata::Wikidata`] whose API endpoint points at `server`.
 #[cfg(feature = "wikidata")]
 pub fn wikidata_for(server: &MockServer) -> crate::wikidata::Wikidata {
     use crate::wikidata::Wikidata;
 
-    let mut wd = Wikidata::new();
+    let mut wd = Wikidata::new(TEST_USER_AGENT);
     wd.set_api_url(&format!("{}{}", server.uri(), API_PATH));
     wd
 }
@@ -70,6 +73,18 @@ pub async fn mount_list(server: &MockServer, list: &str, body: Value) {
     Mock::given(method("GET"))
         .and(path(API_PATH))
         .and(query_param("list", list))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(server)
+        .await;
+}
+
+/// Mount a JSON response for Action API POST requests whose form body
+/// contains `needle` (e.g. `action=wbgetentities`, or a form-encoded
+/// `srsearch=…`).
+pub async fn mount_post(server: &MockServer, needle: &str, body: Value) {
+    Mock::given(method("POST"))
+        .and(path(API_PATH))
+        .and(body_string_contains(needle))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .mount(server)
         .await;

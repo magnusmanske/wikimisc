@@ -15,6 +15,7 @@
 //! cgroup root is the container's) and for a systemd service on a VM.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// Kernel clock ticks per second for `/proc/<pid>/stat` times. This is the
 /// userspace ABI constant `USER_HZ`, which is 100 on every architecture
@@ -67,11 +68,7 @@ impl ProcessStats {
                 .and_then(|s| status_field(s, "VmRSS:"))
                 .map(kib_to_bytes),
             anon_rss_bytes: status.as_deref().and_then(parse_anon_rss).map(kib_to_bytes),
-            memory_limit_bytes: read_cgroup("memory.max")
-                .or_else(|| {
-                    std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes").ok()
-                })
-                .and_then(|raw| parse_memory_limit(&raw)),
+            memory_limit_bytes: memory_limit(cgroup.as_deref()),
             cpu_seconds: std::fs::read_to_string("/proc/self/stat")
                 .ok()
                 .and_then(|raw| parse_cpu_seconds(&raw)),
@@ -83,6 +80,50 @@ impl ProcessStats {
             oom_kills: read_cgroup("memory.events").and_then(|raw| parse_oom_kills(&raw)),
         }
     }
+}
+
+/// Memory readings only: cheaper than [`ProcessStats::read`], for checking
+/// memory pressure often (e.g. before taking on more work). Reads
+/// `/proc/self/status`; the cgroup memory limit is resolved once and cached.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MemoryStats {
+    /// As [`ProcessStats::rss_bytes`].
+    pub rss_bytes: Option<u64>,
+    /// As [`ProcessStats::anon_rss_bytes`].
+    pub anon_rss_bytes: Option<u64>,
+    /// As [`ProcessStats::memory_limit_bytes`].
+    pub limit_bytes: Option<u64>,
+}
+
+impl MemoryStats {
+    /// Reads the current values.
+    pub fn read() -> Self {
+        static LIMIT: OnceLock<Option<u64>> = OnceLock::new();
+        let status = std::fs::read_to_string("/proc/self/status").ok();
+        Self {
+            rss_bytes: status
+                .as_deref()
+                .and_then(|s| status_field(s, "VmRSS:"))
+                .map(kib_to_bytes),
+            anon_rss_bytes: status.as_deref().and_then(parse_anon_rss).map(kib_to_bytes),
+            limit_bytes: *LIMIT.get_or_init(|| memory_limit(cgroup_dir().as_deref())),
+        }
+    }
+
+    /// Full RSS as a fraction of the limit; `None` without both. Above `1.0`
+    /// is possible: page cache of mmap'd files counts towards RSS.
+    pub fn used_fraction(&self) -> Option<f64> {
+        let limit = self.limit_bytes.filter(|limit| *limit > 0)?;
+        Some(self.rss_bytes? as f64 / limit as f64)
+    }
+}
+
+/// The memory limit of the cgroup at `cgroup` (v2), else the v1 limit.
+fn memory_limit(cgroup: Option<&Path>) -> Option<u64> {
+    cgroup
+        .and_then(|dir| std::fs::read_to_string(dir.join("memory.max")).ok())
+        .or_else(|| std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes").ok())
+        .and_then(|raw| parse_memory_limit(&raw))
 }
 
 /// The cgroup v2 directory of this process, if it exists.
@@ -222,5 +263,19 @@ mod tests {
     fn test_read_does_not_panic() {
         // On Linux this reads real values, elsewhere it yields Nones.
         let _ = ProcessStats::read();
+        let _ = MemoryStats::read();
+    }
+
+    #[test]
+    fn test_used_fraction() {
+        let stats = |rss, limit| MemoryStats {
+            rss_bytes: rss,
+            anon_rss_bytes: None,
+            limit_bytes: limit,
+        };
+        assert_eq!(stats(Some(750), Some(1000)).used_fraction(), Some(0.75));
+        assert_eq!(stats(Some(750), None).used_fraction(), None);
+        assert_eq!(stats(None, Some(1000)).used_fraction(), None);
+        assert_eq!(stats(Some(750), Some(0)).used_fraction(), None);
     }
 }

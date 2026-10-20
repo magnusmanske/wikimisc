@@ -3,7 +3,9 @@
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use wikibase::mediawiki::media_wiki_error::MediaWikiError;
 use wikibase::mediawiki::prelude::*;
 
@@ -25,16 +27,47 @@ pub enum SiteMatrixError {
     MediaWiki(#[from] MediaWikiError),
 }
 
+/// The sites of a wiki farm (Wikimedia's, via the `sitematrix` API module),
+/// for turning database names (`enwiki`) into server URLs and API clients.
+///
+/// Clones share the [`Self::cached_api_for_wiki`] cache.
 #[derive(Debug, Clone, Default)]
 pub struct SiteMatrix {
     site_matrix: Value,
+    /// Sent by the `Api`s built here; that of the `Api` the matrix was loaded
+    /// with.
+    user_agent: Option<String>,
+    api_cache: Arc<RwLock<HashMap<String, Api>>>,
+}
+
+/// A language of the site matrix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SiteMatrixLanguage {
+    /// The language code, `de`.
+    pub code: String,
+    /// The language's name in itself (its autonym), `Deutsch`.
+    pub name: String,
+    /// The language's name in the API's user language (English by default),
+    /// `German`.
+    pub localname: String,
+    /// Whether the language is written right to left.
+    pub rtl: bool,
+    /// The database names of the language's wikis (`dewiki`, `dewiktionary`,
+    /// …), including closed ones.
+    pub wikis: Vec<String>,
 }
 
 impl SiteMatrix {
-    /// Create a new SiteMatrix object
+    /// Loads the site matrix through `api`. The `Api`s this matrix builds
+    /// later send `api`'s user agent.
     pub async fn new(api: &Api) -> Result<Self, SiteMatrixError> {
         let site_matrix = ActionApi::sitematrix().run(api).await?;
-        Ok(Self { site_matrix })
+        Ok(Self {
+            site_matrix,
+            user_agent: Some(api.user_agent().to_string()),
+            api_cache: Arc::default(),
+        })
     }
 
     /// Convert a vector of string tuples to a hashmap of String keys and values
@@ -182,9 +215,91 @@ impl SiteMatrix {
             })
     }
 
+    /// The Action API URL of a wiki: `https://en.wikipedia.org/w/api.php`.
+    pub fn get_api_url_for_wiki(&self, wiki: &str) -> Result<String, SiteMatrixError> {
+        Ok(self.get_server_url_for_wiki(wiki)? + "/w/api.php")
+    }
+
+    /// A fresh `Api` for a wiki, with the `mediawiki` crate's default client
+    /// settings.
     pub async fn get_api_for_wiki(&self, wiki: &str) -> Result<Api, SiteMatrixError> {
-        let url = self.get_server_url_for_wiki(wiki)? + "/w/api.php";
-        Ok(Api::new(&url).await?)
+        let api = Api::new(&self.get_api_url_for_wiki(wiki)?).await?;
+        Ok(self.with_user_agent(api))
+    }
+
+    /// A fresh `Api` for a wiki whose HTTP client is built from `builder`
+    /// (timeouts, compression, …).
+    pub async fn get_api_for_wiki_with_builder(
+        &self,
+        wiki: &str,
+        builder: wikibase::mediawiki::reqwest::ClientBuilder,
+    ) -> Result<Api, SiteMatrixError> {
+        let api = Api::new_from_builder(&self.get_api_url_for_wiki(wiki)?, builder).await?;
+        Ok(self.with_user_agent(api))
+    }
+
+    /// An `Api` for a wiki, built on first request and cached; the cache is
+    /// shared by all clones of this matrix.
+    ///
+    /// The `Api`s returned for a wiki share one HTTP client and its cookie
+    /// jar, so they are for reading: logging in on one would log in all.
+    pub async fn cached_api_for_wiki(&self, wiki: &str) -> Result<Api, SiteMatrixError> {
+        if let Some(api) = self.api_cache.read().await.get(wiki) {
+            return Ok(api.clone());
+        }
+        // Built without holding the lock, so a slow wiki does not hold up
+        // the others; two first requests may both build one, which is
+        // harmless.
+        let api = self.get_api_for_wiki(wiki).await?;
+        let mut cache = self.api_cache.write().await;
+        Ok(cache.entry(wiki.to_string()).or_insert(api).clone())
+    }
+
+    /// The languages in the matrix, in its order.
+    pub fn languages(&self) -> Vec<SiteMatrixLanguage> {
+        let Some(matrix) = self.site_matrix["sitematrix"].as_object() else {
+            return Vec::new();
+        };
+        let text = |entry: &Value, key: &str| entry[key].as_str().unwrap_or_default().to_string();
+        matrix
+            .iter()
+            .filter(|(key, _)| key.as_str() != "count" && key.as_str() != "specials")
+            .filter(|(_, entry)| entry["code"].is_string())
+            .map(|(_, entry)| SiteMatrixLanguage {
+                code: text(entry, "code"),
+                name: text(entry, "name"),
+                localname: text(entry, "localname"),
+                rtl: entry["dir"].as_str() == Some("rtl"),
+                wikis: entry["site"]
+                    .as_array()
+                    .map(|sites| {
+                        sites
+                            .iter()
+                            .filter_map(|site| site["dbname"].as_str())
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    /// A site matrix from the JSON of an `action=sitematrix` response
+    /// (`{"sitematrix": {…}}`), e.g. one cached on disk or a test fixture.
+    /// The `Api`s it builds send `user_agent`, if given.
+    pub fn from_value(site_matrix: Value, user_agent: Option<String>) -> Self {
+        Self {
+            site_matrix,
+            user_agent,
+            api_cache: Arc::default(),
+        }
+    }
+
+    fn with_user_agent(&self, mut api: Api) -> Api {
+        if let Some(user_agent) = &self.user_agent {
+            api.set_user_agent(user_agent);
+        }
+        api
     }
 }
 
@@ -310,6 +425,7 @@ mod tests {
                     "specials": []
                 }
             }),
+            ..Default::default()
         };
         // The "wrong" name with extra "wiki" suffix must resolve correctly
         assert_eq!(
@@ -350,6 +466,7 @@ mod tests {
                     "specials": []
                 }
             }),
+            ..Default::default()
         };
         assert_eq!(
             site_matrix
@@ -568,6 +685,7 @@ mod tests {
         });
         let site_matrix = SiteMatrix {
             site_matrix: serde_json::json!({}),
+            ..Default::default()
         };
         let url =
             site_matrix.get_value_from_site_matrix_entry("wikidatawiki", &site, "dbname", "url");
@@ -584,6 +702,7 @@ mod tests {
         });
         let site_matrix = SiteMatrix {
             site_matrix: serde_json::json!({}),
+            ..Default::default()
         };
         let url = site_matrix.get_url_for_wiki_from_site("wikidatawiki", &site);
         assert_eq!(url, Some("https://www.wikidata.org".to_string()));
@@ -626,6 +745,7 @@ mod tests {
                     ]
                 }
             }),
+            ..Default::default()
         };
         let url = site_matrix.get_server_url_for_wiki("wikidatawiki").unwrap();
         assert_eq!(url, "https://www.wikidata.org");
@@ -647,6 +767,7 @@ mod tests {
                     ]
                 }
             }),
+            ..Default::default()
         };
         let url = site_matrix
             .get_server_url_for_wiki("be-taraskwiki")
@@ -670,6 +791,7 @@ mod tests {
                     ]
                 }
             }),
+            ..Default::default()
         };
         let url = site_matrix.get_server_url_for_wiki("metawiki").unwrap();
         assert_eq!(url, "https://meta.wikimedia.org");
@@ -713,6 +835,7 @@ mod tests {
                     "specials": []
                 }
             }),
+            ..Default::default()
         };
         assert_eq!(
             site_matrix
@@ -756,6 +879,7 @@ mod tests {
                     ]
                 }
             }),
+            ..Default::default()
         };
         let url = site_matrix.get_server_url_for_wiki("notfoundwiki");
         assert!(url.is_err());
@@ -789,6 +913,7 @@ mod tests {
                     ]
                 }
             }),
+            ..Default::default()
         }
     }
 
@@ -840,6 +965,7 @@ mod tests {
                     "specials": []
                 }
             }),
+            ..Default::default()
         };
         assert_eq!(
             site_matrix.get_wiki_for_server_url("https://example.org"),
@@ -862,6 +988,7 @@ mod tests {
     fn test_is_language_rtl_empty_matrix() {
         let site_matrix = SiteMatrix {
             site_matrix: serde_json::json!({}),
+            ..Default::default()
         };
         // Without a "sitematrix" object the function returns false rather than panicking.
         assert!(!site_matrix.is_language_rtl("ar"));
@@ -888,6 +1015,7 @@ mod tests {
                     }
                 }
             }),
+            ..Default::default()
         };
 
         let api = site_matrix.get_api_for_wiki("mockwiki").await.unwrap();
@@ -898,6 +1026,7 @@ mod tests {
     async fn test_get_api_for_wiki_unknown_wiki_is_err() {
         let site_matrix = SiteMatrix {
             site_matrix: serde_json::json!({ "sitematrix": { "count": 0 } }),
+            ..Default::default()
         };
         assert!(site_matrix.get_api_for_wiki("nosuchwiki").await.is_err());
     }
@@ -924,5 +1053,96 @@ mod tests {
             SiteMatrix::normalize_wiki_name("enwiktionary"),
             "enwiktionary"
         );
+    }
+
+    #[test]
+    fn test_languages() {
+        let site_matrix = SiteMatrix {
+            site_matrix: serde_json::json!({"sitematrix": {
+                "count": 2,
+                "0": {"code": "de", "name": "Deutsch", "localname": "German", "dir": "ltr", "site": [
+                    {"url": "https://de.wikipedia.org", "dbname": "dewiki", "code": "wiki"},
+                    {"url": "https://de.wikiversity.org", "dbname": "dewikiversity", "code": "wikiversity", "closed": ""}
+                ]},
+                "1": {"code": "ar", "name": "العربية", "localname": "Arabic", "dir": "rtl", "site": []},
+                "specials": [{"url": "https://www.wikidata.org", "dbname": "wikidatawiki"}]
+            }}),
+            ..Default::default()
+        };
+        let languages = site_matrix.languages();
+        assert_eq!(languages.len(), 2);
+        let rebuilt = SiteMatrix::from_value(site_matrix.site_matrix.clone(), None);
+        assert_eq!(rebuilt.languages().len(), 2);
+        assert_eq!(languages[0].code, "de");
+        assert_eq!(languages[0].name, "Deutsch");
+        assert_eq!(languages[0].localname, "German");
+        assert_eq!(languages[0].wikis, ["dewiki", "dewikiversity"]);
+        assert!(!languages[0].rtl);
+        assert!(languages[1].rtl);
+        assert!(SiteMatrix::default().languages().is_empty());
+    }
+
+    #[test]
+    fn test_get_api_url_for_wiki() {
+        assert_eq!(
+            fixture_site_matrix()
+                .get_api_url_for_wiki("enwiki")
+                .unwrap(),
+            "https://en.wikipedia.org/w/api.php"
+        );
+        assert!(fixture_site_matrix()
+            .get_api_url_for_wiki("xxwiki")
+            .is_err());
+    }
+
+    /// A matrix whose `mockwiki` is served by `server`, loaded through an
+    /// `Api` with a custom user agent.
+    async fn mock_wiki_matrix(server: &wiremock::MockServer) -> SiteMatrix {
+        use crate::test_support::{api_url, mount_action, mount_siteinfo};
+        mount_siteinfo(server).await;
+        mount_action(
+            server,
+            "sitematrix",
+            serde_json::json!({"sitematrix": {
+                "count": 1,
+                "0": {"code": "mock", "site": [{"dbname": "mockwiki", "url": server.uri(), "code": "wiki"}]}
+            }}),
+        )
+        .await;
+        let mut api = Api::new(&api_url(server)).await.unwrap();
+        api.set_user_agent("matrix-test/1.0");
+        SiteMatrix::new(&api).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_apis_inherit_the_user_agent() {
+        let server = wiremock::MockServer::start().await;
+        let site_matrix = mock_wiki_matrix(&server).await;
+        let api = site_matrix.get_api_for_wiki("mockwiki").await.unwrap();
+        assert_eq!(api.user_agent(), "matrix-test/1.0");
+        let api = site_matrix
+            .get_api_for_wiki_with_builder(
+                "mockwiki",
+                wikibase::mediawiki::reqwest::Client::builder(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(api.user_agent(), "matrix-test/1.0");
+    }
+
+    #[tokio::test]
+    async fn test_cached_api_is_shared_between_clones() {
+        let server = wiremock::MockServer::start().await;
+        let site_matrix = mock_wiki_matrix(&server).await;
+        let requests = || async { server.received_requests().await.unwrap().len() };
+        let before = requests().await;
+        let api = site_matrix.cached_api_for_wiki("mockwiki").await.unwrap();
+        assert_eq!(api.user_agent(), "matrix-test/1.0");
+        let after_first = requests().await;
+        assert_eq!(after_first, before + 1, "one siteinfo request");
+        let clone = site_matrix.clone();
+        clone.cached_api_for_wiki("mockwiki").await.unwrap();
+        assert_eq!(requests().await, after_first, "served from the cache");
+        assert!(site_matrix.cached_api_for_wiki("nosuchwiki").await.is_err());
     }
 }

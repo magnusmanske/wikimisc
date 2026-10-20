@@ -1,16 +1,28 @@
 //! Convenience wrapper for talking to Wikidata.
 //!
-//! [`Wikidata`] holds a configurable user-agent string and request timeout,
+//! [`Wikidata`] holds the caller's user-agent string and a request timeout,
 //! and constructs `reqwest::Client` / `mediawiki::Api` instances with both
 //! applied consistently. New HTTP calls against Wikidata should go through
 //! this struct rather than building a `reqwest::Client` directly, so that the
-//! project's UA and timeout policy stay uniform. SPARQL queries go through
+//! tool's UA and timeout policy stay uniform. SPARQL queries go through
 //! `sparql_client::SparqlClient` (feature `sparql-client`).
+//!
+//! Besides [`Wikidata::api`], it offers the read-only calls tools keep
+//! reimplementing, over plain HTTP (no site-info round trip per call):
+//! batched entity loading ([`Wikidata::get_entities`]), item lookup by
+//! sitelink ([`Wikidata::items_for_titles`]) and CirrusSearch
+//! ([`Wikidata::search`], with queries built by [`CirrusQuery`]).
 //!
 //! Also provides [`Wikidata::item2qs`] for converting an `ItemEntity` into a
 //! QuickStatements-compatible line list.
 
-use crate::mediawiki::reqwest::{Client, ClientBuilder};
+use crate::entity_id::{EntityId, ItemId, PropertyId};
+use futures::stream::{self, StreamExt, TryStreamExt};
+use reqwest::{Client, ClientBuilder};
+use serde_json::Value as JsonValue;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use thiserror::Error;
 use wikibase::mediawiki::media_wiki_error::MediaWikiError;
@@ -27,43 +39,82 @@ pub enum WikidataError {
     #[error("item2qs: item ID is not empty")]
     ItemIdNotEmpty,
 
-    /// The HTTP client could not be built.
+    /// The HTTP client could not be built, or a request failed.
     #[error(transparent)]
     Http(#[from] reqwest::Error),
 
     /// Constructing the MediaWiki API client failed.
     #[error(transparent)]
     MediaWiki(#[from] MediaWikiError),
+
+    /// The API answered with an error object.
+    #[error("Wikidata API error '{code}': {info}")]
+    Api { code: String, info: String },
 }
 
-const WIKIDATA_USER_AGENT: &str = "wikimisc-wikidata/0.1.0";
-const WIKIDATA_SPARQL_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_API_URL: &str = "https://www.wikidata.org/w/api.php";
+const DEFAULT_CONCURRENCY: usize = 4;
+
+/// `wbgetentities` takes at most 50 IDs or titles per request (for clients
+/// without the `apihighlimits` right).
+const ENTITIES_PER_REQUEST: usize = 50;
 
 #[derive(Debug, Clone)]
 pub struct Wikidata {
     user_agent: String,
     timeout: Duration,
     api_url: String,
-}
-
-impl Default for Wikidata {
-    fn default() -> Self {
-        Self::new()
-    }
+    concurrency: usize,
+    /// Built on first use by the plain-HTTP calls (or given to
+    /// [`Self::set_client`]) and shared between clones. The user agent and
+    /// timeout are set per request, so the client never goes stale.
+    client: Arc<OnceLock<Client>>,
 }
 
 impl Wikidata {
-    pub fn new() -> Self {
+    /// A client that identifies itself as `user_agent` — Wikimedia's
+    /// [user-agent policy](https://meta.wikimedia.org/wiki/User-Agent_policy)
+    /// asks for the tool's name and a way to contact its maintainer, e.g.
+    /// `wikimisc::user_agent!()` (feature `http`).
+    pub fn new(user_agent: impl Into<String>) -> Self {
         Wikidata {
-            user_agent: WIKIDATA_USER_AGENT.to_string(),
-            timeout: WIKIDATA_SPARQL_TIMEOUT,
+            user_agent: user_agent.into(),
+            timeout: DEFAULT_TIMEOUT,
             api_url: DEFAULT_API_URL.to_string(),
+            concurrency: DEFAULT_CONCURRENCY,
+            client: Arc::default(),
         }
     }
 
+    /// Like [`Self::new`], but the plain-HTTP calls use `client` — e.g. one
+    /// the tool already shares, so that it keeps a single connection pool.
+    /// Requests still send `user_agent` and the configured timeout.
+    pub fn with_client(user_agent: impl Into<String>, client: Client) -> Self {
+        let mut wikidata = Self::new(user_agent);
+        wikidata.set_client(client);
+        wikidata
+    }
+
+    /// Makes the plain-HTTP calls use `client`; see [`Self::with_client`].
+    /// Clones made earlier keep the client they had.
+    pub fn set_client(&mut self, client: Client) {
+        self.client = Arc::new(OnceLock::from(client));
+    }
+
+    /// A fresh `mediawiki::Api` for the configured endpoint, sending the
+    /// configured user agent. Each call fetches the site info again; keep the
+    /// `Api` around when making several calls.
+    ///
+    /// (The site-info request made while constructing the `Api` still carries
+    /// the `mediawiki` crate's default user agent: `Api` only lets the agent be
+    /// set once it exists.)
     pub async fn api(&self) -> Result<Api, WikidataError> {
-        let api = Api::new_from_builder(&self.api_url, self.client_builder()).await?;
+        let mut api = Api::new_from_builder(&self.api_url, self.client_builder()).await?;
+        // `Api` sends its own `User-Agent` header with every request, which
+        // overrides the one the client builder sets.
+        api.set_user_agent(&self.user_agent);
         Ok(api)
     }
 
@@ -72,10 +123,18 @@ impl Wikidata {
         Ok(self.client_builder().build()?)
     }
 
+    /// A client builder with the configured user agent and timeout, a 10 s
+    /// connect timeout and gzip compression.
     pub fn client_builder(&self) -> ClientBuilder {
         Client::builder()
             .user_agent(&self.user_agent)
             .timeout(self.timeout)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .gzip(true)
+    }
+
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
     }
 
     pub fn set_user_agent(&mut self, user_agent: &str) {
@@ -86,15 +145,22 @@ impl Wikidata {
         self.timeout = timeout;
     }
 
-    /// Overrides the MediaWiki Action API endpoint used by [`Self::api`].
-    /// Default: `https://www.wikidata.org/w/api.php`. Primarily a test seam
-    /// for pointing at a local mock server.
+    /// Overrides the MediaWiki Action API endpoint used by [`Self::api`] and
+    /// the plain-HTTP calls. Default: `https://www.wikidata.org/w/api.php`.
+    /// Primarily a test seam for pointing at a local mock server.
     pub fn set_api_url(&mut self, api_url: &str) {
         self.api_url = api_url.to_string();
     }
 
     pub fn api_url(&self) -> &str {
         &self.api_url
+    }
+
+    /// How many batch requests [`Self::get_entities`] and
+    /// [`Self::items_for_titles`] keep in flight at once (default 4, at
+    /// least 1).
+    pub fn set_concurrency(&mut self, concurrency: usize) {
+        self.concurrency = concurrency.max(1);
     }
 
     /// Converts a new (ID-less) item into QuickStatements V1 commands: a
@@ -281,6 +347,385 @@ impl Wikidata {
     }
 }
 
+/// Read-only Action API calls over plain HTTP.
+impl Wikidata {
+    /// The shared HTTP client, built on first use.
+    fn http_client(&self) -> Result<Client, WikidataError> {
+        if let Some(client) = self.client.get() {
+            return Ok(client.clone());
+        }
+        let client = self.reqwest_client()?;
+        // A concurrent first call may have won the race; either client works.
+        Ok(self.client.get_or_init(|| client).clone())
+    }
+
+    /// POSTs an Action API request (read-only modules accept POST, and it
+    /// keeps long title lists out of the URL) and returns the JSON answer.
+    async fn api_post(&self, params: &[(&str, &str)]) -> Result<JsonValue, WikidataError> {
+        let mut form: Vec<(&str, &str)> = vec![("format", "json")];
+        form.extend_from_slice(params);
+        let json: JsonValue = self
+            .http_client()?
+            .post(&self.api_url)
+            // Per request, so that a client from `set_client` and changes made
+            // by the setters after the client was built both take effect.
+            .header(reqwest::header::USER_AGENT, &self.user_agent)
+            .timeout(self.timeout)
+            .form(&form)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        api_error(&json).map_or(Ok(json), Err)
+    }
+
+    /// Loads entities with `wbgetentities`, 50 per request, up to
+    /// [`Self::set_concurrency`] requests at a time. Duplicate IDs are fetched
+    /// once.
+    ///
+    /// `props` and `languages` restrict what is loaded (`["labels",
+    /// "claims"]`, `["en", "mul"]`); empty slices load everything. Entities
+    /// that do not exist are left out of the result. A redirected ID is keyed
+    /// by the ID asked for, with the target's JSON as the value. Any failed
+    /// request fails the whole call.
+    pub async fn get_entities(
+        &self,
+        ids: &[EntityId],
+        props: &[&str],
+        languages: &[&str],
+    ) -> Result<HashMap<EntityId, JsonValue>, WikidataError> {
+        let props = props.join("|");
+        let languages = languages.join("|");
+        let params: Vec<(&str, &str)> =
+            [("props", props.as_str()), ("languages", languages.as_str())]
+                .into_iter()
+                .filter(|(_, value)| !value.is_empty())
+                .collect();
+        self.get_entities_with(ids, &params).await
+    }
+
+    /// Like [`Self::get_entities`], with any `wbgetentities` parameters given
+    /// as name/value pairs: `props`, `languages`, `sitefilter`,
+    /// `languagefallback`, …. `action`, `format` and `ids` are set by this
+    /// method; pairs with those names are ignored.
+    ///
+    /// ```rust,no_run
+    /// # async fn f(wd: &wikimisc::wikidata::Wikidata, ids: &[wikimisc::entity_id::EntityId])
+    /// # -> Result<(), wikimisc::wikidata::WikidataError> {
+    /// let entities = wd
+    ///     .get_entities_with(ids, &[("props", "sitelinks"), ("sitefilter", "enwiki|dewiki")])
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_entities_with(
+        &self,
+        ids: &[EntityId],
+        params: &[(&str, &str)],
+    ) -> Result<HashMap<EntityId, JsonValue>, WikidataError> {
+        let mut seen = HashSet::new();
+        let unique: Vec<String> = ids
+            .iter()
+            .filter(|id| seen.insert(**id))
+            .map(ToString::to_string)
+            .collect();
+        let params: Vec<(&str, &str)> = params
+            .iter()
+            .copied()
+            .filter(|(name, _)| !matches!(*name, "action" | "format" | "ids"))
+            .collect();
+        let params = &params;
+
+        // Owned batches: a closure over borrowed chunks would make the
+        // returned future not `Send`.
+        let batches: Vec<String> = unique
+            .chunks(ENTITIES_PER_REQUEST)
+            .map(|chunk| chunk.join("|"))
+            .collect();
+        let results: Vec<HashMap<EntityId, JsonValue>> = stream::iter(batches)
+            .map(|ids| async move {
+                let mut request = vec![("action", "wbgetentities"), ("ids", ids.as_str())];
+                request.extend_from_slice(params);
+                let json = self.api_post(&request).await?;
+                Ok::<_, WikidataError>(entities_by_requested_id(json))
+            })
+            .buffer_unordered(self.concurrency)
+            .try_collect()
+            .await?;
+        Ok(results.into_iter().flatten().collect())
+    }
+
+    /// The items with a sitelink to each of `titles` on `site` (`enwiki`,
+    /// `commonswiki`, …), keyed by the title as given. Titles without an item
+    /// (or without a page) are left out rather than failing the call.
+    /// Underscores and a lowercase first letter in a title are tolerated.
+    pub async fn items_for_titles(
+        &self,
+        site: &str,
+        titles: &[&str],
+    ) -> Result<HashMap<String, ItemId>, WikidataError> {
+        // Owned batches: a closure over borrowed chunks would make the
+        // returned future not `Send`.
+        let batches: Vec<Vec<String>> = titles
+            .chunks(ENTITIES_PER_REQUEST)
+            .map(|chunk| chunk.iter().map(ToString::to_string).collect())
+            .collect();
+        let results: Vec<HashMap<String, ItemId>> = stream::iter(batches)
+            .map(|batch| async move {
+                let joined = batch.join("|");
+                let params = [
+                    ("action", "wbgetentities"),
+                    ("sites", site),
+                    ("titles", joined.as_str()),
+                    ("props", "sitelinks"),
+                    ("sitefilter", site),
+                ];
+                let json = self.api_post(&params).await?;
+                Ok::<_, WikidataError>(items_by_title(&json, site, &batch))
+            })
+            .buffer_unordered(self.concurrency)
+            .try_collect()
+            .await?;
+        Ok(results.into_iter().flatten().collect())
+    }
+
+    /// Full-text search (`list=search`, i.e. CirrusSearch) in one namespace:
+    /// 0 for items, 120 for properties, 146 for lexemes. `query` may use
+    /// CirrusSearch keywords; [`CirrusQuery`] builds such queries.
+    pub async fn search(
+        &self,
+        query: &str,
+        namespace: i64,
+        limit: usize,
+    ) -> Result<SearchResults, WikidataError> {
+        let namespace = namespace.to_string();
+        let limit = limit.max(1).to_string();
+        let params = [
+            ("action", "query"),
+            ("list", "search"),
+            ("srsearch", query),
+            ("srnamespace", namespace.as_str()),
+            ("srlimit", limit.as_str()),
+            ("srprop", ""),
+        ];
+        let json = self.api_post(&params).await?;
+        Ok(SearchResults::from_json(&json))
+    }
+
+    /// The items matching `query`, best match first.
+    pub async fn search_items(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ItemId>, WikidataError> {
+        let results = self.search(query, 0, limit).await?;
+        Ok(results.ids.iter().filter_map(|id| id.as_item()).collect())
+    }
+
+    /// The one item matching `query`; `None` if there is none or more than
+    /// one (an ambiguous match is no match).
+    pub async fn search_single_item(&self, query: &str) -> Result<Option<ItemId>, WikidataError> {
+        let results = self.search(query, 0, 1).await?;
+        if results.total_hits != 1 {
+            return Ok(None);
+        }
+        Ok(results.ids.first().and_then(|id| id.as_item()))
+    }
+}
+
+/// The error object of an Action API answer, if it has one.
+fn api_error(json: &JsonValue) -> Option<WikidataError> {
+    let error = json.get("error")?;
+    let text = |key: &str| error[key].as_str().unwrap_or_default().to_string();
+    Some(WikidataError::Api {
+        code: text("code"),
+        info: text("info"),
+    })
+}
+
+/// The existing entities of a `wbgetentities` answer, keyed by the ID asked
+/// for (which differs from the entity's own ID for a redirect).
+fn entities_by_requested_id(json: JsonValue) -> HashMap<EntityId, JsonValue> {
+    let JsonValue::Object(mut root) = json else {
+        return HashMap::new();
+    };
+    let Some(JsonValue::Object(entities)) = root.remove("entities") else {
+        return HashMap::new();
+    };
+    entities
+        .into_iter()
+        .filter(|(_, entity)| entity.get("missing").is_none())
+        .filter_map(|(key, entity)| {
+            let requested = entity["redirects"]["from"].as_str().unwrap_or(&key);
+            Some((requested.parse().ok()?, entity))
+        })
+        .collect()
+}
+
+/// Maps each of `titles` to the item whose `site` sitelink matches it.
+fn items_by_title(json: &JsonValue, site: &str, titles: &[String]) -> HashMap<String, ItemId> {
+    let Some(entities) = json["entities"].as_object() else {
+        return HashMap::new();
+    };
+    let linked: Vec<(&str, ItemId)> = entities
+        .values()
+        .filter_map(|entity| {
+            let title = entity["sitelinks"][site]["title"].as_str()?;
+            let item = entity["id"].as_str()?.parse().ok()?;
+            Some((title, item))
+        })
+        .collect();
+    titles
+        .iter()
+        .filter_map(|title| {
+            let (_, item) = linked
+                .iter()
+                .find(|(linked, _)| same_page_title(linked, title))?;
+            Some((title.clone(), *item))
+        })
+        .collect()
+}
+
+/// Whether two titles name the same page on a wiki with first-letter case
+/// insensitivity: underscores are spaces, and the first letter's case does
+/// not matter.
+fn same_page_title(a: &str, b: &str) -> bool {
+    fn normalized(title: &str) -> String {
+        let title = title.replace('_', " ");
+        let title = title.trim();
+        let mut chars = title.chars();
+        chars.next().map_or_else(String::new, |first| {
+            first.to_uppercase().chain(chars).collect()
+        })
+    }
+    normalized(a) == normalized(b)
+}
+
+/// The answer to [`Wikidata::search`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SearchResults {
+    /// How many pages match in total, beyond the ones returned.
+    pub total_hits: u64,
+    /// The matching entities, best match first. Pages whose title is not an
+    /// entity ID are left out.
+    pub ids: Vec<EntityId>,
+}
+
+impl SearchResults {
+    fn from_json(json: &JsonValue) -> Self {
+        let ids = json["query"]["search"]
+            .as_array()
+            .map(|hits| {
+                hits.iter()
+                    .filter_map(|hit| entity_id_from_title(hit["title"].as_str()?))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            total_hits: json["query"]["searchinfo"]["totalhits"]
+                .as_u64()
+                .unwrap_or_default(),
+            ids,
+        }
+    }
+}
+
+/// The entity of a Wikidata page title: `Q42`, `Property:P31`, `Lexeme:L7`.
+fn entity_id_from_title(title: &str) -> Option<EntityId> {
+    let id = title.rsplit_once(':').map_or(title, |(_namespace, id)| id);
+    id.parse().ok()
+}
+
+/// A CirrusSearch query: free text plus `haswbstatement`/`inlabel` keywords.
+///
+/// ```
+/// # use wikimisc::wikidata::CirrusQuery;
+/// # use wikimisc::entity_id::PropertyId;
+/// let query = CirrusQuery::new("Douglas Adams")
+///     .has_statement(PropertyId::new(31), "Q5")
+///     .not_has_statement(PropertyId::new(31), "Q13442814");
+/// assert_eq!(
+///     query.to_string(),
+///     r#"Douglas Adams haswbstatement:"P31=Q5" -haswbstatement:"P31=Q13442814""#
+/// );
+/// ```
+///
+/// Keyword values are always quoted, so values with spaces (an external ID
+/// like `n 79021164`) stay one value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CirrusQuery {
+    parts: Vec<String>,
+}
+
+impl CirrusQuery {
+    /// A query for `text`, which may be empty.
+    pub fn new(text: &str) -> Self {
+        Self::default().text(text)
+    }
+
+    /// Adds free text.
+    #[must_use]
+    pub fn text(mut self, text: &str) -> Self {
+        let text = text.trim();
+        if !text.is_empty() {
+            self.parts.push(text.to_string());
+        }
+        self
+    }
+
+    /// Only entities with a `property` statement whose value is `value`
+    /// (an item ID, or an external ID / string value).
+    #[must_use]
+    pub fn has_statement(self, property: PropertyId, value: impl fmt::Display) -> Self {
+        self.keyword("haswbstatement:", &format!("{property}={value}"))
+    }
+
+    /// Only entities without such a statement.
+    #[must_use]
+    pub fn not_has_statement(self, property: PropertyId, value: impl fmt::Display) -> Self {
+        self.keyword("-haswbstatement:", &format!("{property}={value}"))
+    }
+
+    /// Only entities with any `property` statement.
+    #[must_use]
+    pub fn has_property(mut self, property: PropertyId) -> Self {
+        self.parts.push(format!("haswbstatement:{property}"));
+        self
+    }
+
+    /// Only entities without a `property` statement.
+    #[must_use]
+    pub fn not_has_property(mut self, property: PropertyId) -> Self {
+        self.parts.push(format!("-haswbstatement:{property}"));
+        self
+    }
+
+    /// Only entities with `text` in a label or alias, in any language or (if
+    /// `languages` is not empty) in one of `languages`.
+    #[must_use]
+    pub fn in_label(self, text: &str, languages: &[&str]) -> Self {
+        let value = if languages.is_empty() {
+            text.to_string()
+        } else {
+            format!("{text}@{}", languages.join(","))
+        };
+        self.keyword("inlabel:", &value)
+    }
+
+    fn keyword(mut self, keyword: &str, value: &str) -> Self {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        self.parts.push(format!("{keyword}\"{escaped}\""));
+        self
+    }
+}
+
+impl fmt::Display for CirrusQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.parts.join(" "))
+    }
+}
+
 const ENTITY_URI_ITEM_PREFIX: &str = "http://www.wikidata.org/entity/Q";
 const GLOBE_EARTH: &str = "http://www.wikidata.org/entity/Q2";
 const CALENDAR_GREGORIAN: &str = "http://www.wikidata.org/entity/Q1985727";
@@ -339,6 +784,8 @@ fn is_qs_time(time: &str) -> bool {
 mod tests {
     use super::*;
     use wikibase::*;
+
+    use crate::test_support::TEST_USER_AGENT;
 
     #[test]
     fn test_item2qs_rejects_item_with_id() {
@@ -777,7 +1224,7 @@ mod tests {
 
     #[test]
     fn test_set_user_agent() {
-        let mut wd = Wikidata::new();
+        let mut wd = Wikidata::new(TEST_USER_AGENT);
         wd.set_user_agent("my-agent/1.0");
         // Verify it builds without error (can't easily inspect the built client's UA)
         assert!(wd.reqwest_client().is_ok());
@@ -785,7 +1232,7 @@ mod tests {
 
     #[test]
     fn test_set_timeout() {
-        let mut wd = Wikidata::new();
+        let mut wd = Wikidata::new(TEST_USER_AGENT);
         wd.set_timeout(std::time::Duration::from_secs(30));
         assert!(wd.reqwest_client().is_ok());
     }
@@ -859,21 +1306,15 @@ mod tests {
 
     #[test]
     fn test_wikidata_new_builds_client() {
-        // Wikidata::new() must produce a working instance whose client builder
+        // Wikidata::new must produce a working instance whose client builder
         // compiles and builds without error.
-        let wd = Wikidata::new();
+        let wd = Wikidata::new(TEST_USER_AGENT);
         assert!(wd.reqwest_client().is_ok());
     }
 
     #[test]
-    fn test_default_matches_new() {
-        let wd = Wikidata::default();
-        assert_eq!(wd.api_url(), Wikidata::new().api_url());
-    }
-
-    #[test]
     fn test_url_getters_reflect_the_defaults_and_overrides() {
-        let mut wd = Wikidata::new();
+        let mut wd = Wikidata::new(TEST_USER_AGENT);
         assert_eq!(wd.api_url(), DEFAULT_API_URL);
 
         wd.set_api_url("http://localhost:1234/w/api.php");
@@ -931,5 +1372,262 @@ mod tests {
 
         let qs = Wikidata::item2qs(&item).unwrap();
         assert_eq!(qs, vec!["CREATE".to_string()], "got: {qs:?}");
+    }
+
+    // ── plain-HTTP calls ─────────────────────────────────────────────────────
+
+    use crate::test_support::mount_post as mock_post;
+    use wiremock::MockServer;
+
+    fn id(s: &str) -> EntityId {
+        s.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_get_entities_skips_missing_and_keys_redirects_by_request() {
+        let server = MockServer::start().await;
+        mock_post(
+            &server,
+            "action=wbgetentities",
+            serde_json::json!({"entities": {
+                "Q42": {"id": "Q42", "type": "item"},
+                "Q1": {"id": "Q2", "type": "item", "redirects": {"from": "Q1", "to": "Q2"}},
+                "Q404": {"id": "Q404", "missing": ""}
+            }}),
+        )
+        .await;
+        let wd = crate::test_support::wikidata_for(&server);
+        let entities = wd
+            .get_entities(
+                &[id("Q42"), id("Q1"), id("Q404"), id("Q42")],
+                &["labels"],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(entities.len(), 2);
+        assert_eq!(entities[&id("Q42")]["id"], "Q42");
+        assert_eq!(entities[&id("Q1")]["id"], "Q2");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "duplicates must be fetched once");
+        let body = String::from_utf8_lossy(&requests[0].body).to_string();
+        assert!(body.contains("props=labels"), "{body}");
+        assert!(!body.contains("languages="), "{body}");
+        let user_agent = requests[0].headers.get("user-agent").unwrap();
+        assert_eq!(user_agent.to_str().unwrap(), TEST_USER_AGENT);
+    }
+
+    #[tokio::test]
+    async fn test_get_entities_batches_by_fifty() {
+        let server = MockServer::start().await;
+        mock_post(
+            &server,
+            "action=wbgetentities",
+            serde_json::json!({"entities": {}}),
+        )
+        .await;
+        let wd = crate::test_support::wikidata_for(&server);
+        let ids: Vec<EntityId> = (1..=120).map(|n| ItemId::new(n).into()).collect();
+        assert!(wd.get_entities(&ids, &[], &[]).await.unwrap().is_empty());
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        assert!(wd.get_entities(&[], &[], &[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_api_error_is_reported() {
+        let server = MockServer::start().await;
+        mock_post(
+            &server,
+            "action=wbgetentities",
+            serde_json::json!({"error": {"code": "no-such-entity", "info": "Could not find"}}),
+        )
+        .await;
+        let wd = crate::test_support::wikidata_for(&server);
+        let error = wd.get_entities(&[id("Q1")], &[], &[]).await.unwrap_err();
+        assert!(
+            matches!(&error, WikidataError::Api { code, .. } if code == "no-such-entity"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_items_for_titles_tolerates_missing_and_normalisation() {
+        let server = MockServer::start().await;
+        mock_post(
+            &server,
+            "sites=enwiki",
+            serde_json::json!({"entities": {
+                "Q42": {"id": "Q42", "sitelinks": {"enwiki": {"site": "enwiki", "title": "Douglas Adams"}}},
+                "-1": {"site": "enwiki", "title": "No such page", "missing": ""}
+            }}),
+        )
+        .await;
+        let wd = crate::test_support::wikidata_for(&server);
+        let items = wd
+            .items_for_titles("enwiki", &["douglas_Adams", "No such page"])
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items["douglas_Adams"], ItemId::new(42));
+    }
+
+    #[tokio::test]
+    async fn test_search() {
+        let server = MockServer::start().await;
+        mock_post(
+            &server,
+            "list=search",
+            serde_json::json!({"query": {
+                "searchinfo": {"totalhits": 3},
+                "search": [{"title": "Q1"}, {"title": "Property:P31"}, {"title": "Talk:Q1"}, {"title": "Main Page"}]
+            }}),
+        )
+        .await;
+        let wd = crate::test_support::wikidata_for(&server);
+        let results = wd.search("foo", 0, 10).await.unwrap();
+        assert_eq!(results.total_hits, 3);
+        assert_eq!(results.ids, vec![id("Q1"), id("P31"), id("Q1")]);
+        assert_eq!(
+            wd.search_items("foo", 10).await.unwrap(),
+            vec![ItemId::new(1), ItemId::new(1)]
+        );
+        // Three hits are ambiguous.
+        assert_eq!(wd.search_single_item("foo").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_search_single_item() {
+        let server = MockServer::start().await;
+        mock_post(
+            &server,
+            "list=search",
+            serde_json::json!({"query": {"searchinfo": {"totalhits": 1}, "search": [{"title": "Q42"}]}}),
+        )
+        .await;
+        let wd = crate::test_support::wikidata_for(&server);
+        assert_eq!(
+            wd.search_single_item("haswbstatement:P214=113230702")
+                .await
+                .unwrap(),
+            Some(ItemId::new(42))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_api_sends_the_configured_user_agent() {
+        let server = MockServer::start().await;
+        crate::test_support::mount_siteinfo(&server).await;
+        let wd = crate::test_support::wikidata_for(&server);
+        let api = wd.api().await.unwrap();
+        assert_eq!(api.user_agent(), TEST_USER_AGENT);
+    }
+
+    #[test]
+    fn test_cirrus_query() {
+        let query = CirrusQuery::new(" Magnus ")
+            .has_statement(PropertyId::new(214), "30701597")
+            .not_has_statement(PropertyId::new(31), ItemId::new(13442814))
+            .has_property(PropertyId::new(18))
+            .not_has_property(PropertyId::new(570))
+            .in_label("Manske", &["en", "de"]);
+        assert_eq!(
+            query.to_string(),
+            "Magnus haswbstatement:\"P214=30701597\" -haswbstatement:\"P31=Q13442814\" \
+             haswbstatement:P18 -haswbstatement:P570 inlabel:\"Manske@en,de\""
+        );
+        assert_eq!(CirrusQuery::new("").to_string(), "");
+        assert_eq!(
+            CirrusQuery::default()
+                .has_statement(PropertyId::new(1), "a \"b\"")
+                .to_string(),
+            r#"haswbstatement:"P1=a \"b\"""#
+        );
+    }
+
+    #[test]
+    fn test_same_page_title() {
+        assert!(same_page_title("Douglas Adams", "douglas_Adams"));
+        assert!(!same_page_title("Douglas Adams", "Douglas adams"));
+        assert!(same_page_title("", ""));
+    }
+
+    #[tokio::test]
+    async fn test_setters_apply_to_the_shared_client() {
+        let server = MockServer::start().await;
+        mock_post(&server, "list=search", serde_json::json!({"query": {}})).await;
+        let mut wd = crate::test_support::wikidata_for(&server);
+        let _ = wd.http_client().unwrap();
+        let clone = wd.clone();
+        wd.set_user_agent("other/1.0");
+        // The client is kept, and shared with the clone ...
+        assert!(wd.client.get().is_some());
+        assert!(Arc::ptr_eq(&wd.client, &clone.client));
+        // ... but the new user agent is sent all the same.
+        wd.search("x", 0, 1).await.unwrap();
+        clone.search("x", 0, 1).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let agents: Vec<&str> = requests
+            .iter()
+            .map(|r| r.headers["user-agent"].to_str().unwrap())
+            .collect();
+        assert_eq!(agents, ["other/1.0", TEST_USER_AGENT]);
+    }
+
+    #[tokio::test]
+    async fn test_with_client_uses_the_given_client_and_still_sends_the_user_agent() {
+        let server = MockServer::start().await;
+        mock_post(&server, "list=search", serde_json::json!({"query": {}})).await;
+        let client = Client::builder().user_agent("ignored/0").build().unwrap();
+        let mut wd = Wikidata::with_client(TEST_USER_AGENT, client);
+        wd.set_api_url(&crate::test_support::api_url(&server));
+        wd.search("x", 0, 1).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests[0].headers["user-agent"], TEST_USER_AGENT);
+    }
+
+    #[tokio::test]
+    async fn test_get_entities_with_passes_extra_parameters() {
+        let server = MockServer::start().await;
+        mock_post(
+            &server,
+            "action=wbgetentities",
+            serde_json::json!({"entities": {"Q42": {"id": "Q42"}}}),
+        )
+        .await;
+        let wd = crate::test_support::wikidata_for(&server);
+        let entities = wd
+            .get_entities_with(
+                &[id("Q42")],
+                &[
+                    ("sitefilter", "enwiki"),
+                    ("ids", "Q1"),
+                    ("props", "sitelinks"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(entities.len(), 1);
+        let requests = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&requests[0].body).to_string();
+        assert!(body.contains("sitefilter=enwiki"), "{body}");
+        assert!(body.contains("props=sitelinks"), "{body}");
+        assert!(
+            !body.contains("Q1"),
+            "reserved parameters are ignored: {body}"
+        );
+    }
+
+    /// Compile-time check: the batched calls can be awaited in a spawned
+    /// task or an axum handler. Never run.
+    #[allow(dead_code)]
+    fn batched_calls_are_send(wd: &Wikidata, ids: &[EntityId], titles: &[&str]) {
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(wd.get_entities(ids, &[], &[]));
+        assert_send(wd.get_entities_with(ids, &[]));
+        assert_send(wd.items_for_titles("enwiki", titles));
+        assert_send(wd.search("x", 0, 1));
+        assert_send(wd.search_items("x", 1));
+        assert_send(wd.search_single_item("x"));
+        assert_send(wd.api());
     }
 }

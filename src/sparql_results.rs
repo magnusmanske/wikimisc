@@ -22,6 +22,8 @@ struct SparqlApiResults {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct SparqlApiResult {
+    // Optional so that hand-written fixtures and minimal responses parse too.
+    #[serde(default)]
     head: HashMap<String, Vec<String>>,
     // An ASK result has `boolean` instead of `results`; QLever then omits
     // `results` entirely.
@@ -165,5 +167,13 @@ mod tests {
             }
             assert!(!row.contains_key("moon"), "{engine}: unbound stays absent");
         }
+    }
+
+    #[test]
+    fn test_head_is_optional() {
+        let j = json!({"results":{"bindings":[{"q":{"type":"uri","value":"http://www.wikidata.org/entity/Q1"}}]}});
+        let r = SparqlApiResult::deserialize(j).unwrap();
+        assert!(r.head().is_empty());
+        assert_eq!(r.bindings().len(), 1);
     }
 }

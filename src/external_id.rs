@@ -1,6 +1,7 @@
 //! Useful functionality for dealing with external identifiers in Wikidata.
 
-use chrono::Utc;
+use crate::entity_id::{ItemId, PropertyId};
+use crate::statements;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -8,9 +9,7 @@ use std::sync::LazyLock;
 use wikibase::*;
 
 #[cfg(feature = "wikidata")]
-use crate::wikidata::Wikidata;
-#[cfg(feature = "wikidata")]
-use wikibase::mediawiki::prelude::*;
+use crate::wikidata::{CirrusQuery, Wikidata};
 
 // Literal patterns, held as `Option<Regex>` so a pattern that somehow failed to
 // compile degrades to a `None` return rather than panicking in a library.
@@ -19,6 +18,9 @@ static RE_PROPERTY_NUMERIC: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r#"^\s*[Pp](\d+)\s*$"#).ok());
 static RE_FROM_STRING: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r#"^[Pp](\d+):(.+)$"#).ok());
+
+/// Properties whose values the external site treats case-insensitively.
+const CASE_INSENSITIVE_PROPERTIES: &[usize] = &[2002];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Default)]
 pub struct ExternalId {
@@ -39,12 +41,23 @@ impl ExternalId {
         Self { property, id }
     }
 
-    /// Fixes potential issues with the ID value for a given property number.
+    /// Normalises an ID value to the form Wikidata stores for the property.
     fn fix_property_value(property: usize, id: &str) -> String {
         match property {
-            213 => id.replace(' ', ""), // P213 (ISNI) has no spaces
+            213 => id.replace(' ', ""),                    // ISNI: no spaces
+            244 => id.replace("%20", "").replace('+', ""), // LCNAF: URL-encoded spaces
+            1207 => id.replace('+', ""),                   // NUKAT: URL-encoded spaces
+            1368 => id.strip_prefix("LNC10-").unwrap_or(id).to_string(), // LNB: URI prefix
+            8034 => id.replace('_', "/"),                  // VIAF cluster path separator
             _ => id.to_string(),
         }
+    }
+
+    /// Whether values of `property` are compared case-insensitively, i.e.
+    /// the external site treats `Foo` and `foo` as the same ID: P2002 (X
+    /// username).
+    pub fn is_case_insensitive(property: usize) -> bool {
+        CASE_INSENSITIVE_PROPERTIES.contains(&property)
     }
 
     /// Returns a new ExternalId from a string like "P123:ABC456DEF".
@@ -89,8 +102,13 @@ impl ExternalId {
     }
 
     /// Returns the property number.
-    pub fn property(&self) -> usize {
+    pub const fn property(&self) -> usize {
         self.property
+    }
+
+    /// Returns the property as a typed ID.
+    pub const fn property_id(&self) -> PropertyId {
+        PropertyId::new(self.property as u64)
     }
 
     /// Returns the ID string.
@@ -98,116 +116,108 @@ impl ExternalId {
         &self.id
     }
 
-    /// Returns a Reference object for this ExternalId.
+    /// The usual reference for a value taken from this ID's database: "stated
+    /// in" `stated_in` (an item ID such as `Q123`), this ID, and "retrieved"
+    /// today if `use_current_date`. See [`statements::stated_in_reference`].
+    ///
+    /// A `stated_in` that is not an item ID leaves the "stated in" snak out.
     pub fn as_reference(&self, stated_in: &str, use_current_date: bool) -> Reference {
-        let time = Utc::now();
-        let time = time.format("+%Y-%m-%dT00:00:00Z").to_string();
-        let mut reference = vec![
-            Snak::new(
-                SnakDataType::WikibaseItem,
-                "P248",
-                SnakType::Value,
-                Some(DataValue::new(
-                    DataValueType::EntityId,
-                    Value::Entity(EntityValue::new(EntityType::Item, stated_in)),
-                )),
-            ),
-            Snak::new(
-                SnakDataType::ExternalId,
-                format!("P{}", self.property),
-                SnakType::Value,
-                Some(DataValue::new(
-                    DataValueType::StringType,
-                    Value::StringValue(self.id.to_owned()),
-                )),
-            ),
-        ];
-        if use_current_date {
-            reference.push(Snak::new(
-                SnakDataType::Time,
-                "P813",
-                SnakType::Value,
-                Some(DataValue::new(
-                    DataValueType::Time,
-                    Value::Time(TimeValue::new(
-                        0,
-                        0,
-                        "http://www.wikidata.org/entity/Q1985727",
-                        11,
-                        &time,
-                        0,
-                    )),
-                )),
-            ));
+        let id = Some((self.property_id(), self.id.as_str()));
+        match ItemId::parse_lenient(stated_in) {
+            Ok(item) => statements::stated_in_reference(item, id, use_current_date),
+            Err(_) => {
+                let mut snaks = vec![statements::external_id_snak(self.property_id(), &self.id)];
+                if use_current_date {
+                    snaks.push(statements::retrieved_today());
+                }
+                Reference::new(snaks)
+            }
         }
-        Reference::new(reference)
     }
 }
 
 /// Lookups that hit the live Wikidata Action API, and so require the
-/// `wikidata` feature for the [`Wikidata`] client.
+/// `wikidata` feature for the [`Wikidata`] client. Each one is a single
+/// search request; "single" means exactly one hit (none or several → `None`).
+/// Failed requests also yield `None`.
 #[cfg(feature = "wikidata")]
 impl ExternalId {
     /// Searches Wikidata for a single item with the given query.
-    /// Returns None if none or multiple items are found.
+    #[deprecated(
+        since = "0.3.0",
+        note = "identifies as wikimisc rather than your tool; use `search_wikidata_single_item_with` with a `Wikidata` carrying your user agent"
+    )]
     pub async fn search_wikidata_single_item(&self, query: &str) -> Option<String> {
-        self.search_wikidata_single_item_with(&Wikidata::new(), query)
+        self.search_wikidata_single_item_with(&library_client(), query)
             .await
     }
 
-    /// Searches Wikidata for a single item with the given query using the supplied
-    /// [`Wikidata`] client. Useful for tests that need to point at a mock server.
-    /// Returns None if none or multiple items are found.
+    /// Searches Wikidata for a single item with the given query, using the
+    /// supplied [`Wikidata`] client.
     pub async fn search_wikidata_single_item_with(
         &self,
         wd: &Wikidata,
         query: &str,
     ) -> Option<String> {
-        let api = wd.api().await.ok()?;
-        let j = ActionApiList::search()
-            .srnamespace(&[0])
-            .srsearch(query)
-            .run(&api)
-            .await
-            .ok()?;
-        if j["query"]["searchinfo"]["totalhits"].as_i64()? == 1 {
-            Some(j["query"]["search"][0]["title"].as_str()?.to_string())
-        } else {
-            None
-        }
+        let item = wd.search_single_item(query).await.ok()??;
+        Some(item.to_string())
     }
 
-    /// Searches Wikidata for a single item with the given property/value.
-    /// Returns None if none or multiple items are found.
+    /// Searches Wikidata for a single item with this property/value.
+    #[deprecated(
+        since = "0.3.0",
+        note = "identifies as wikimisc rather than your tool; use `get_item_for_external_id_value_with` with a `Wikidata` carrying your user agent"
+    )]
     pub async fn get_item_for_external_id_value(&self) -> Option<String> {
-        self.get_item_for_external_id_value_with(&Wikidata::new())
+        self.get_item_for_external_id_value_with(&library_client())
             .await
     }
 
-    /// Variant of [`Self::get_item_for_external_id_value`] that uses the supplied
-    /// [`Wikidata`] client (e.g. one pointed at a mock server).
+    /// Searches Wikidata for a single item with this property/value, using
+    /// the supplied [`Wikidata`] client.
     pub async fn get_item_for_external_id_value_with(&self, wd: &Wikidata) -> Option<String> {
-        let query = format!("haswbstatement:\"P{}={}\"", self.property, self.id);
-        self.search_wikidata_single_item_with(wd, &query).await
-    }
-
-    /// Searches Wikidata for a single item with the given property/value and string.
-    /// Returns None if none or multiple items are found.
-    pub async fn get_item_for_string_external_id_value(&self, s: &str) -> Option<String> {
-        self.get_item_for_string_external_id_value_with(&Wikidata::new(), s)
+        self.search_wikidata_single_item_with(wd, &self.search_query("").to_string())
             .await
     }
 
-    /// Variant of [`Self::get_item_for_string_external_id_value`] that uses the
-    /// supplied [`Wikidata`] client.
+    /// Searches Wikidata for a single item matching `s` with this
+    /// property/value.
+    #[deprecated(
+        since = "0.3.0",
+        note = "identifies as wikimisc rather than your tool; use `get_item_for_string_external_id_value_with` with a `Wikidata` carrying your user agent"
+    )]
+    pub async fn get_item_for_string_external_id_value(&self, s: &str) -> Option<String> {
+        self.get_item_for_string_external_id_value_with(&library_client(), s)
+            .await
+    }
+
+    /// Searches Wikidata for a single item matching `s` with this
+    /// property/value, using the supplied [`Wikidata`] client.
     pub async fn get_item_for_string_external_id_value_with(
         &self,
         wd: &Wikidata,
         s: &str,
     ) -> Option<String> {
-        let query = format!("{s} haswbstatement:\"P{}={}\"", self.property, self.id);
-        self.search_wikidata_single_item_with(wd, &query).await
+        self.search_wikidata_single_item_with(wd, &self.search_query(s).to_string())
+            .await
     }
+
+    /// The search for items with this ID: `{text} haswbstatement:"P214=…"`.
+    pub fn search_query(&self, text: &str) -> CirrusQuery {
+        CirrusQuery::new(text).has_statement(self.property_id(), &self.id)
+    }
+}
+
+/// The client behind the deprecated lookups that take none.
+#[cfg(feature = "wikidata")]
+fn library_client() -> Wikidata {
+    Wikidata::new(concat!(
+        "wikimisc/",
+        env!("CARGO_PKG_VERSION"),
+        " (",
+        env!("CARGO_PKG_REPOSITORY"),
+        ")"
+    ))
 }
 
 #[cfg(test)]
@@ -424,16 +434,15 @@ mod tests {
     #[cfg(feature = "wikidata")]
     #[tokio::test]
     async fn test_get_item_for_external_id() {
-        use crate::test_support::{mount_siteinfo, wikidata_for, API_PATH};
-        use wiremock::matchers::{method, path, query_param};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use crate::test_support::{mount_post, wikidata_for};
+        use wiremock::MockServer;
 
         let server = MockServer::start().await;
-        mount_siteinfo(&server).await;
 
         // wiremock-rs scans mocks in registration order and uses the *first*
         // match, so the specific 1-hit mocks must be registered before the
-        // catch-all zero-hit fallback.
+        // catch-all zero-hit fallback. The needles are the form-encoded
+        // `srsearch` values.
         let one_hit = serde_json::json!({
             "batchcomplete": "",
             "query": {
@@ -442,28 +451,22 @@ mod tests {
             }
         });
         for srsearch in [
-            "haswbstatement:\"P214=30701597\"",
-            "Magnus haswbstatement:\"P214=30701597\"",
+            "srsearch=haswbstatement%3A%22P214%3D30701597%22",
+            "srsearch=Magnus+haswbstatement%3A%22P214%3D30701597%22",
         ] {
-            Mock::given(method("GET"))
-                .and(path(API_PATH))
-                .and(query_param("list", "search"))
-                .and(query_param("srsearch", srsearch))
-                .respond_with(ResponseTemplate::new(200).set_body_json(one_hit.clone()))
-                .mount(&server)
-                .await;
+            mount_post(&server, srsearch, one_hit.clone()).await;
         }
 
         // Fallback: any other `list=search` request returns zero hits.
-        Mock::given(method("GET"))
-            .and(path(API_PATH))
-            .and(query_param("list", "search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        mount_post(
+            &server,
+            "list=search",
+            serde_json::json!({
                 "batchcomplete": "",
                 "query": { "searchinfo": { "totalhits": 0 }, "search": [] }
-            })))
-            .mount(&server)
-            .await;
+            }),
+        )
+        .await;
 
         let wd = wikidata_for(&server);
 
@@ -500,14 +503,13 @@ mod tests {
     async fn test_get_item_for_external_id_returns_none_on_multiple_hits() {
         // Exercises the `totalhits != 1` branch: when search returns more than
         // one item, the helper must yield None rather than picking the first.
-        use crate::test_support::{mount_list, mount_siteinfo, wikidata_for};
+        use crate::test_support::{mount_post, wikidata_for};
         use wiremock::MockServer;
 
         let server = MockServer::start().await;
-        mount_siteinfo(&server).await;
-        mount_list(
+        mount_post(
             &server,
-            "search",
+            "list=search",
             serde_json::json!({
                 "batchcomplete": "",
                 "query": {
@@ -524,6 +526,54 @@ mod tests {
         let wd = wikidata_for(&server);
         let ext_id = ExternalId::new(214, "12345");
         assert_eq!(ext_id.get_item_for_external_id_value_with(&wd).await, None);
+    }
+
+    #[cfg(feature = "wikidata")]
+    #[tokio::test]
+    async fn test_search_failure_is_none() {
+        use crate::test_support::wikidata_for;
+        use wiremock::MockServer;
+
+        // No mock mounted: the server answers 404.
+        let server = MockServer::start().await;
+        let wd = wikidata_for(&server);
+        let ext_id = ExternalId::new(214, "12345");
+        assert_eq!(ext_id.get_item_for_external_id_value_with(&wd).await, None);
+    }
+
+    #[cfg(feature = "wikidata")]
+    #[test]
+    fn test_search_query_quotes_the_value() {
+        let ext_id = ExternalId::new(244, "n 79021164");
+        assert_eq!(
+            ext_id.search_query("Adams").to_string(),
+            "Adams haswbstatement:\"P244=n 79021164\""
+        );
+    }
+
+    #[test]
+    fn test_property_specific_normalisation() {
+        assert_eq!(ExternalId::new(244, "n+79021164").id(), "n79021164");
+        assert_eq!(ExternalId::new(244, "n%2079021164").id(), "n79021164");
+        assert_eq!(ExternalId::new(1207, "n+2007008766").id(), "n2007008766");
+        assert_eq!(ExternalId::new(1368, "LNC10-000012345").id(), "000012345");
+        assert_eq!(ExternalId::new(1368, "000012345").id(), "000012345");
+        assert_eq!(
+            ExternalId::new(8034, "vtls_000012345").id(),
+            "vtls/000012345"
+        );
+        // Other properties keep their value as it is.
+        assert_eq!(ExternalId::new(21, "a+b_c LNC10-").id(), "a+b_c LNC10-");
+    }
+
+    #[test]
+    fn test_case_insensitivity_and_typed_property() {
+        assert!(ExternalId::is_case_insensitive(2002));
+        assert!(!ExternalId::is_case_insensitive(214));
+        assert_eq!(
+            ExternalId::new(214, "1").property_id(),
+            PropertyId::new(214)
+        );
     }
 
     #[test]

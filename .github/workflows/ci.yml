@@ -55,19 +55,32 @@ jobs:
         feature:
           - database
           - date
+          - entity-id
+          - escape
           - external-id
+          - http
           - item-merger
+          - jsonp
+          - labels
           - lat-lon
+          - logging
+          - mediawiki
           - process-stats
+          - retry
           - seppuku
+          - server
+          - shutdown
           - site-matrix
           - sparql
           - sparql-client
           - sparql-table
+          - statements
           - telemetry
+          - title
           - toolforge
           - wikibase
           - wikidata
+
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
