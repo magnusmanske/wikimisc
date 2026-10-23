@@ -83,6 +83,8 @@ pub mod statements;
 pub mod telemetry;
 #[cfg(feature = "telemetry")]
 mod telemetry_recorder;
+#[cfg(feature = "telemetry-wire")]
+pub mod telemetry_wire;
 #[cfg(feature = "date")]
 pub mod timestamp;
 #[cfg(feature = "title")]

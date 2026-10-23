@@ -30,15 +30,19 @@
 //! start or stop failing.
 
 use crate::process_stats::ProcessStats;
-use crate::telemetry_recorder::{MetricKind, MetricValue};
+use crate::telemetry_wire::{
+    is_valid_component, Event, Exit, ExitKind, Instance, Labels, Metric, MetricKind, Payload,
+    MAX_EVENTS, MAX_METRICS, VERSION,
+};
 use metrics::{Key, Recorder};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::telemetry_recorder::TelemetryRecorder;
+pub use crate::telemetry_wire::Level;
 
 /// Where pushes go unless configured otherwise.
 pub const DEFAULT_URL: &str = "https://magnustools.toolforge.org/buggregator/ingest.php";
@@ -63,9 +67,6 @@ const FINAL_PUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// the final one is rejected and acknowledges nothing; and no regular push
 /// follows the final one.
 const FINAL_PUSH_LOCK_WAIT: Duration = Duration::from_secs(1);
-/// The dashboard's per-push limits.
-const MAX_METRICS: usize = 500;
-const MAX_EVENTS: usize = 50;
 /// Events kept while pushes fail; older ones are dropped first.
 const MAX_QUEUED_EVENTS: usize = 200;
 
@@ -132,61 +133,28 @@ pub enum ExitReason {
 }
 
 impl ExitReason {
-    fn wire(&self) -> ExitWire<'_> {
+    fn wire(&self) -> Exit {
         let (reason, detail) = match self {
-            Self::Shutdown(d) => ("shutdown", d.as_str()),
-            Self::Exit => ("exit", ""),
-            Self::Panic(d) => ("panic", d.as_str()),
-            Self::Watchdog(d) => ("watchdog", d.as_str()),
-            Self::Memory(d) => ("memory", d.as_str()),
-            Self::Other(d) => ("other", d.as_str()),
+            Self::Shutdown(d) => (ExitKind::Shutdown, d.as_str()),
+            Self::Exit => (ExitKind::Exit, ""),
+            Self::Panic(d) => (ExitKind::Panic, d.as_str()),
+            Self::Watchdog(d) => (ExitKind::Watchdog, d.as_str()),
+            Self::Memory(d) => (ExitKind::Memory, d.as_str()),
+            Self::Other(d) => (ExitKind::Other, d.as_str()),
         };
-        ExitWire { reason, detail }
+        Exit {
+            reason,
+            detail: detail.to_string(),
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Level {
-    Info,
-    Warn,
-    Error,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Event {
+#[derive(Debug, Clone)]
+struct QueuedEvent {
     /// Position in the queue's history, for acknowledging exactly the events
     /// a push carried: the queue may drop its oldest entries meanwhile.
-    #[serde(skip)]
     seq: u64,
-    ts: u64,
-    level: Level,
-    message: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ExitWire<'a> {
-    reason: &'static str,
-    detail: &'a str,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct InstanceInfo {
-    uid: String,
-    component: String,
-    host: String,
-    version: String,
-    started: u64,
-}
-
-#[derive(Debug, Serialize)]
-struct Payload<'a> {
-    v: u8,
-    instance: &'a InstanceInfo,
-    metrics: Vec<MetricValue>,
-    events: Vec<Event>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exit: Option<ExitWire<'a>>,
+    event: Event,
 }
 
 /// Configures a [`Telemetry`]; see [`Telemetry::builder`].
@@ -281,7 +249,7 @@ impl TelemetryBuilder {
         check_url(&url)?;
         let host = host_name();
         let started = unix_now();
-        let instance = InstanceInfo {
+        let instance = Instance {
             uid: instance_uid(&host, std::process::id(), started_millis()),
             component: self.component,
             host,
@@ -391,7 +359,7 @@ struct Inner {
     client: reqwest::Client,
     url: String,
     token: String,
-    instance: InstanceInfo,
+    instance: Instance,
     interval: Duration,
     handle_signals: bool,
     panics: AtomicU64,
@@ -415,14 +383,14 @@ impl std::fmt::Debug for Inner {
 }
 
 /// Metric name and labels.
-type CounterKey = (String, Vec<(String, String)>);
+type CounterKey = (String, Labels);
 
 #[derive(Default)]
 struct PushState {
     /// Counter values the dashboard has acknowledged; unchanged ones are not resent.
     acked: HashMap<CounterKey, f64>,
     histogram_totals: HashMap<Key, (f64, f64)>,
-    events: VecDeque<Event>,
+    events: VecDeque<QueuedEvent>,
     next_event_seq: u64,
 }
 
@@ -442,11 +410,13 @@ impl PushState {
         let seq = self.next_event_seq;
         // Cannot overflow in practice; saturating so that it can never panic.
         self.next_event_seq = seq.saturating_add(1);
-        self.events.push_back(Event {
+        self.events.push_back(QueuedEvent {
             seq,
-            ts: unix_now(),
-            level,
-            message,
+            event: Event {
+                ts: unix_now(),
+                level,
+                message,
+            },
         });
     }
 
@@ -617,7 +587,7 @@ impl Telemetry {
     }
 
     /// The payload, and what it carries that needs acknowledging.
-    fn payload<'a>(&'a self, exit: Option<&'a ExitReason>) -> (Payload<'a>, Sent) {
+    fn payload(&self, exit: Option<&ExitReason>) -> (Payload, Sent) {
         let mut state = lock(&self.inner.state);
         let mut metrics = self.system_metrics(exit.is_none());
         let recorded = self.inner.recorder.snapshot(&mut state.histogram_totals);
@@ -628,27 +598,27 @@ impl Telemetry {
                 || state.acked.get(&(m.name.clone(), m.labels.clone())) != Some(&m.value)
         });
         metrics.truncate(MAX_METRICS);
-        let events: Vec<Event> = state.events.iter().take(MAX_EVENTS).cloned().collect();
+        let queued: Vec<&QueuedEvent> = state.events.iter().take(MAX_EVENTS).collect();
         let sent = Sent {
             counters: metrics
                 .iter()
                 .filter(|m| m.kind == MetricKind::Counter)
                 .map(|m| ((m.name.clone(), m.labels.clone()), m.value))
                 .collect(),
-            last_event: events.last().map(|e| e.seq),
+            last_event: queued.last().map(|e| e.seq),
         };
         let payload = Payload {
-            v: 1,
-            instance: &self.inner.instance,
+            v: VERSION,
+            instance: self.inner.instance.clone(),
             metrics,
-            events,
+            events: queued.into_iter().map(|e| e.event.clone()).collect(),
             exit: exit.map(ExitReason::wire),
         };
         (payload, sent)
     }
 
     /// Process readings, first in the list so the per-push limit never cuts them.
-    fn system_metrics(&self, with_runtime: bool) -> Vec<MetricValue> {
+    fn system_metrics(&self, with_runtime: bool) -> Vec<Metric> {
         let stats = ProcessStats::read();
         let gauge = |name: &str, value: Option<f64>| {
             value.map(|v| system_metric(name, MetricKind::Gauge, v))
@@ -770,11 +740,11 @@ impl Telemetry {
     }
 }
 
-fn system_metric(name: &str, kind: MetricKind, value: f64) -> MetricValue {
-    MetricValue {
+fn system_metric(name: &str, kind: MetricKind, value: f64) -> Metric {
+    Metric {
         name: name.to_string(),
         kind,
-        labels: vec![],
+        labels: Labels::new(),
         value,
     }
 }
@@ -902,15 +872,6 @@ fn anonymous_path(path: &str) -> String {
         Some(rest) if !rest.is_empty() => rest.join("/"),
         _ => parts.last().copied().unwrap_or_default().to_string(),
     }
-}
-
-fn is_valid_component(component: &str) -> bool {
-    let mut chars = component.chars();
-    component.len() <= 32
-        && chars
-            .next()
-            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
 /// On Kubernetes the host name is the pod name, which a container restarted
@@ -1097,16 +1058,6 @@ mod tests {
         assert!(instance_uid(&"h".repeat(100), u32::MAX, u128::from(u64::MAX)).len() <= 64);
     }
 
-    #[test]
-    fn test_component_names() {
-        assert!(is_valid_component("web"));
-        assert!(is_valid_component("bot-2_x"));
-        assert!(!is_valid_component(""));
-        assert!(!is_valid_component("-web"));
-        assert!(!is_valid_component("Web"));
-        assert!(!is_valid_component(&"a".repeat(33)));
-    }
-
     #[tokio::test]
     async fn test_push_sends_payload_and_skips_unchanged_counters() {
         let server = MockServer::start().await;
@@ -1178,7 +1129,11 @@ mod tests {
 
         // The push carried events 0..MAX_EVENTS; all others must remain.
         let state = lock(&t.inner.state);
-        let messages: Vec<&str> = state.events.iter().map(|e| e.message.as_str()).collect();
+        let messages: Vec<&str> = state
+            .events
+            .iter()
+            .map(|e| e.event.message.as_str())
+            .collect();
         assert_eq!(messages.len(), MAX_QUEUED_EVENTS - MAX_EVENTS + 1);
         assert_eq!(
             messages.first(),
@@ -1498,9 +1453,11 @@ mod tests {
 
     #[test]
     fn test_exit_reasons_on_the_wire() {
-        assert_eq!(ExitReason::Exit.wire().reason, "exit");
-        let reason = ExitReason::Memory("RSS 95%".to_string());
-        let wire = reason.wire();
-        assert_eq!((wire.reason, wire.detail), ("memory", "RSS 95%"));
+        assert_eq!(ExitReason::Exit.wire().reason, ExitKind::Exit);
+        let wire = ExitReason::Memory("RSS 95%".to_string()).wire();
+        assert_eq!(
+            (wire.reason, wire.detail.as_str()),
+            (ExitKind::Memory, "RSS 95%")
+        );
     }
 }

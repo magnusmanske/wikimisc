@@ -171,10 +171,15 @@ item-merger = [
 # plus the re-export of the `mysql_async` they are built on.
 database = ["toolforge", "toolforge/wikipool"]
 
+# `telemetry_wire`: the push format between `telemetry` and the dashboard,
+# for both ends (serde types, limits, validation rules).
+telemetry-wire = ["dep:serde"]
+
 # `telemetry` plus the `metrics` re-export: pushes metrics, process readings
 # and exit reasons to the Buggregator service dashboard.
 telemetry = [
     "process-stats",
+    "telemetry-wire",
     "dep:log",
     "dep:metrics",
     "dep:metrics-util",
@@ -212,6 +217,7 @@ full = [
     "sparql-table",
     "statements",
     "telemetry",
+    "telemetry-wire",
     "title",
     "toolforge",
     "wikibase",

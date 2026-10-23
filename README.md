@@ -40,7 +40,8 @@ wikimisc = { version = "0.3", default-features = false, features = ["item-merger
 | `external-id` | `external_id` | `entity-id`, `statements`, `wikibase` | `chrono`, `regex`, `serde` |
 | `item-merger` | `item_merger`, `merge_diff` | `external-id` | `regex`, `serde`, `serde_json` |
 | `database` | `toolforge`'s `db` and `pool` modules, re-export of `mysql_async` (from `toolforge::pool`) | `toolforge` | `toolforge` (feature `wikipool`) |
-| `telemetry` | `telemetry`, re-export of `metrics` | `process-stats` | `log`, `metrics`, `metrics-util`, `reqwest`, `serde`, `thiserror`, `tokio` |
+| `telemetry-wire` | `telemetry_wire` (push format for both client and dashboard) | | `serde` |
+| `telemetry` | `telemetry`, re-export of `metrics` | `process-stats`, `telemetry-wire` | `log`, `metrics`, `metrics-util`, `reqwest`, `serde`, `thiserror`, `tokio` |
 | `full` | everything above | all | all |
 
 Some features interact:

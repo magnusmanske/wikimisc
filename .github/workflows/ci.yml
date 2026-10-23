@@ -76,6 +76,7 @@ jobs:
           - sparql-table
           - statements
           - telemetry
+          - telemetry-wire
           - title
           - toolforge
           - wikibase

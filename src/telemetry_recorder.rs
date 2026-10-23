@@ -2,6 +2,7 @@
 //! service records through `metrics::counter!` / `gauge!` / `histogram!`, and
 //! turns it into the metric list of a push.
 
+use crate::telemetry_wire::{Metric, MetricKind};
 use metrics::{
     Counter, Gauge, Histogram, Key, KeyName, Label, Metadata, Recorder, SharedString, Unit,
 };
@@ -9,35 +10,6 @@ use metrics_util::registry::{AtomicStorage, Registry};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-
-/// One metric value in a push. Histograms are already expanded into
-/// `<name>_count` / `<name>_sum` counters and per-interval `<name>_p50` /
-/// `_p95` / `_max` gauges.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct MetricValue {
-    pub name: String,
-    pub kind: MetricKind,
-    #[serde(
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "labels_as_map"
-    )]
-    pub labels: Vec<(String, String)>,
-    pub value: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MetricKind {
-    Counter,
-    Gauge,
-}
-
-fn labels_as_map<S: serde::Serializer>(
-    labels: &[(String, String)],
-    s: S,
-) -> Result<S::Ok, S::Error> {
-    s.collect_map(labels.iter().map(|(k, v)| (k, v)))
-}
 
 /// A `metrics::Recorder` that keeps everything in memory for the next push.
 ///
@@ -85,10 +57,7 @@ impl TelemetryRecorder {
     ///
     /// NaN and infinite values are left out: JSON has no way to send them,
     /// and a single one would turn a histogram's running sum into NaN for good.
-    pub(crate) fn snapshot(
-        &self,
-        histogram_totals: &mut HashMap<Key, (f64, f64)>,
-    ) -> Vec<MetricValue> {
+    pub(crate) fn snapshot(&self, histogram_totals: &mut HashMap<Key, (f64, f64)>) -> Vec<Metric> {
         let mut ret = Vec::new();
         self.registry.visit_counters(|key, counter| {
             ret.push(metric(
@@ -117,8 +86,8 @@ impl TelemetryRecorder {
     }
 }
 
-fn metric(name: &str, key: &Key, kind: MetricKind, value: f64) -> MetricValue {
-    MetricValue {
+fn metric(name: &str, key: &Key, kind: MetricKind, value: f64) -> Metric {
+    Metric {
         name: name.to_string(),
         kind,
         labels: key
@@ -131,7 +100,7 @@ fn metric(name: &str, key: &Key, kind: MetricKind, value: f64) -> MetricValue {
 
 /// `<name>_count` and `<name>_sum` (running totals), plus `<name>_p50`,
 /// `_p95` and `_max` of this interval's observations when there were any.
-fn expand_histogram(key: &Key, (count, sum): (f64, f64), values: &mut [f64]) -> Vec<MetricValue> {
+fn expand_histogram(key: &Key, (count, sum): (f64, f64), values: &mut [f64]) -> Vec<Metric> {
     let name = key.name();
     let mut ret = vec![
         metric(&format!("{name}_count"), key, MetricKind::Counter, count),
@@ -182,7 +151,7 @@ impl Recorder for TelemetryRecorder {
 mod tests {
     use super::*;
 
-    fn find<'a>(values: &'a [MetricValue], name: &str) -> Option<&'a MetricValue> {
+    fn find<'a>(values: &'a [Metric], name: &str) -> Option<&'a Metric> {
         values.iter().find(|m| m.name == name)
     }
 
@@ -204,7 +173,7 @@ mod tests {
         assert_eq!(requests.value, 3.0);
         assert_eq!(
             requests.labels,
-            vec![("status".to_string(), "2xx".to_string())]
+            crate::telemetry_wire::Labels::from([("status".to_string(), "2xx".to_string())])
         );
         assert_eq!(find(&snap, "queue").unwrap().value, 7.5);
         assert_eq!(find(&snap, "latency_count").unwrap().value, 4.0);
@@ -252,7 +221,7 @@ mod tests {
         assert_eq!(snap[0].value, 3.0);
         assert_eq!(
             snap[0].labels,
-            vec![("status".to_string(), "200".to_string())]
+            crate::telemetry_wire::Labels::from([("status".to_string(), "200".to_string())])
         );
     }
 

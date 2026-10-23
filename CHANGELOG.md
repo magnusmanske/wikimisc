@@ -57,6 +57,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Seppuku::watch` with `Verdict` (probe-based watchdog);
   `process_stats::MemoryStats`; `TelemetryBuilder::{component, install_or_log,
   install_alongside_or_log}`.
+- `telemetry-wire` feature: `telemetry_wire` holds the dashboard push format
+  (`Payload`, `Instance`, `Metric`, `Event`, `Exit`, limits and validation
+  rules) as public serde types, shared by the `telemetry` client and the
+  dashboard's ingest endpoint. `telemetry::Level` is now a re-export of
+  `telemetry_wire::Level`.
 
 ### Changed
 - **Breaking:** `Wikidata::new` takes the user agent, and `Wikidata` no longer
