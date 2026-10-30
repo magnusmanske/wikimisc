@@ -39,6 +39,30 @@ impl std::fmt::Debug for Consumer {
 }
 
 impl Consumer {
+    pub fn new(
+        key: impl Into<String>,
+        secret: impl Into<String>,
+        agent: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            secret: secret.into(),
+            agent: agent.into(),
+        }
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn secret(&self) -> &str {
+        &self.secret
+    }
+
+    pub fn agent(&self) -> &str {
+        &self.agent
+    }
+
     pub fn from_ini(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
@@ -81,33 +105,53 @@ impl std::fmt::Debug for Token {
 pub struct OAuth {
     consumer: Consumer,
     http: reqwest::Client,
+    base_url: String,
+    public_url: String,
 }
 
 impl OAuth {
     pub fn new(consumer: Consumer, http: reqwest::Client) -> Self {
-        Self { consumer, http }
+        Self {
+            consumer,
+            http,
+            base_url: OAUTH_URL.to_string(),
+            public_url: OAUTH_URL.to_string(),
+        }
+    }
+
+    /// Use a different `Special:OAuth` base URL, and a different public URL
+    /// for the authorization link (some tools reach MediaWiki differently
+    /// from the user's browser).
+    pub fn with_urls(mut self, base_url: impl Into<String>, public_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self.public_url = public_url.into();
+        self
+    }
+
+    pub fn consumer(&self) -> &Consumer {
+        &self.consumer
+    }
+
+    /// Where to send the user to approve `token_key`.
+    pub fn authorize_url(&self, token_key: &str) -> String {
+        authorize_url(&self.public_url, &self.consumer.key, token_key)
     }
 
     /// Step 1: a request token, and where to send the user to approve it.
     pub async fn initiate(&self, callback: &str) -> Result<(Token, String)> {
-        let url = format!("{OAUTH_URL}/initiate");
+        let url = format!("{}/initiate", self.base_url);
         let mut params = self.oauth_params(None);
         params.extend([
             ("format".to_string(), "json".to_string()),
             ("oauth_callback".to_string(), callback.to_string()),
         ]);
         let token = self.signed_get(&url, params, "").await?;
-        let authorize = format!(
-            "{OAUTH_URL}/authorize?oauth_token={}&oauth_consumer_key={}",
-            encode(&token.key),
-            encode(&self.consumer.key)
-        );
-        Ok((token, authorize))
+        Ok((token.clone(), self.authorize_url(&token.key)))
     }
 
     /// Step 2: the access token, for the request token the user approved.
     pub async fn access_token(&self, request: &Token, verifier: &str) -> Result<Token> {
-        let url = format!("{OAUTH_URL}/token");
+        let url = format!("{}/token", self.base_url);
         let mut params = self.oauth_params(Some(&request.key));
         params.extend([
             ("format".to_string(), "json".to_string()),
@@ -357,6 +401,66 @@ impl Session {
             .same_site(SameSite::Lax)
             .max_age(max_age)
             .build()
+    }
+}
+
+/// The authorization URL for `token_key`, on `public_url` (which may already
+/// contain a query string, as `.../index.php?title=Special:OAuth` does).
+pub fn authorize_url(public_url: &str, consumer_key: &str, token_key: &str) -> String {
+    let separator = if public_url.contains('?') { '&' } else { '?' };
+    format!(
+        "{public_url}/authorize{separator}oauth_token={}&oauth_consumer_key={}",
+        encode(token_key),
+        encode(consumer_key)
+    )
+}
+
+/// Request tokens of logins in progress, for tools that keep the handshake
+/// server-side instead of in a cookie.
+#[derive(Debug)]
+pub struct PendingTokens {
+    ttl: std::time::Duration,
+    max: usize,
+    tokens: std::sync::Mutex<HashMap<String, (String, std::time::Instant)>>,
+}
+
+impl PendingTokens {
+    pub fn new(ttl: std::time::Duration, max: usize) -> Self {
+        Self {
+            ttl,
+            max,
+            tokens: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Remembers `token` as a login in progress.
+    pub fn remember(&self, token: &Token) -> Result<()> {
+        let mut pending = self
+            .tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
+        pending.retain(|_, (_, issued)| now.duration_since(*issued) < self.ttl);
+        if pending.len() >= self.max {
+            return Err(anyhow!(
+                "Too many logins in progress, please try again later."
+            ));
+        }
+        pending.insert(token.key.clone(), (token.secret.clone(), now));
+        Ok(())
+    }
+
+    /// Takes a login in progress; it can be used once, and only within `ttl`.
+    pub fn take(&self, key: &str) -> Option<Token> {
+        let mut pending = self
+            .tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (secret, issued) = pending.remove(key)?;
+        (issued.elapsed() < self.ttl).then(|| Token {
+            key: key.to_string(),
+            secret,
+        })
     }
 }
 

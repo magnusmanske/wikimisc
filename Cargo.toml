@@ -48,6 +48,9 @@ escape = []
 # `jsonp`: JSONP callback validation and wrapping (no web framework).
 jsonp = []
 
+# `ssrf`: HTTP clients that refuse private/loopback/reserved destinations.
+ssrf = ["http", "dep:anyhow", "dep:log", "tokio/net"]
+
 # `shutdown`: waiting for SIGTERM/SIGINT.
 shutdown = ["dep:log", "dep:tokio", "tokio/macros", "tokio/signal"]
 
@@ -215,7 +218,15 @@ oauth1 = [
 
 # `web`: request parameters the way the old PHP tools read them, and the
 # allowlist that keeps static-file serving away from source and secrets.
-web = ["server", "dep:percent-encoding", "dep:serde_urlencoded", "dep:thiserror"]
+web = [
+    "server",
+    "dep:base64",
+    "dep:hmac",
+    "dep:percent-encoding",
+    "dep:serde_urlencoded",
+    "dep:sha2",
+    "dep:thiserror",
+]
 
 # `telemetry_wire`: the push format between `telemetry` and the dashboard,
 # for both ends (serde types, limits, validation rules).
@@ -262,6 +273,7 @@ full = [
     "server",
     "shutdown",
     "site-matrix",
+    "ssrf",
     "sparql",
     "sparql-client",
     "sparql-table",
@@ -301,6 +313,7 @@ reqwest = { version = "0.13", features = ["form", "json", "query"], optional = t
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
+sha2 = { version = "0.10", optional = true }
 sha1 = { version = "0.10", optional = true }
 tempfile = { version = "3", optional = true }
 thiserror = { version = "2", optional = true }

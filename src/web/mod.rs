@@ -3,4 +3,5 @@
 //! keeps static-file serving away from source files and secrets.
 
 pub mod params;
+pub mod session;
 pub mod static_files;

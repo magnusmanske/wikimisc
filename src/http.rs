@@ -31,6 +31,9 @@
 //! whole exchange, including reading the body; [`send`] makes a single
 //! attempt.
 
+#[cfg(feature = "ssrf")]
+pub mod ssrf;
+
 use crate::retry::{RetryPolicy, Retryable};
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use reqwest::{Client, ClientBuilder, RequestBuilder, Response, StatusCode};

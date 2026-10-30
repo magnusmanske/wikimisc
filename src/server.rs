@@ -62,8 +62,44 @@ pub fn is_same_origin(headers: &HeaderMap) -> bool {
         .is_some_and(from_host)
 }
 
+/// Whether `headers` show a request from `origin`: `Sec-Fetch-Site:
+/// same-origin`, or (for browsers without Fetch Metadata) an `Origin` equal
+/// to `origin`.
+pub fn is_from_origin(headers: &HeaderMap, origin: &str) -> bool {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    match header("sec-fetch-site") {
+        Some(site) => site == "same-origin",
+        None => header("origin") == Some(origin),
+    }
+}
+
+/// Reject cross-site writes. Together with `SameSite=Lax` cookies this is the
+/// CSRF defence. Safe methods pass; an unsafe one needs an `Origin` host
+/// equal to `Host`. An absent `Origin` is allowed, as non-browser clients
+/// send none.
+pub async fn same_origin_writes(request: Request, next: Next) -> Response {
+    let safe = matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    let headers = request.headers();
+    let origin_host = headers
+        .get(header::ORIGIN)
+        .and_then(|o| o.to_str().ok())
+        .map(|o| o.split_once("://").map_or(o, |(_, host)| host));
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+    match origin_host {
+        Some(origin) if !safe && Some(origin) != host => {
+            (StatusCode::FORBIDDEN, "cross-site request refused").into_response()
+        }
+        _ => next.run(request).await,
+    }
+}
+
+use axum::extract::Request;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
-use axum::response::Redirect;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, MethodRouter};
 use axum::Router;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -571,6 +607,61 @@ mod request_origin_tests {
             ("origin", "https://a.org.evil.com")
         ])));
         assert!(!is_same_origin(&headers(&[("host", "a.org")])));
+    }
+
+    #[test]
+    fn from_a_known_origin() {
+        assert!(is_from_origin(
+            &headers(&[("sec-fetch-site", "same-origin")]),
+            "https://x"
+        ));
+        assert!(is_from_origin(
+            &headers(&[("origin", "https://x")]),
+            "https://x"
+        ));
+        assert!(!is_from_origin(
+            &headers(&[("origin", "https://evil")]),
+            "https://x"
+        ));
+        assert!(!is_from_origin(&HeaderMap::new(), "https://x"));
+    }
+
+    #[tokio::test]
+    async fn writes_need_a_same_origin_header() {
+        use axum::routing::post;
+
+        let router = Router::new()
+            .route("/x", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(same_origin_writes));
+        let post = |origin: Option<&str>| {
+            let mut request = Request::post("/x").header(header::HOST, "a.org");
+            if let Some(origin) = origin {
+                request = request.header(header::ORIGIN, origin);
+            }
+            request.body(Body::empty()).unwrap()
+        };
+        // No Origin: a non-browser client; allowed.
+        assert_eq!(
+            router.clone().oneshot(post(None)).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(post(Some("https://a.org")))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            router
+                .oneshot(post(Some("https://evil.example")))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]

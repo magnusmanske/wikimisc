@@ -46,7 +46,8 @@ wikimisc = { version = "0.3", default-features = false, features = ["item-merger
 | `wiki-api` | `wiki_api` (common MediaWiki Action API requests) | `wiki`, `escape` | `anyhow`, `reqwest`, `serde_json`, `tokio` |
 | `replicas` | `replicas` (replica pools, category trees, link counts, entity pages) | `database`, `wiki` | `anyhow` |
 | `oauth1` | `oauth1` (MediaWiki OAuth 1.0a and encrypted cookie sessions) | `wiki` | `anyhow`, `axum`, `axum-extra`, `base64`, `hmac`, `rand`, `reqwest`, `serde`, `serde_json`, `sha1`, `time` |
-| `web` | `web` (PHP-style request parameters, static-file allowlist) | `server` | `percent-encoding`, `serde_urlencoded`, `thiserror` |
+| `web` | `web` (PHP-style request parameters, signed session cookies, static-file allowlist) | `server` | `percent-encoding`, `serde_urlencoded`, `thiserror` |
+| `ssrf` | `http::ssrf` (guarded outbound clients, IP-literal and DNS checks) | `http` | `anyhow`, `log`, `tokio` |
 | `telemetry-wire` | `telemetry_wire` (push format for both client and dashboard) | | `serde` |
 | `telemetry` | `telemetry`, re-export of `metrics` | `process-stats`, `telemetry-wire` | `log`, `metrics`, `metrics-util`, `reqwest`, `serde`, `thiserror`, `tokio` |
 | `full` | everything above | all | all |
@@ -102,6 +103,13 @@ Code that several tools used to carry their own copy of:
 - **OAuth 1.0a** (`oauth1`): `Consumer`, `Token` and `OAuth` (all with
   redacted `Debug`), signed requests including multipart uploads, and
   encrypted cookie sessions.
+- **Outbound HTTP safety** (`ssrf`): obtain untrusted clients through
+  `Target::Untrusted` and fetch with `get_guarded`; IP literals in private,
+  loopback, link-local or reserved ranges are refused before the request,
+  redirects are re-checked, and the DNS resolver drops hostnames that point
+  into those ranges.
+- **Sessions** (`web::session`): a signed stateless cookie (`SessionKey`),
+  standard `Set-Cookie` attributes, cookie parsing and safe return paths.
 - **Web plumbing** (`web`): merging query and form parameters the way PHP's
   `$_REQUEST` did, and the `public_html` extension allowlist that keeps
   source files and secrets unserved.
