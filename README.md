@@ -43,7 +43,7 @@ wikimisc = { version = "0.3", default-features = false, features = ["item-merger
 | `cache` | `cache` (single-value, keyed and bounded async caches) | | `tokio` |
 | `format` | `format` (`thousands`) | | |
 | `wiki` | `wiki` (validated Wikimedia wiki names, database names and URLs) | | `percent-encoding`, `thiserror` |
-| `wiki-api` | `wiki_api` (common MediaWiki Action API requests) | `wiki`, `escape` | `anyhow`, `reqwest`, `serde_json`, `tokio` |
+| `wiki-api` | `wiki_api` (common MediaWiki Action API requests) | `wiki`, `escape`, `http` | `anyhow`, `reqwest`, `serde_json`, `tokio` |
 | `replicas` | `replicas` (replica pools, category trees, link counts, entity pages) | `database`, `wiki` | `anyhow` |
 | `oauth1` | `oauth1` (MediaWiki OAuth 1.0a and encrypted cookie sessions) | `wiki` | `anyhow`, `axum`, `axum-extra`, `base64`, `hmac`, `rand`, `reqwest`, `serde`, `serde_json`, `sha1`, `time` |
 | `web` | `web` (PHP-style request parameters, signed session cookies, static-file allowlist) | `server` | `percent-encoding`, `serde_urlencoded`, `thiserror` |
@@ -97,9 +97,11 @@ Code that several tools used to carry their own copy of:
   `search` with `CirrusQuery`. `Wikidata::new` takes your user agent.
 - **Sites, API and replicas** (`wiki`, `wiki-api`, `replicas`): validated
   `Wiki` names, hosts, database names and URLs; the common Action API
-  requests; replica pools and the category/link/entity-page queries several
-  tools share. `server::{is_same_origin, moved}` are here for write endpoints
-  and legacy redirects.
+  requests, plus `wiki_api::Client` for POSTed parameter lists and
+  `query_continue`; replica pools (`Replicas::builder` for custom timeouts and
+  pool sizes) and the category/link/entity-page queries several tools share.
+  `server::{is_same_origin, moved}` are here for write endpoints and legacy
+  redirects.
 - **OAuth 1.0a** (`oauth1`): `Consumer`, `Token` and `OAuth` (all with
   redacted `Debug`), signed requests including multipart uploads, and
   encrypted cookie sessions.
@@ -118,8 +120,9 @@ Code that several tools used to carry their own copy of:
   `Api-User-Agent` header), health checks and JSONP; `logging` can write to
   stdout and take an explicit filter that beats the environment variable;
   `logging::init()` sets up `tracing` with a `log` bridge. With `telemetry`:
-  `TelemetryBuilder::install_or_log`, request metrics, and `Seppuku::watch`
-  for probe-based watchdogs.
+  `telemetry::install[_web|_bot]` for the usual setup,
+  `TelemetryBuilder::install_or_log` for the rest, request metrics, and
+  `Seppuku::watch` for probe-based watchdogs.
 
 ## Telemetry: the service dashboard
 

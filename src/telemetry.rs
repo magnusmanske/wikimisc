@@ -947,6 +947,37 @@ fn started_millis() -> u128 {
         .unwrap_or(0)
 }
 
+/// Install telemetry for a long-running service or bot.
+///
+/// `handle_signals` must be false for a service served by
+/// [`crate::server::serve`], which drains on SIGTERM and sends the final push
+/// itself. Returns whether telemetry was installed.
+pub fn install(
+    component: &str,
+    version: &str,
+    config: Option<&TelemetryConfig>,
+    handle_signals: bool,
+) -> bool {
+    let mut builder = Telemetry::builder(component)
+        .version(version)
+        .handle_signals(handle_signals);
+    if let Some(config) = config {
+        builder = builder.config(config);
+    }
+    builder.install_or_log().is_some()
+}
+
+/// [`install`] for a web service: component `web`, signals left to
+/// [`crate::server::serve`].
+pub fn install_web(version: &str, config: Option<&TelemetryConfig>) -> bool {
+    install("web", version, config, false)
+}
+
+/// [`install`] for a bot: component `bot`, handling signals itself.
+pub fn install_bot(version: &str, config: Option<&TelemetryConfig>) -> bool {
+    install("bot", version, config, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

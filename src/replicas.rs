@@ -9,7 +9,7 @@ use crate::toolforge::pool::WikiPool;
 use crate::wiki::Wiki;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::mysql_async::prelude::{FromRow, Queryable};
@@ -25,36 +25,121 @@ const NS_CATEGORY: i64 = 14;
 /// Category trees can be enormous; stop growing one at this size.
 const MAX_CATEGORIES: usize = 50_000;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Replicas {
     pool: WikiPool,
 }
 
 impl Replicas {
+    /// The default pool: the analytics cluster, credentials discovered as the
+    /// `toolforge` crate does, at most [`POOL_MAX`] connections.
     pub fn new(credentials: &Path) -> Result<Self> {
-        let pool = WikiPool::builder(Cluster::Analytics)
+        Self::builder(Cluster::Analytics)
             .my_cnf_path(credentials)
-            .pool_max(POOL_MAX)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .max_statement_time(MAX_STATEMENT_TIME)
             .build()
-            .with_context(|| {
-                format!(
-                    "cannot read the database credentials from {}",
-                    credentials.display()
-                )
-            })?;
-        Ok(Self { pool })
+    }
+
+    /// A pool for `cluster`, with the default timeouts and pool size.
+    pub fn builder(cluster: Cluster) -> ReplicasBuilder {
+        ReplicasBuilder {
+            cluster,
+            my_cnf: None,
+            pool_max: POOL_MAX,
+            connect_timeout: CONNECT_TIMEOUT,
+            max_statement_time: MAX_STATEMENT_TIME,
+        }
+    }
+
+    /// The underlying `toolforge` pool, for callers with their own retry or
+    /// timeout handling.
+    pub fn pool(&self) -> &WikiPool {
+        &self.pool
+    }
+
+    /// Close all pooled connections. Clones share the pool, so this closes
+    /// it for all of them.
+    pub async fn disconnect(self) -> Result<()> {
+        self.pool.disconnect().await?;
+        Ok(())
+    }
+
+    /// A connection to `dbname` that has `tables`, with `toolforge`'s error
+    /// type, for callers that inspect e.g. `max_user_connections` themselves.
+    pub async fn connect_for_tables(
+        &self,
+        dbname: &str,
+        tables: &[&str],
+    ) -> std::result::Result<Conn, crate::toolforge::Error> {
+        self.pool.connect_for_tables(dbname, tables).await
+    }
+
+    /// As [`connect_for_tables`](Self::connect_for_tables), with context.
+    pub async fn conn_for_dbname(&self, dbname: &str, tables: &[&str]) -> Result<Conn> {
+        self.connect_for_tables(dbname, tables)
+            .await
+            .with_context(|| format!("cannot connect to the {dbname} replica"))
     }
 
     /// A connection to the database of `wiki` that has `tables`.
     pub async fn conn(&self, wiki: &Wiki, tables: &[&str]) -> Result<Conn> {
-        self.pool
-            .connect_for_tables(wiki.dbname(), tables)
-            .await
-            .with_context(|| format!("cannot connect to the {} replica", wiki.dbname()))
+        self.conn_for_dbname(wiki.dbname(), tables).await
+    }
+}
+
+/// How to build a [`Replicas`] pool.
+#[derive(Debug, Clone)]
+pub struct ReplicasBuilder {
+    cluster: Cluster,
+    my_cnf: Option<PathBuf>,
+    pool_max: usize,
+    connect_timeout: Duration,
+    max_statement_time: Duration,
+}
+
+impl ReplicasBuilder {
+    /// Read the credentials from this `replica.my.cnf` instead of discovering them.
+    pub fn my_cnf_path(mut self, path: &Path) -> Self {
+        self.my_cnf = Some(path.to_path_buf());
+        self
     }
 
+    /// Connections per database server.
+    pub fn pool_max(mut self, pool_max: usize) -> Self {
+        self.pool_max = pool_max;
+        self
+    }
+
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// The server-side limit for each statement.
+    pub fn max_statement_time(mut self, timeout: Duration) -> Self {
+        self.max_statement_time = timeout;
+        self
+    }
+
+    pub fn build(self) -> Result<Replicas> {
+        let mut builder = WikiPool::builder(self.cluster)
+            .pool_max(self.pool_max)
+            .connect_timeout(self.connect_timeout)
+            .max_statement_time(self.max_statement_time);
+        if let Some(path) = &self.my_cnf {
+            builder = builder.my_cnf_path(path);
+        }
+        let pool = builder.build().with_context(|| match &self.my_cnf {
+            Some(path) => format!(
+                "cannot read the database credentials from {}",
+                path.display()
+            ),
+            None => "cannot discover the database credentials".to_string(),
+        })?;
+        Ok(Replicas { pool })
+    }
+}
+
+impl Replicas {
     /// `category` and its subcategories down to `depth` (0: just the
     /// category), as database titles.
     pub async fn category_tree(
