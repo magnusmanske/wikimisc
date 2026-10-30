@@ -31,7 +31,40 @@ pub mod jsonp;
 
 pub use crate::shutdown::{shutdown_signal, ShutdownSignal};
 
-use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode};
+/// A permanent redirect to `to`, keeping the query string. 308, so that
+/// POST requests stay POST requests, with their body.
+pub fn moved<S: Clone + Send + Sync + 'static>(to: &str) -> MethodRouter<S> {
+    let to = to.to_string();
+    any(move |uri: Uri| async move {
+        match uri.query() {
+            Some(query) => Redirect::permanent(&format!("{to}?{query}")),
+            None => Redirect::permanent(&to),
+        }
+    })
+}
+
+/// Whether a request comes from a page of this site: the defence against
+/// cross-site requests for actions that change something.
+pub fn is_same_origin(headers: &HeaderMap) -> bool {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    if let Some(site) = header("sec-fetch-site") {
+        return site == "same-origin";
+    }
+    let Some(host) = header("host") else {
+        return false;
+    };
+    let from_host = |url: &str| {
+        url.split_once("://")
+            .is_some_and(|(_, rest)| rest.split('/').next() == Some(host))
+    };
+    header("origin")
+        .or(header("referer"))
+        .is_some_and(from_host)
+}
+
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use axum::response::Redirect;
+use axum::routing::{any, MethodRouter};
 use axum::Router;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
@@ -500,5 +533,52 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         assert!(response.ends_with("hello"), "{response}");
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod request_origin_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn same_or_cross_site() {
+        assert!(is_same_origin(&headers(&[(
+            "sec-fetch-site",
+            "same-origin"
+        )])));
+        assert!(!is_same_origin(&headers(&[
+            ("sec-fetch-site", "cross-site"),
+            ("host", "a.org"),
+            ("referer", "https://a.org/")
+        ])));
+        assert!(is_same_origin(&headers(&[
+            ("host", "a.org"),
+            ("referer", "https://a.org/buggregator/")
+        ])));
+        assert!(!is_same_origin(&headers(&[
+            ("host", "a.org"),
+            ("origin", "https://a.org.evil.com")
+        ])));
+        assert!(!is_same_origin(&headers(&[("host", "a.org")])));
+    }
+
+    #[tokio::test]
+    async fn moved_keeps_the_query_and_method() {
+        let router = Router::new().route("/old", moved("/new"));
+        let request = Request::post("/old?a=1").body(Body::empty()).unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(response.headers()[header::LOCATION], "/new?a=1");
     }
 }

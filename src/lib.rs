@@ -15,6 +15,8 @@
     warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+#[cfg(feature = "cache")]
+pub mod cache;
 #[cfg(feature = "title")]
 pub mod commons;
 #[cfg(feature = "sparql-client")]
@@ -27,6 +29,8 @@ pub mod entity_id;
 pub mod escape;
 #[cfg(feature = "external-id")]
 pub mod external_id;
+#[cfg(feature = "format")]
+pub mod format;
 #[cfg(feature = "http")]
 pub mod http;
 #[cfg(feature = "item-merger")]
@@ -41,8 +45,12 @@ pub mod lat_lon;
 pub mod logging;
 #[cfg(feature = "item-merger")]
 pub mod merge_diff;
+#[cfg(feature = "oauth1")]
+pub mod oauth1;
 #[cfg(feature = "process-stats")]
 pub mod process_stats;
+#[cfg(feature = "replicas")]
+pub mod replicas;
 #[cfg(feature = "retry")]
 pub mod retry;
 #[cfg(feature = "seppuku")]
@@ -91,6 +99,12 @@ pub mod timestamp;
 pub mod title;
 #[cfg(feature = "toolforge")]
 pub mod toolforge_app;
+#[cfg(feature = "web")]
+pub mod web;
+#[cfg(feature = "wiki")]
+pub mod wiki;
+#[cfg(feature = "wiki-api")]
+pub mod wiki_api;
 #[cfg(feature = "wikidata")]
 pub mod wikidata;
 

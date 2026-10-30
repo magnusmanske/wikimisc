@@ -40,6 +40,13 @@ wikimisc = { version = "0.3", default-features = false, features = ["item-merger
 | `external-id` | `external_id` | `entity-id`, `statements`, `wikibase` | `chrono`, `regex`, `serde` |
 | `item-merger` | `item_merger`, `merge_diff` | `external-id` | `regex`, `serde`, `serde_json` |
 | `database` | `toolforge`'s `db` and `pool` modules, re-export of `mysql_async` (from `toolforge::pool`) | `toolforge` | `toolforge` (feature `wikipool`) |
+| `cache` | `cache` (single-value, keyed and bounded async caches) | | `tokio` |
+| `format` | `format` (`thousands`) | | |
+| `wiki` | `wiki` (validated Wikimedia wiki names, database names and URLs) | | `percent-encoding`, `thiserror` |
+| `wiki-api` | `wiki_api` (common MediaWiki Action API requests) | `wiki`, `escape` | `anyhow`, `reqwest`, `serde_json`, `tokio` |
+| `replicas` | `replicas` (replica pools, category trees, link counts, entity pages) | `database`, `wiki` | `anyhow` |
+| `oauth1` | `oauth1` (MediaWiki OAuth 1.0a and encrypted cookie sessions) | `wiki` | `anyhow`, `axum`, `axum-extra`, `base64`, `hmac`, `rand`, `reqwest`, `serde`, `serde_json`, `sha1`, `time` |
+| `web` | `web` (PHP-style request parameters, static-file allowlist) | `server` | `percent-encoding`, `serde_urlencoded`, `thiserror` |
 | `telemetry-wire` | `telemetry_wire` (push format for both client and dashboard) | | `serde` |
 | `telemetry` | `telemetry`, re-export of `metrics` | `process-stats`, `telemetry-wire` | `log`, `metrics`, `metrics-util`, `reqwest`, `serde`, `thiserror`, `tokio` |
 | `full` | everything above | all | all |
@@ -87,6 +94,17 @@ Code that several tools used to carry their own copy of:
   patterns.
 - **Wikidata API** (`wikidata`): batched `get_entities`, `items_for_titles`,
   `search` with `CirrusQuery`. `Wikidata::new` takes your user agent.
+- **Sites, API and replicas** (`wiki`, `wiki-api`, `replicas`): validated
+  `Wiki` names, hosts, database names and URLs; the common Action API
+  requests; replica pools and the category/link/entity-page queries several
+  tools share. `server::{is_same_origin, moved}` are here for write endpoints
+  and legacy redirects.
+- **OAuth 1.0a** (`oauth1`): `Consumer`, `Token` and `OAuth` (all with
+  redacted `Debug`), signed requests including multipart uploads, and
+  encrypted cookie sessions.
+- **Web plumbing** (`web`): merging query and form parameters the way PHP's
+  `$_REQUEST` did, and the `public_html` extension allowlist that keeps
+  source files and secrets unserved.
 - **Services** (`server`, `logging`): `shutdown_signal`, `listen_addr`,
   graceful `serve`, standard layers, Wikimedia CORS (including gadgets'
   `Api-User-Agent` header), health checks and JSONP; `logging` can write to

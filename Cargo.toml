@@ -171,6 +171,52 @@ item-merger = [
 # plus the re-export of the `mysql_async` they are built on.
 database = ["toolforge", "toolforge/wikipool"]
 
+# `cache`: small async caches for values fetched now and then.
+cache = ["dep:tokio", "tokio/sync"]
+
+# `format`: display helpers (thousands separators).
+format = []
+
+# `wiki`: validated Wikimedia wiki names, database names and URLs.
+wiki = ["dep:percent-encoding", "dep:thiserror"]
+
+# `wiki_api`: the common MediaWiki Action API requests, on top of `wiki`.
+wiki-api = [
+    "wiki",
+    "escape",
+    "dep:anyhow",
+    "dep:reqwest",
+    "dep:serde_json",
+    "dep:tokio",
+    "tokio/time",
+]
+
+# `replicas`: MediaWiki replica database pools and the queries several tools
+# share (category trees, link counts, page titles).
+replicas = ["database", "wiki", "dep:anyhow"]
+
+# `oauth1`: a MediaWiki OAuth 1.0a client (login handshake, signed API calls,
+# encrypted cookie sessions), as the PHP tools' `MW_OAuth` did it.
+oauth1 = [
+    "wiki",
+    "dep:anyhow",
+    "dep:axum",
+    "dep:axum-extra",
+    "dep:base64",
+    "dep:hmac",
+    "dep:rand",
+    "dep:reqwest",
+    "reqwest/multipart",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha1",
+    "dep:time",
+]
+
+# `web`: request parameters the way the old PHP tools read them, and the
+# allowlist that keeps static-file serving away from source and secrets.
+web = ["server", "dep:percent-encoding", "dep:serde_urlencoded", "dep:thiserror"]
+
 # `telemetry_wire`: the push format between `telemetry` and the dashboard,
 # for both ends (serde types, limits, validation rules).
 telemetry-wire = ["dep:serde"]
@@ -194,11 +240,13 @@ telemetry = [
 # Convenience umbrella enabling every feature above; also what the test suite
 # and `cargo doc` are run with.
 full = [
+    "cache",
     "database",
     "date",
     "entity-id",
     "escape",
     "external-id",
+    "format",
     "http",
     "item-merger",
     "jsonp",
@@ -206,7 +254,9 @@ full = [
     "lat-lon",
     "logging",
     "mediawiki",
+    "oauth1",
     "process-stats",
+    "replicas",
     "retry",
     "seppuku",
     "server",
@@ -220,15 +270,22 @@ full = [
     "telemetry-wire",
     "title",
     "toolforge",
+    "web",
+    "wiki",
+    "wiki-api",
     "wikibase",
     "wikidata",
 ]
 
 [dependencies]
+anyhow = { version = "1", optional = true }
 axum = { version = "0.8", optional = true }
+axum-extra = { version = "0.12", features = ["cookie-private"], optional = true }
+base64 = { version = "0.22", optional = true }
 chrono = { version = "0.4", optional = true }
 csv = { version = "1", optional = true }
 futures = { version = "0.3", optional = true }
+hmac = { version = "0.12", optional = true }
 httpdate = { version = "1", optional = true }
 log = { version = "0.4", optional = true }
 md5 = { version = "0.7", optional = true }
@@ -237,12 +294,17 @@ md5 = { version = "0.7", optional = true }
 mediawiki = { version = "0.5", optional = true }
 metrics = { version = "0.24", optional = true }
 metrics-util = { version = "0.20", default-features = false, features = ["layers", "registry"], optional = true }
+percent-encoding = { version = "2", optional = true }
+rand = { version = "0.9", optional = true }
 regex = { version = "1", optional = true }
-reqwest = { version = "0.13", features = ["form", "json"], optional = true }
+reqwest = { version = "0.13", features = ["form", "json", "query"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+serde_urlencoded = { version = "0.7", optional = true }
+sha1 = { version = "0.10", optional = true }
 tempfile = { version = "3", optional = true }
 thiserror = { version = "2", optional = true }
+time = { version = "0.3", optional = true }
 tokio = { version = "1.41", features = ["rt", "time"], optional = true }
 toolforge = { version = "6.1", optional = true }
 tower-http = { version = "0.7", features = ["catch-panic", "compression-gzip", "compression-br", "cors", "timeout", "trace", "set-header"], optional = true }
