@@ -66,7 +66,7 @@ const MAX_PREALLOCATION: usize = 1024 * 1024;
 ///   crate declares no `repository`.
 /// - `user_agent!("https://mytool.toolforge.org; me@example.org")` —
 ///   `name/version (contact)`.
-/// - `user_agent!(name = "PetScan", "https://petscan.wmcloud.org")` — a tool
+/// - `user_agent!(name = "PetScan", "https://petscan.toolforge.org")` — a tool
 ///   name other than the crate name.
 /// - `user_agent!(description = "personal media catalogue")` —
 ///   `name/version (description; repository)`; fails to compile if the crate

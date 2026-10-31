@@ -418,7 +418,7 @@ mod tests {
             "https://de.m.wikipedia.org",
             "https://commons.wikimedia.org",
             "https://mix-n-match.toolforge.org",
-            "https://petscan.wmcloud.org",
+            "https://petscan.toolforge.org",
             "https://WWW.WIKIDATA.ORG",
             "https://www.wikidata.org:443",
         ] {
