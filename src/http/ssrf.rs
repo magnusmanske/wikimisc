@@ -13,12 +13,57 @@
 //! Use [`get_guarded`] instead of `client.get(url).send()` for any
 //! [`Target::Untrusted`] fetch.
 
-use crate::http::client_builder;
-use anyhow::{anyhow, Result};
+use crate::http::{client_builder, HttpError};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use thiserror::Error;
+
+/// Failure modes of the SSRF-guarded HTTP helpers.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum SsrfError {
+    /// The URL could not be parsed.
+    #[error("invalid URL '{url}': {message}")]
+    InvalidUrl { url: String, message: String },
+
+    /// The URL does not use the HTTP or HTTPS scheme.
+    #[error("refusing non-HTTP scheme '{scheme}'")]
+    NonHttpScheme { scheme: String },
+
+    /// The URL has no host component.
+    #[error("URL has no host")]
+    NoHost,
+
+    /// The URL names an IP address in a range that must not be fetched.
+    #[error("refusing to fetch blocked address {ip} (private/loopback/link-local/reserved)")]
+    BlockedAddress { ip: IpAddr },
+
+    /// The redirect chain exceeded the `MAX_REDIRECTS` limit.
+    #[error("too many redirects (>{MAX_REDIRECTS})")]
+    TooManyRedirects,
+
+    /// The `reqwest` client could not be built.
+    #[error("failed to build HTTP client: {0}")]
+    ClientBuild(#[source] reqwest::Error),
+
+    /// Sending the request failed.
+    #[error("fetch of '{url}' failed: {source}")]
+    Request {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    /// Reading the response body failed.
+    #[error("response from '{url}': {source}")]
+    Response {
+        url: String,
+        #[source]
+        source: HttpError,
+    },
+}
 
 /// Redirect hops allowed before we give up. Each hop is re-checked by
 /// [`guard_url`], so this only bounds redirect loops.
@@ -146,10 +191,10 @@ pub fn client_builder_for(target: Target, user_agent: &str) -> reqwest::ClientBu
 }
 
 /// Build a guarded or fixed-endpoint client with the default timeouts.
-pub fn client_for(target: Target, user_agent: &str) -> Result<reqwest::Client> {
+pub fn client_for(target: Target, user_agent: &str) -> Result<reqwest::Client, SsrfError> {
     client_builder_for(target, user_agent)
         .build()
-        .map_err(|e| anyhow!("failed to build HTTP client: {e}"))
+        .map_err(SsrfError::ClientBuild)
 }
 
 /// Redirect policy that re-applies [`guard_url`] to every hop. Without this a
@@ -158,7 +203,7 @@ pub fn client_for(target: Target, user_agent: &str) -> Result<reqwest::Client> {
 fn guarded_redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= MAX_REDIRECTS {
-            return attempt.error(anyhow!("too many redirects (>{MAX_REDIRECTS})"));
+            return attempt.error(SsrfError::TooManyRedirects);
         }
         match check_url(attempt.url()) {
             Ok(()) => attempt.follow(),
@@ -178,19 +223,26 @@ fn guarded_redirect_policy() -> reqwest::redirect::Policy {
 /// Hostnames are deliberately *not* resolved here — that is the resolver's
 /// job, and doing it twice would both double the DNS cost and open a
 /// rebinding window between our check and reqwest's own lookup.
-pub fn guard_url(url: &str) -> Result<reqwest::Url> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| anyhow!("invalid URL '{url}': {e}"))?;
+pub fn guard_url(url: &str) -> Result<reqwest::Url, SsrfError> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| SsrfError::InvalidUrl {
+        url: url.to_string(),
+        message: e.to_string(),
+    })?;
     check_url(&parsed)?;
     Ok(parsed)
 }
 
-fn check_url(url: &reqwest::Url) -> Result<()> {
+fn check_url(url: &reqwest::Url) -> Result<(), SsrfError> {
     match url.scheme() {
         "http" | "https" => {}
-        other => return Err(anyhow!("refusing non-HTTP scheme '{other}'")),
+        other => {
+            return Err(SsrfError::NonHttpScheme {
+                scheme: other.to_string(),
+            })
+        }
     }
     let Some(host) = url.host_str() else {
-        return Err(anyhow!("URL has no host"));
+        return Err(SsrfError::NoHost);
     };
     // Strip the brackets `Url` keeps around an IPv6 literal, then try to parse
     // the host as an address. A parse failure means it is a domain name, which
@@ -203,9 +255,7 @@ fn check_url(url: &reqwest::Url) -> Result<()> {
         .ok();
     if let Some(ip) = ip {
         if is_blocked_ip(&ip) {
-            return Err(anyhow!(
-                "refusing to fetch blocked address {ip} (private/loopback/link-local/reserved)"
-            ));
+            return Err(SsrfError::BlockedAddress { ip });
         }
     }
     Ok(())
@@ -215,13 +265,19 @@ fn check_url(url: &reqwest::Url) -> Result<()> {
 /// `client.get(url).send()` for any [`Target::Untrusted`] fetch — the client's
 /// resolver and redirect policy cover DNS and later hops, but only this covers
 /// an IP literal in the URL the caller was handed.
-pub async fn get_guarded(client: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
+pub async fn get_guarded(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<reqwest::Response, SsrfError> {
     let parsed = guard_url(url)?;
     client
         .get(parsed)
         .send()
         .await
-        .map_err(|e| anyhow!("fetch of '{url}' failed: {e}"))
+        .map_err(|source| SsrfError::Request {
+            url: url.to_string(),
+            source,
+        })
 }
 
 /// Read a response body, giving up once `max_bytes` have accumulated.
@@ -230,11 +286,14 @@ pub async fn get_guarded(client: &reqwest::Client, url: &str) -> Result<reqwest:
 /// merely enormous URL is a memory-exhaustion vector on every endpoint that
 /// fetches one. Streaming with a running total bounds the damage to
 /// `max_bytes` per in-flight request.
-pub async fn read_body_capped(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+pub async fn read_body_capped(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, SsrfError> {
     let url = response.url().to_string();
     crate::http::read_body_capped(response, max_bytes)
         .await
-        .map_err(|e| anyhow!("response from '{url}': {e}"))
+        .map_err(|source| SsrfError::Response { url, source })
 }
 
 #[cfg(test)]

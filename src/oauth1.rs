@@ -2,7 +2,6 @@
 //! handshake on meta's Special:OAuth, and signed API requests on behalf of a
 //! user. Tokens live in encrypted cookies (see [`Session`]).
 
-use anyhow::{anyhow, bail, Context, Result};
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use axum_extra::extract::PrivateCookieJar;
 use base64::Engine;
@@ -13,12 +12,67 @@ use sha1::Sha1;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 
 const OAUTH_URL: &str = "https://www.mediawiki.org/wiki/Special:OAuth";
 /// An access token cookie lasts as long as the old tools' did.
 const LOGIN_DAYS: i64 = 90;
 /// An authorization not finished within this time is gone.
 const HANDSHAKE_MINUTES: i64 = 60;
+
+/// Failure modes of the OAuth client and session helpers.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum OAuthError {
+    /// The consumer ini file could not be read.
+    #[error("cannot read {path}: {source}")]
+    ConfigRead {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The consumer ini file lacks a required key.
+    #[error("{path} lacks '{key}'")]
+    ConfigMissing { path: String, key: &'static str },
+
+    /// A URL could not be parsed while signing a request.
+    #[error("invalid URL {url}: {message}")]
+    InvalidUrl { url: String, message: String },
+
+    /// The request could not be sent, or the server answered with an error
+    /// status.
+    #[error("{operation}: {source}")]
+    Request {
+        operation: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    /// The response body could not be read as JSON.
+    #[error("{operation}: {source}")]
+    Response {
+        operation: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    /// The OAuth server answered with an error object.
+    #[error("OAuth error: {message}")]
+    Api { message: String },
+
+    /// The answer lacked the expected token fields.
+    #[error("unexpected OAuth answer: {answer}")]
+    UnexpectedAnswer { answer: String },
+
+    /// The HMAC key could not be set up.
+    #[error("cannot sign the request: {message}")]
+    Signing { message: String },
+
+    /// Too many logins are already waiting for their callback.
+    #[error("Too many logins in progress, please try again later.")]
+    TooManyPending,
+}
 
 /// A registered OAuth consumer, from an ini file with `consumerKey`,
 /// `consumerSecret` and `agent`.
@@ -63,20 +117,25 @@ impl Consumer {
         &self.agent
     }
 
-    pub fn from_ini(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("cannot read {}", path.display()))?;
+    pub fn from_ini(path: &Path) -> Result<Self, OAuthError> {
+        let text = std::fs::read_to_string(path).map_err(|source| OAuthError::ConfigRead {
+            path: path.display().to_string(),
+            source,
+        })?;
         let values: HashMap<&str, &str> = text
             .lines()
             .filter_map(|l| l.split_once('='))
             .map(|(k, v)| (k.trim(), v.trim().trim_matches(['"', '\''])))
             .collect();
-        let get = |key: &str| {
+        let get = |key: &'static str| {
             values
                 .get(key)
                 .filter(|v| !v.is_empty())
                 .map(|v| v.to_string())
-                .ok_or_else(|| anyhow!("{} lacks '{key}'", path.display()))
+                .ok_or_else(|| OAuthError::ConfigMissing {
+                    path: path.display().to_string(),
+                    key,
+                })
         };
         Ok(Self {
             key: get("consumerKey")?,
@@ -138,7 +197,7 @@ impl OAuth {
     }
 
     /// Step 1: a request token, and where to send the user to approve it.
-    pub async fn initiate(&self, callback: &str) -> Result<(Token, String)> {
+    pub async fn initiate(&self, callback: &str) -> Result<(Token, String), OAuthError> {
         let url = format!("{}/initiate", self.base_url);
         let mut params = self.oauth_params(None);
         params.extend([
@@ -150,7 +209,7 @@ impl OAuth {
     }
 
     /// Step 2: the access token, for the request token the user approved.
-    pub async fn access_token(&self, request: &Token, verifier: &str) -> Result<Token> {
+    pub async fn access_token(&self, request: &Token, verifier: &str) -> Result<Token, OAuthError> {
         let url = format!("{}/token", self.base_url);
         let mut params = self.oauth_params(Some(&request.key));
         params.extend([
@@ -167,14 +226,15 @@ impl OAuth {
         api_url: &str,
         token: Option<&Token>,
         params: &[(&str, &str)],
-    ) -> Result<Value> {
+    ) -> Result<Value, OAuthError> {
         let mut post: Vec<(String, String)> = params
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         post.push(("format".to_string(), "json".to_string()));
         let header = self.authorization("POST", api_url, &post, token)?;
-        self.http
+        let response = self
+            .http
             .post(api_url)
             .header(reqwest::header::USER_AGENT, &self.consumer.agent)
             .header(reqwest::header::AUTHORIZATION, header)
@@ -182,10 +242,17 @@ impl OAuth {
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .context("OAuth API request failed")?
+            .map_err(|source| OAuthError::Request {
+                operation: "OAuth API request failed",
+                source,
+            })?;
+        response
             .json()
             .await
-            .context("OAuth API answer is not JSON")
+            .map_err(|source| OAuthError::Response {
+                operation: "OAuth API answer is not JSON",
+                source,
+            })
     }
 
     /// A file upload (multipart POST) to a wiki's action API. As in the old
@@ -196,7 +263,7 @@ impl OAuth {
         token: &Token,
         fields: &[(&str, String)],
         file: reqwest::multipart::Part,
-    ) -> Result<Value> {
+    ) -> Result<Value, OAuthError> {
         let header = self.authorization("POST", api_url, &[], Some(token))?;
         let form = fields
             .iter()
@@ -205,7 +272,8 @@ impl OAuth {
             })
             .text("format", "json")
             .part("file", file);
-        self.http
+        let response = self
+            .http
             .post(api_url)
             .header(reqwest::header::USER_AGENT, &self.consumer.agent)
             .header(reqwest::header::AUTHORIZATION, header)
@@ -213,10 +281,17 @@ impl OAuth {
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .context("upload request failed")?
+            .map_err(|source| OAuthError::Request {
+                operation: "upload request failed",
+                source,
+            })?;
+        response
             .json()
             .await
-            .context("upload answer is not JSON")
+            .map_err(|source| OAuthError::Response {
+                operation: "upload answer is not JSON",
+                source,
+            })
     }
 
     /// The `Authorization: OAuth …` header for a request whose body (or
@@ -227,7 +302,7 @@ impl OAuth {
         url: &str,
         params: &[(String, String)],
         token: Option<&Token>,
-    ) -> Result<String> {
+    ) -> Result<String, OAuthError> {
         let mut oauth = self.oauth_params(Some(token.map_or("", |t| t.key.as_str())));
         let mut signed = params.to_vec();
         signed.extend(oauth.iter().cloned());
@@ -273,7 +348,7 @@ impl OAuth {
         url: &str,
         mut params: Vec<(String, String)>,
         token_secret: &str,
-    ) -> Result<Token> {
+    ) -> Result<Token, OAuthError> {
         params.push((
             "oauth_signature".to_string(),
             sign("GET", url, &params, &self.consumer.secret, token_secret)?,
@@ -285,12 +360,20 @@ impl OAuth {
             .query(&params)
             .send()
             .await
-            .context("OAuth request failed")?
+            .map_err(|source| OAuthError::Request {
+                operation: "OAuth request failed",
+                source,
+            })?
             .json()
             .await
-            .context("OAuth answer is not JSON")?;
+            .map_err(|source| OAuthError::Response {
+                operation: "OAuth answer is not JSON",
+                source,
+            })?;
         if let Some(error) = json.get("error") {
-            bail!("OAuth error: {error}");
+            return Err(OAuthError::Api {
+                message: error.to_string(),
+            });
         }
         // Current MediaWiki: oauth_token/oauth_token_secret; older: key/secret.
         let field = |a: &str, b: &str| json[a].as_str().or(json[b].as_str()).map(str::to_string);
@@ -299,7 +382,9 @@ impl OAuth {
             field("oauth_token_secret", "secret"),
         ) {
             (Some(key), Some(secret)) => Ok(Token { key, secret }),
-            _ => bail!("unexpected OAuth answer: {json}"),
+            _ => Err(OAuthError::UnexpectedAnswer {
+                answer: json.to_string(),
+            }),
         }
     }
 }
@@ -311,8 +396,11 @@ fn sign(
     params: &[(String, String)],
     consumer_secret: &str,
     token_secret: &str,
-) -> Result<String> {
-    let parsed = reqwest::Url::parse(url).with_context(|| format!("invalid URL {url}"))?;
+) -> Result<String, OAuthError> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| OAuthError::InvalidUrl {
+        url: url.to_string(),
+        message: e.to_string(),
+    })?;
     let host = parsed.host_str().unwrap_or_default();
     let base = match parsed.port() {
         Some(port) => format!("{}://{host}:{port}{}", parsed.scheme(), parsed.path()),
@@ -334,7 +422,10 @@ fn sign(
         encode(&joined.join("&"))
     );
     let key = format!("{}&{}", encode(consumer_secret), encode(token_secret));
-    let mut mac = Hmac::<Sha1>::new_from_slice(key.as_bytes()).map_err(|e| anyhow!("HMAC: {e}"))?;
+    let mut mac =
+        Hmac::<Sha1>::new_from_slice(key.as_bytes()).map_err(|e| OAuthError::Signing {
+            message: e.to_string(),
+        })?;
     mac.update(text.as_bytes());
     Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
 }
@@ -434,7 +525,7 @@ impl PendingTokens {
     }
 
     /// Remembers `token` as a login in progress.
-    pub fn remember(&self, token: &Token) -> Result<()> {
+    pub fn remember(&self, token: &Token) -> Result<(), OAuthError> {
         let mut pending = self
             .tokens
             .lock()
@@ -442,9 +533,7 @@ impl PendingTokens {
         let now = std::time::Instant::now();
         pending.retain(|_, (_, issued)| now.duration_since(*issued) < self.ttl);
         if pending.len() >= self.max {
-            return Err(anyhow!(
-                "Too many logins in progress, please try again later."
-            ));
+            return Err(OAuthError::TooManyPending);
         }
         pending.insert(token.key.clone(), (token.secret.clone(), now));
         Ok(())

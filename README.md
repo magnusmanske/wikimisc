@@ -43,11 +43,11 @@ wikimisc = { version = "0.3", default-features = false, features = ["item-merger
 | `cache` | `cache` (single-value, keyed and bounded async caches) | | `tokio` |
 | `format` | `format` (`thousands`) | | |
 | `wiki` | `wiki` (validated Wikimedia wiki names, database names and URLs) | | `percent-encoding`, `thiserror` |
-| `wiki-api` | `wiki_api` (common MediaWiki Action API requests) | `wiki`, `escape`, `http` | `anyhow`, `reqwest`, `serde_json`, `tokio` |
-| `replicas` | `replicas` (replica pools, category trees, link counts, entity pages) | `database`, `wiki` | `anyhow` |
-| `oauth1` | `oauth1` (MediaWiki OAuth 1.0a and encrypted cookie sessions) | `wiki` | `anyhow`, `axum`, `axum-extra`, `base64`, `hmac`, `rand`, `reqwest`, `serde`, `serde_json`, `sha1`, `time` |
+| `wiki-api` | `wiki_api` (common MediaWiki Action API requests) | `wiki`, `escape`, `http` | `reqwest`, `serde_json`, `thiserror`, `tokio` |
+| `replicas` | `replicas` (replica pools, category trees, link counts, entity pages) | `database`, `wiki` | `thiserror` |
+| `oauth1` | `oauth1` (MediaWiki OAuth 1.0a and encrypted cookie sessions) | `wiki` | `axum`, `axum-extra`, `base64`, `hmac`, `rand`, `reqwest`, `serde`, `serde_json`, `sha1`, `thiserror`, `time` |
 | `web` | `web` (PHP-style request parameters, signed session cookies, static-file allowlist) | `server` | `percent-encoding`, `serde_urlencoded`, `thiserror` |
-| `ssrf` | `http::ssrf` (guarded outbound clients, IP-literal and DNS checks) | `http` | `anyhow`, `log`, `tokio` |
+| `ssrf` | `http::ssrf` (guarded outbound clients, IP-literal and DNS checks) | `http` | `log`, `reqwest`, `thiserror`, `tokio` |
 | `telemetry-wire` | `telemetry_wire` (push format for both client and dashboard) | | `serde` |
 | `telemetry` | `telemetry`, re-export of `metrics` | `process-stats`, `telemetry-wire` | `log`, `metrics`, `metrics-util`, `reqwest`, `serde`, `thiserror`, `tokio` |
 | `full` | everything above | all | all |
@@ -295,6 +295,10 @@ the shape of another feature's error type:
 | `sparql-client` | `sparql_client::SparqlError` |
 | `site-matrix` | `site_matrix::SiteMatrixError` |
 | `wikidata` | `wikidata::WikidataError` |
+| `wiki-api` | `wiki_api::WikiApiError` |
+| `replicas` | `replicas::ReplicasError` |
+| `oauth1` | `oauth1::OAuthError` |
+| `ssrf` | `http::ssrf::SsrfError` |
 | `database` | `toolforge::Error` (from the `toolforge` crate) |
 | `telemetry` | `telemetry::TelemetryError` |
 

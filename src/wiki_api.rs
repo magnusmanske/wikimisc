@@ -1,24 +1,75 @@
 //! The common MediaWiki Action API requests the tools make.
 //!
-//! Everything here works on a [`Wiki`](crate::wiki::Wiki), so only Wikimedia
+//! Everything here works on a [`Wiki`], so only Wikimedia
 //! hosts can be reached. Domain-specific query building stays in the tools.
 
+use crate::http::HttpError;
 use crate::wiki::Wiki;
-use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
+use thiserror::Error;
+
+/// Failure modes of the MediaWiki Action API helpers.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum WikiApiError {
+    /// The request could not be sent, or the server answered with an error
+    /// status.
+    #[error("API request to {wiki} failed: {source}")]
+    Request {
+        wiki: String,
+        #[source]
+        source: HttpError,
+    },
+
+    /// The response body could not be read as JSON.
+    #[error("API response from {wiki} is not JSON: {source}")]
+    Response {
+        wiki: String,
+        #[source]
+        source: HttpError,
+    },
+
+    /// The API answered with an `error` object.
+    #[error("API error from {wiki}: {message}")]
+    Api { wiki: String, message: String },
+
+    /// A page render request failed, including an error status.
+    #[error("cannot render {title} on {wiki}: {source}")]
+    Render {
+        wiki: String,
+        title: String,
+        #[source]
+        source: HttpError,
+    },
+
+    /// The parse answer contained no HTML.
+    #[error("no HTML from {wiki}")]
+    NoHtml { wiki: String },
+}
 
 /// A GET request to the action API; `format=json&formatversion=2` is added.
-pub async fn api(http: &reqwest::Client, wiki: &Wiki, params: &[(&str, &str)]) -> Result<Value> {
+pub async fn api(
+    http: &reqwest::Client,
+    wiki: &Wiki,
+    params: &[(&str, &str)],
+) -> Result<Value, WikiApiError> {
+    let name = wiki.to_string();
     http.get(wiki.api_url())
         .query(params)
         .query(&[("format", "json"), ("formatversion", "2")])
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .with_context(|| format!("API request to {wiki} failed"))?
+        .map_err(|source| WikiApiError::Request {
+            wiki: name.clone(),
+            source: source.into(),
+        })?
         .json()
         .await
-        .with_context(|| format!("API response from {wiki} is not JSON"))
+        .map_err(|source| WikiApiError::Response {
+            wiki: name,
+            source: source.into(),
+        })
 }
 
 /// As [`api`], but POSTed: for parameters too long for a URL.
@@ -26,17 +77,24 @@ pub async fn api_post(
     http: &reqwest::Client,
     wiki: &Wiki,
     params: &[(&str, &str)],
-) -> Result<Value> {
+) -> Result<Value, WikiApiError> {
+    let name = wiki.to_string();
     http.post(wiki.api_url())
         .query(&[("format", "json"), ("formatversion", "2")])
         .form(params)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .with_context(|| format!("API request to {wiki} failed"))?
+        .map_err(|source| WikiApiError::Request {
+            wiki: name.clone(),
+            source: source.into(),
+        })?
         .json()
         .await
-        .with_context(|| format!("API response from {wiki} is not JSON"))
+        .map_err(|source| WikiApiError::Response {
+            wiki: name,
+            source: source.into(),
+        })
 }
 
 /// As [`api`], but asks again, after a while, when the wiki says there are
@@ -45,7 +103,7 @@ pub async fn api_patiently(
     http: &reqwest::Client,
     wiki: &Wiki,
     params: &[(&str, &str)],
-) -> Result<Value> {
+) -> Result<Value, WikiApiError> {
     const RETRIES: u32 = 4;
     let mut wait = std::time::Duration::from_secs(1);
     for _ in 0..RETRIES {
@@ -60,13 +118,12 @@ pub async fn api_patiently(
     api(http, wiki, params).await
 }
 
-fn is_too_many_requests(e: &anyhow::Error) -> bool {
-    e.chain().any(|cause| {
-        cause
-            .downcast_ref::<reqwest::Error>()
-            .and_then(reqwest::Error::status)
-            == Some(reqwest::StatusCode::TOO_MANY_REQUESTS)
-    })
+fn is_too_many_requests(e: &WikiApiError) -> bool {
+    matches!(
+        e,
+        WikiApiError::Request { source, .. }
+            if source.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16())
+    )
 }
 
 /// The current wikitext of a page, following redirects; `None` if there is no such page.
@@ -74,7 +131,7 @@ pub async fn page_wikitext(
     http: &reqwest::Client,
     wiki: &Wiki,
     title: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<String>, WikiApiError> {
     let params = [
         ("action", "query"),
         ("prop", "revisions"),
@@ -92,18 +149,35 @@ pub async fn page_wikitext(
 }
 
 /// A page rendered to HTML (`action=render`); `None` if there is no such page.
-pub async fn page_html(http: &reqwest::Client, wiki: &Wiki, title: &str) -> Result<Option<String>> {
+pub async fn page_html(
+    http: &reqwest::Client,
+    wiki: &Wiki,
+    title: &str,
+) -> Result<Option<String>, WikiApiError> {
     let response = http
         .get(wiki.index_url())
         .query(&[("action", "render"), ("title", title)])
         .send()
         .await
-        .with_context(|| format!("cannot render {title} on {wiki}"))?;
+        .map_err(|source| render_error(wiki, title, source))?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
-    let html = response.error_for_status()?.text().await?;
+    let html = response
+        .error_for_status()
+        .map_err(|source| render_error(wiki, title, source))?
+        .text()
+        .await
+        .map_err(|source| render_error(wiki, title, source))?;
     Ok(Some(html))
+}
+
+fn render_error(wiki: &Wiki, title: &str, source: reqwest::Error) -> WikiApiError {
+    WikiApiError::Render {
+        wiki: wiki.to_string(),
+        title: title.to_string(),
+        source: source.into(),
+    }
 }
 
 /// Wiki text with its templates expanded, as the wiki would transclude it.
@@ -111,7 +185,7 @@ pub async fn expand_templates(
     http: &reqwest::Client,
     wiki: &Wiki,
     wikitext: &str,
-) -> Result<String> {
+) -> Result<String, WikiApiError> {
     let json = api(
         http,
         wiki,
@@ -129,7 +203,11 @@ pub async fn expand_templates(
 }
 
 /// Wiki text rendered by the wiki, as an HTML fragment with absolute links.
-pub async fn parse_to_html(http: &reqwest::Client, wiki: &Wiki, wikitext: &str) -> Result<String> {
+pub async fn parse_to_html(
+    http: &reqwest::Client,
+    wiki: &Wiki,
+    wikitext: &str,
+) -> Result<String, WikiApiError> {
     let params = [
         ("action", "parse"),
         ("contentmodel", "wikitext"),
@@ -142,7 +220,9 @@ pub async fn parse_to_html(http: &reqwest::Client, wiki: &Wiki, wikitext: &str) 
     let json = api_post(http, wiki, &params).await?;
     let html = json["parse"]["text"]
         .as_str()
-        .with_context(|| format!("no HTML from {wiki}"))?;
+        .ok_or_else(|| WikiApiError::NoHtml {
+            wiki: wiki.to_string(),
+        })?;
     let root = format!("=\"https://{}/", wiki.host());
     Ok(["href", "src"]
         .iter()
@@ -187,7 +267,7 @@ pub async fn category_files(
     category: &str,
     depth: u32,
     limit: usize,
-) -> Result<Vec<String>> {
+) -> Result<Vec<String>, WikiApiError> {
     let category = category.trim();
     let category = strip_namespace(category, &["category", "kategorie"]).unwrap_or(category);
     let mut files = vec![];
@@ -314,7 +394,7 @@ impl Client {
     }
 
     /// One POST request, so long parameter lists (e.g. 50 page ids) fit.
-    pub async fn get(&self, host: &str, params: &Params) -> Result<Value> {
+    pub async fn get(&self, host: &str, params: &Params) -> Result<Value, WikiApiError> {
         let mut form = params.clone();
         form.extend([
             ("format".into(), "json".into()),
@@ -324,13 +404,22 @@ impl Client {
             .clamp_retry_after()
             .send(self.http.post(self.api_url(host)).form(&form))
             .await
-            .with_context(|| format!("API request to {host} failed"))?;
+            .map_err(|source| WikiApiError::Request {
+                wiki: host.to_string(),
+                source,
+            })?;
         let json: Value = response
             .json()
             .await
-            .with_context(|| format!("API response from {host} is not JSON"))?;
+            .map_err(|source| WikiApiError::Response {
+                wiki: host.to_string(),
+                source: source.into(),
+            })?;
         match json.get("error") {
-            Some(err) => Err(anyhow!("API error from {host}: {err}")),
+            Some(err) => Err(WikiApiError::Api {
+                wiki: host.to_string(),
+                message: err.to_string(),
+            }),
             None => Ok(json),
         }
     }
@@ -341,7 +430,7 @@ impl Client {
         host: &str,
         params: &Params,
         mut f: impl FnMut(&Value) -> bool,
-    ) -> Result<()> {
+    ) -> Result<(), WikiApiError> {
         let mut params = params.clone();
         loop {
             let json = self.get(host, &params).await?;

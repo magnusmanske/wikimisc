@@ -7,13 +7,49 @@
 use crate::toolforge::db::Cluster;
 use crate::toolforge::pool::WikiPool;
 use crate::wiki::Wiki;
-use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use thiserror::Error;
 
 use crate::mysql_async::prelude::{FromRow, Queryable};
 use crate::mysql_async::{Conn, Params, Value};
+
+/// Failure modes of [`Replicas`] and the shared replica queries.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ReplicasError {
+    /// The `replica.my.cnf` given to the builder could not be used.
+    #[error("cannot read the database credentials from {path}: {source}")]
+    CredentialsFile {
+        path: String,
+        #[source]
+        source: crate::toolforge::Error,
+    },
+
+    /// No usable database credentials could be discovered.
+    #[error("cannot discover the database credentials: {source}")]
+    CredentialsDiscovery {
+        #[source]
+        source: crate::toolforge::Error,
+    },
+
+    /// Connecting to a wiki's replica database failed.
+    #[error("cannot connect to the {dbname} replica: {source}")]
+    Connect {
+        dbname: String,
+        #[source]
+        source: crate::toolforge::Error,
+    },
+
+    /// Closing the pool failed.
+    #[error(transparent)]
+    Pool(#[from] crate::toolforge::Error),
+
+    /// A query failed.
+    #[error(transparent)]
+    Query(#[from] crate::mysql_async::Error),
+}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_STATEMENT_TIME: Duration = Duration::from_secs(600);
@@ -32,8 +68,8 @@ pub struct Replicas {
 
 impl Replicas {
     /// The default pool: the analytics cluster, credentials discovered as the
-    /// `toolforge` crate does, at most [`POOL_MAX`] connections.
-    pub fn new(credentials: &Path) -> Result<Self> {
+    /// `toolforge` crate does, at most `POOL_MAX` connections.
+    pub fn new(credentials: &Path) -> Result<Self, ReplicasError> {
         Self::builder(Cluster::Analytics)
             .my_cnf_path(credentials)
             .build()
@@ -58,7 +94,7 @@ impl Replicas {
 
     /// Close all pooled connections. Clones share the pool, so this closes
     /// it for all of them.
-    pub async fn disconnect(self) -> Result<()> {
+    pub async fn disconnect(self) -> Result<(), ReplicasError> {
         self.pool.disconnect().await?;
         Ok(())
     }
@@ -74,14 +110,21 @@ impl Replicas {
     }
 
     /// As [`connect_for_tables`](Self::connect_for_tables), with context.
-    pub async fn conn_for_dbname(&self, dbname: &str, tables: &[&str]) -> Result<Conn> {
+    pub async fn conn_for_dbname(
+        &self,
+        dbname: &str,
+        tables: &[&str],
+    ) -> Result<Conn, ReplicasError> {
         self.connect_for_tables(dbname, tables)
             .await
-            .with_context(|| format!("cannot connect to the {dbname} replica"))
+            .map_err(|source| ReplicasError::Connect {
+                dbname: dbname.to_string(),
+                source,
+            })
     }
 
     /// A connection to the database of `wiki` that has `tables`.
-    pub async fn conn(&self, wiki: &Wiki, tables: &[&str]) -> Result<Conn> {
+    pub async fn conn(&self, wiki: &Wiki, tables: &[&str]) -> Result<Conn, ReplicasError> {
         self.conn_for_dbname(wiki.dbname(), tables).await
     }
 }
@@ -120,7 +163,7 @@ impl ReplicasBuilder {
         self
     }
 
-    pub fn build(self) -> Result<Replicas> {
+    pub fn build(self) -> Result<Replicas, ReplicasError> {
         let mut builder = WikiPool::builder(self.cluster)
             .pool_max(self.pool_max)
             .connect_timeout(self.connect_timeout)
@@ -128,12 +171,12 @@ impl ReplicasBuilder {
         if let Some(path) = &self.my_cnf {
             builder = builder.my_cnf_path(path);
         }
-        let pool = builder.build().with_context(|| match &self.my_cnf {
-            Some(path) => format!(
-                "cannot read the database credentials from {}",
-                path.display()
-            ),
-            None => "cannot discover the database credentials".to_string(),
+        let pool = builder.build().map_err(|source| match &self.my_cnf {
+            Some(path) => ReplicasError::CredentialsFile {
+                path: path.display().to_string(),
+                source,
+            },
+            None => ReplicasError::CredentialsDiscovery { source },
         })?;
         Ok(Replicas { pool })
     }
@@ -147,7 +190,7 @@ impl Replicas {
         wiki: &Wiki,
         category: &str,
         depth: u32,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<String>, ReplicasError> {
         let mut conn = self.conn(wiki, CATEGORY_TABLES).await?;
         let root = db_title(category.trim().trim_start_matches("Category:"));
         let mut tree = vec![root.clone()];
@@ -177,7 +220,7 @@ impl Replicas {
         category: &str,
         depth: u32,
         namespace: i64,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<String>, ReplicasError> {
         self.some_pages_in_tree(wiki, category, depth, namespace, None)
             .await
     }
@@ -191,7 +234,7 @@ impl Replicas {
         depth: u32,
         namespace: i64,
         limit: Option<usize>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<String>, ReplicasError> {
         let mut categories = self.category_tree(wiki, category, depth).await?;
         if namespace == NS_CATEGORY {
             categories.truncate(limit.unwrap_or(usize::MAX));
@@ -221,7 +264,7 @@ impl Replicas {
         category: &str,
         depth: u32,
         namespace: i64,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<String>, ReplicasError> {
         let categories = self.category_tree(wiki, category, depth).await?;
         let mut conn = self.conn(wiki, CATEGORY_TABLES).await?;
         let sql = format!(
@@ -243,7 +286,7 @@ impl Replicas {
         wiki: &Wiki,
         namespace: i64,
         titles: &[String],
-    ) -> Result<HashSet<String>> {
+    ) -> Result<HashSet<String>, ReplicasError> {
         let mut conn = self.conn(wiki, &["page"]).await?;
         let sql = "SELECT page_title FROM page WHERE page_namespace=? AND page_title IN";
         let rows: Vec<String> = select_in(&mut conn, sql, "", &[namespace.into()], titles).await?;
@@ -257,7 +300,7 @@ impl Replicas {
         wiki: &Wiki,
         titles: &[String],
         from_articles: bool,
-    ) -> Result<HashMap<String, u64>> {
+    ) -> Result<HashMap<String, u64>, ReplicasError> {
         let mut conn = self.conn(wiki, &["pagelinks", "linktarget"]).await?;
         let from = if from_articles {
             "AND pl_from_namespace=0"
@@ -280,7 +323,10 @@ const ENTITY_NAMESPACES: &[(char, i64, &str)] =
 
 /// The pages of Wikidata entities (`Q42`, `P31`, `L7`; others are left
 /// out, as are missing ones), as `(page ID, entity ID)`.
-pub async fn entity_pages(conn: &mut Conn, ids: &[String]) -> Result<Vec<(u64, String)>> {
+pub async fn entity_pages(
+    conn: &mut Conn,
+    ids: &[String],
+) -> Result<Vec<(u64, String)>, ReplicasError> {
     let mut pages = vec![];
     for (prefix, namespace, _) in ENTITY_NAMESPACES {
         let titles: Vec<&str> = ids
@@ -311,7 +357,11 @@ pub fn entity_page_title(id: &str) -> String {
 
 /// The `linktarget` IDs of pages; joining `pagelinks` (or `categorylinks`,
 /// `templatelinks`) with these IDs is much faster than joining on `linktarget`.
-pub async fn linktarget_ids(conn: &mut Conn, namespace: i64, titles: &[&str]) -> Result<Vec<u64>> {
+pub async fn linktarget_ids(
+    conn: &mut Conn,
+    namespace: i64,
+    titles: &[&str],
+) -> Result<Vec<u64>, ReplicasError> {
     let sql = "SELECT lt_id FROM linktarget WHERE lt_namespace=? AND lt_title IN";
     select_in(conn, sql, "", &[namespace.into()], titles).await
 }
@@ -322,7 +372,7 @@ pub async fn titles_linking_to(
     conn: &mut Conn,
     titles: &[String],
     targets: &[u64],
-) -> Result<HashSet<String>> {
+) -> Result<HashSet<String>, ReplicasError> {
     if targets.is_empty() || titles.is_empty() {
         return Ok(HashSet::new());
     }
@@ -344,7 +394,7 @@ pub async fn select_in<T: FromRow + Send + 'static, V: Into<Value> + Clone>(
     suffix: &str,
     params: &[Value],
     values: &[V],
-) -> Result<Vec<T>> {
+) -> Result<Vec<T>, ReplicasError> {
     let mut rows = vec![];
     for chunk in values.chunks(CHUNK) {
         let statement = format!("{sql} ({}) {suffix}", placeholders(chunk.len()));

@@ -64,6 +64,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `telemetry_wire::Level`.
 
 ### Changed
+- **Breaking:** `wiki_api`, `replicas`, `oauth1` and `http::ssrf` return typed
+  `thiserror` enums (`WikiApiError`, `ReplicasError`, `OAuthError`,
+  `SsrfError`) instead of `anyhow::Error`; the crate no longer depends on
+  `anyhow`.
 - **Breaking:** `Wikidata::new` takes the user agent, and `Wikidata` no longer
   implements `Default`. The old default (`wikimisc-wikidata/0.1.0`) did not
   follow Wikimedia's user-agent policy and shared one rate-limit budget across
