@@ -50,6 +50,11 @@ pub enum WikidataError {
     /// The API answered with an error object.
     #[error("Wikidata API error '{code}': {info}")]
     Api { code: String, info: String },
+
+    /// The API answer could not be parsed as JSON. The endpoint normally
+    /// reports a failure as an error object, so this is rare.
+    #[error("cannot parse the Wikidata API answer as JSON: {message}")]
+    Decode { message: String },
 }
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -364,7 +369,7 @@ impl Wikidata {
     async fn api_post(&self, params: &[(&str, &str)]) -> Result<JsonValue, WikidataError> {
         let mut form: Vec<(&str, &str)> = vec![("format", "json")];
         form.extend_from_slice(params);
-        let json: JsonValue = self
+        let body = self
             .http_client()?
             .post(&self.api_url)
             // Per request, so that a client from `set_client` and changes made
@@ -375,8 +380,20 @@ impl Wikidata {
             .send()
             .await?
             .error_for_status()?
-            .json()
+            .bytes()
             .await?;
+        // A `wbgetentities` answer for 50 entities is several megabytes of
+        // JSON, and there are up to `concurrency` of them at once: parsing it
+        // on this thread would stall every other task on the same one.
+        let json: JsonValue =
+            crate::blocking::run(move || serde_json::from_slice::<JsonValue>(&body))
+                .await
+                .ok_or_else(|| WikidataError::Decode {
+                    message: "the response parser did not finish".to_string(),
+                })?
+                .map_err(|error| WikidataError::Decode {
+                    message: error.to_string(),
+                })?;
         api_error(&json).map_or(Ok(json), Err)
     }
 

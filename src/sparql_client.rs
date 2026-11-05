@@ -35,6 +35,7 @@
 //! }
 //! ```
 
+use crate::blocking;
 use crate::content_type::{may_be_csv, may_be_tsv};
 use crate::http::{client_builder, retry_after};
 use crate::retry::Retryable;
@@ -147,6 +148,12 @@ pub enum SparqlError {
     /// The result could not be turned into a table.
     #[error(transparent)]
     Table(#[from] SparqlTableError),
+
+    /// The blocking task that parses the response did not finish — it
+    /// panicked, or the runtime shut down while it ran. A bug rather than an
+    /// endpoint problem, so this is not retried.
+    #[error("the response parser did not finish")]
+    ParseTask,
 }
 
 impl SparqlError {
@@ -272,7 +279,12 @@ impl SparqlClient {
 
     /// Runs a SELECT or ASK query and parses the result.
     pub async fn query(&self, sparql: &str) -> Result<SparqlApiResult, SparqlError> {
-        parse_json(&self.fetch_json(sparql).await?)
+        let body = self.fetch_json(sparql).await?;
+        // A large result is tens of megabytes of JSON; parsing it here would
+        // stall every other task on this executor thread.
+        blocking::run(move || parse_json(&body))
+            .await
+            .ok_or(SparqlError::ParseTask)?
     }
 
     /// Runs an ASK query. A result without a boolean is an error
@@ -287,7 +299,10 @@ impl SparqlClient {
     /// Runs a query and returns the result as untyped JSON, for callers that
     /// process the bindings themselves.
     pub async fn query_json(&self, sparql: &str) -> Result<serde_json::Value, SparqlError> {
-        parse_json(&self.fetch_json(sparql).await?)
+        let body = self.fetch_json(sparql).await?;
+        blocking::run(move || parse_json::<serde_json::Value>(&body))
+            .await
+            .ok_or(SparqlError::ParseTask)?
     }
 
     /// Runs a SELECT query and returns the result decoded from TSV — a
@@ -302,12 +317,22 @@ impl SparqlClient {
                 self.read_all(response).await
             })
             .await?;
-        Ok(SparqlTsv::parse(&String::from_utf8_lossy(&body)))
+        blocking::run(move || SparqlTsv::parse(&String::from_utf8_lossy(&body)))
+            .await
+            .ok_or(SparqlError::ParseTask)
     }
 
     /// Runs a SELECT query and returns the result as a table.
     pub async fn query_table(&self, sparql: &str) -> Result<SparqlTableVec, SparqlError> {
-        Ok(SparqlTableVec::from_api_result(self.query(sparql).await?)?)
+        let body = self.fetch_json(sparql).await?;
+        // Parsing and the row-by-row table conversion happen in one blocking
+        // task, rather than two hops to the blocking pool.
+        blocking::run(move || {
+            let result: SparqlApiResult = parse_json(&body)?;
+            SparqlTableVec::from_api_result(result).map_err(SparqlError::from)
+        })
+        .await
+        .ok_or(SparqlError::ParseTask)?
     }
 
     /// Runs a query and returns a CSV reader over the result, which is

@@ -230,6 +230,11 @@ Values parse the same from either engine (`Point(…)` and `POINT(…)`, a missi
 the engine wrote them, so a decimal can read `3700577` from WDQS and
 `3700577.0` from QLever.
 
+Parsing a large result happens on a blocking thread when the client is used
+inside a tokio runtime, so it does not stall other tasks on the same executor
+thread; outside a runtime it parses inline (the crate does not pull in a
+runtime of its own).
+
 ### Rewriting Blazegraph queries
 
 Queries written for WDQS v1 may use Blazegraph-only features that QLever (and

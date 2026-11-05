@@ -15,6 +15,8 @@
     warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+#[cfg(any(feature = "http", feature = "wikidata"))]
+mod blocking;
 #[cfg(feature = "cache")]
 pub mod cache;
 #[cfg(feature = "title")]

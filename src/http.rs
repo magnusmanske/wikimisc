@@ -290,17 +290,26 @@ impl RetryPolicy<HttpError> {
     /// Retried like [`Self::fetch_bytes`]; a body that does not parse (an
     /// HTML error page with status 200, say) is [`HttpError::Decode`] and is
     /// not retried.
-    pub async fn fetch_json<T: DeserializeOwned>(
+    ///
+    /// Parsing happens on a blocking thread when a tokio runtime is present,
+    /// so a large response does not stall the executor.
+    pub async fn fetch_json<T: DeserializeOwned + Send + 'static>(
         &self,
         request: RequestBuilder,
     ) -> Result<T, HttpError> {
         self.exchange(request, |response| async move {
             let url = response.url().to_string();
             let body = response.bytes().await?;
-            serde_json::from_slice(&body).map_err(|error| HttpError::Decode {
-                url,
-                message: error.to_string(),
-            })
+            let parsed = crate::blocking::run(move || serde_json::from_slice::<T>(&body)).await;
+            parsed
+                .ok_or_else(|| HttpError::Decode {
+                    url: url.clone(),
+                    message: "the response parser did not finish".to_string(),
+                })?
+                .map_err(|error| HttpError::Decode {
+                    url,
+                    message: error.to_string(),
+                })
         })
         .await
     }
