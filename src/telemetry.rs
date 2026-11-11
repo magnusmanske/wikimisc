@@ -24,10 +24,12 @@
 //! in development, say) uses [`TelemetryBuilder::install_or_log`], which logs
 //! the outcome through the `log` crate and returns an `Option`.
 //!
-//! Pushing never blocks or fails the service: it runs in its own task with a
-//! timeout, a failed push is retried with the next one (counters are totals,
-//! so no counts are lost), and failures are only logged to stderr when pushes
-//! start or stop failing.
+//! Pushing never blocks or fails the service: it runs on a thread and runtime
+//! of its own with a timeout, a failed push is retried with the next one
+//! (counters are totals, so no counts are lost), and failures are only logged
+//! to stderr when pushes start or stop failing. Nor can a busy service delay
+//! it: CPU-heavy or blocking work on the service's runtime does not hold up
+//! the pushes.
 
 use crate::process_stats::ProcessStats;
 use crate::telemetry_wire::{
@@ -270,6 +272,7 @@ impl TelemetryBuilder {
                 ended: AtomicBool::new(false),
                 push_lock: tokio::sync::Mutex::new(()),
                 state: Mutex::new(PushState::default()),
+                service_runtime: OnceLock::new(),
             }),
         })
     }
@@ -369,6 +372,9 @@ struct Inner {
     /// regular one; it waits only briefly, though (see [`FINAL_PUSH_LOCK_WAIT`]).
     push_lock: tokio::sync::Mutex<()>,
     state: Mutex<PushState>,
+    /// The runtime [`Telemetry::start`] was called from, whose tasks
+    /// `tokio_alive_tasks` counts; pushes run elsewhere.
+    service_runtime: OnceLock<tokio::runtime::Handle>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -494,8 +500,12 @@ impl Telemetry {
         if GLOBAL.set(self.clone()).is_err() {
             return Ok(());
         }
-        let me = self.clone();
-        runtime.spawn(async move { me.push_forever().await });
+        let _ = self.inner.service_runtime.set(runtime.clone());
+        if let Err(e) = self.spawn_push_thread() {
+            eprintln!("telemetry: pushing from the service's runtime: {e}");
+            let me = self.clone();
+            runtime.spawn(async move { me.push_forever(&me.inner.client).await });
+        }
         self.install_panic_hook();
         if self.inner.handle_signals {
             self.handle_signals(&runtime);
@@ -526,7 +536,28 @@ impl Telemetry {
         }
     }
 
-    async fn push_forever(self) {
+    /// Starts the regular pushes on a thread and runtime of their own. On the
+    /// service's runtime, the push timer only fires once a worker gets round
+    /// to it, and a service keeping its workers busy (CPU-heavy loops without
+    /// await points, blocking calls) left the dashboard without pushes for
+    /// minutes.
+    fn spawn_push_thread(&self) -> Result<(), String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        // A client of its own: pooled connections are driven by the runtime
+        // that opened them, and the final push comes from another one.
+        let client = http_client().map_err(|e| e.to_string())?;
+        let me = self.clone();
+        std::thread::Builder::new()
+            .name("telemetry".to_string())
+            .spawn(move || runtime.block_on(me.push_forever(&client)))
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn push_forever(&self, client: &reqwest::Client) {
         let mut ticker = tokio::time::interval(self.inner.interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -534,7 +565,7 @@ impl Telemetry {
             if self.inner.ended.load(Ordering::SeqCst) {
                 return;
             }
-            let result = self.push(&self.inner.client, None).await;
+            let result = self.push(client, None).await;
             self.log_push_result(&result);
         }
     }
@@ -589,7 +620,7 @@ impl Telemetry {
     /// The payload, and what it carries that needs acknowledging.
     fn payload(&self, exit: Option<&ExitReason>) -> (Payload, Sent) {
         let mut state = lock(&self.inner.state);
-        let mut metrics = self.system_metrics(exit.is_none());
+        let mut metrics = self.system_metrics();
         let recorded = self.inner.recorder.snapshot(&mut state.histogram_totals);
         metrics.extend(recorded);
         // Counters that have not changed since the last acknowledged push are left out.
@@ -618,7 +649,7 @@ impl Telemetry {
     }
 
     /// Process readings, first in the list so the per-push limit never cuts them.
-    fn system_metrics(&self, with_runtime: bool) -> Vec<Metric> {
+    fn system_metrics(&self) -> Vec<Metric> {
         let stats = ProcessStats::read();
         let gauge = |name: &str, value: Option<f64>| {
             value.map(|v| system_metric(name, MetricKind::Gauge, v))
@@ -626,11 +657,10 @@ impl Telemetry {
         let counter = |name: &str, value: Option<f64>| {
             value.map(|v| system_metric(name, MetricKind::Counter, v))
         };
-        // Measured in whichever runtime pushes, so left out of the final push,
-        // which may come from a temporary one.
-        let alive_tasks = with_runtime
-            .then(tokio::runtime::Handle::try_current)
-            .and_then(Result::ok)
+        let alive_tasks = self
+            .inner
+            .service_runtime
+            .get()
             .map(|h| h.metrics().num_alive_tasks() as f64);
         [
             // Named for the dashboard, which compares it to the limit to infer
@@ -1201,6 +1231,55 @@ mod tests {
             "counter was never acknowledged"
         );
         assert_eq!(pushes[1]["events"][0]["message"], "boom");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_push_thread_pushes_while_the_service_runtime_is_blocked() {
+        let server = MockServer::start().await;
+        let pushes = Arc::new(AtomicU64::new(0));
+        Mock::given(method("POST"))
+            .respond_with({
+                let pushes = pushes.clone();
+                move |_: &wiremock::Request| {
+                    pushes.fetch_add(1, Ordering::SeqCst);
+                    ResponseTemplate::new(200)
+                }
+            })
+            .mount(&server)
+            .await;
+        let t = telemetry(&server.uri());
+        t.spawn_push_thread().unwrap();
+
+        // Blocks the service's only worker, as a CPU-heavy loop would: a push
+        // scheduled on this runtime could not run before the loop ends.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while pushes.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        t.inner.ended.store(true, Ordering::SeqCst);
+
+        assert_eq!(pushes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_alive_tasks_are_counted_on_the_service_runtime() {
+        let t = telemetry("https://dash.example/ingest");
+        let _ = t
+            .inner
+            .service_runtime
+            .set(tokio::runtime::Handle::current());
+        let _task = tokio::spawn(std::future::pending::<()>());
+
+        // Read from another thread, outside any runtime, as the push thread does.
+        let metrics = std::thread::spawn(move || t.system_metrics())
+            .join()
+            .unwrap();
+
+        let alive = metrics
+            .iter()
+            .find(|m| m.name == "tokio_alive_tasks")
+            .unwrap();
+        assert!(alive.value >= 1.0);
     }
 
     #[tokio::test]
