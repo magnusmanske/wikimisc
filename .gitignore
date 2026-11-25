@@ -3,6 +3,3 @@ target/
 Cargo.lock
 .claude
 CLAUDE.md
-
-# cargo-mutants report
-mutants.out/
