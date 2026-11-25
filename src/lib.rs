@@ -5,6 +5,9 @@
 //! selects only the functionality — and dependency tree — it actually needs.
 //! See the feature table in `README.md`, or enable `full` to get everything.
 
+// Everything here is safe Rust; adding `unsafe` would need a reason argued in
+// review, and the compiler now refuses it outright.
+#![forbid(unsafe_code)]
 // A library must not take its caller's process down, so production code paths
 // do not panic: fallible operations return one of the per-feature error types
 // instead. The few unavoidable exceptions carry an explicit `#[allow]` plus a

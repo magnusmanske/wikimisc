@@ -659,6 +659,7 @@ impl FromStr for Date {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_date() {
@@ -1169,5 +1170,101 @@ mod tests {
         assert_eq!(at("-0999-00-00T00:00:00Z", 6), "-1st millennium");
         assert_eq!(at("-0500-00-00T00:00:00Z", 9), "-0500");
         assert_eq!(at("+1952-00-00T00:00:00Z", 4), "1952");
+    }
+
+    // --- properties -----------------------------------------------------
+
+    /// A realistic year: `from_qs` reads the magnitude as `u64`, and
+    /// `from_wikibase` as `i64`, so extremes of `i64` are not interesting.
+    fn year() -> impl Strategy<Value = i64> {
+        (-1_000_000i64..=1_000_000).prop_filter("a year other than 0", |year| *year != 0)
+    }
+
+    fn date_in(calendar: Calendar) -> impl Strategy<Value = Date> {
+        (
+            year(),
+            proptest::option::of(1u8..=12),
+            proptest::option::of(1u8..=31),
+        )
+            .prop_filter_map("a valid date", move |(year, month, day)| {
+                Date::new_in(calendar, year, month, day).ok()
+            })
+    }
+
+    fn any_date() -> impl Strategy<Value = Date> {
+        proptest::prop_oneof![date_in(Calendar::Gregorian), date_in(Calendar::Julian),]
+    }
+
+    proptest! {
+        /// A date written as a Wikibase time string reads back identically.
+        /// (`from_wikibase` always returns a Gregorian date: the time string
+        /// does not carry the calendar.)
+        #[test]
+        fn wikibase_time_round_trips(date in date_in(Calendar::Gregorian)) {
+            let parsed = Date::from_wikibase(date.time(), date.precision());
+            prop_assert!(parsed.is_ok(), "{parsed:?}");
+            prop_assert_eq!(parsed.ok(), Some(date));
+        }
+
+        /// ... and so does its QuickStatements form, which does name the
+        /// calendar.
+        #[test]
+        fn quickstatements_round_trips(date in any_date()) {
+            let parsed = Date::from_qs(&date.as_qs());
+            prop_assert!(parsed.is_ok(), "{parsed:?}");
+            prop_assert_eq!(parsed.ok(), Some(date));
+        }
+
+        /// The time of day does not change the date.
+        #[test]
+        fn time_of_day_is_ignored(date in date_in(Calendar::Gregorian)) {
+            let with_time = date.time().replace("T00:00:00Z", "T23:59:58Z");
+            prop_assert_eq!(
+                Date::from_wikibase(&with_time, date.precision()).ok(),
+                Some(date)
+            );
+        }
+
+        /// A coarser precision drops exactly the parts it cannot represent,
+        /// whether it is reached through `with_precision` or by re-reading the
+        /// time string at that precision.
+        #[test]
+        fn coarser_precision_drops_parts(
+            date in any_date(),
+            precision in PRECISION_YEAR..=PRECISION_DAY,
+        ) {
+            if precision > date.precision() {
+                return Ok(());
+            }
+            let coarser = date
+                .clone()
+                .with_precision(precision)
+                .expect("coarsening a date cannot fail");
+            prop_assert_eq!(coarser.precision(), precision);
+            prop_assert_eq!(coarser.year(), date.year());
+            prop_assert_eq!(coarser.calendar(), date.calendar());
+            prop_assert_eq!(
+                coarser.month(),
+                if precision >= PRECISION_MONTH {
+                    date.month()
+                } else {
+                    None
+                }
+            );
+            prop_assert_eq!(
+                coarser.day(),
+                if precision >= PRECISION_DAY {
+                    date.day()
+                } else {
+                    None
+                }
+            );
+            if coarser.calendar() == Calendar::Gregorian {
+                prop_assert_eq!(
+                    Date::from_wikibase(date.time(), precision).ok(),
+                    Some(coarser.clone())
+                );
+            }
+        }
     }
 }

@@ -342,3 +342,13 @@ cd fuzz
 cargo +nightly fuzz run sparql_rewrite
 cargo +nightly fuzz run static_files
 ```
+
+Mutation testing (`cargo-mutants`) runs weekly in CI over the pure modules
+(`entity_id`, `date`, `lat_lon`, the SPARQL lexer and rewriters, the static-file
+allowlist, and the string encoders). A surviving mutant is behaviour that no
+test observes. To run it locally:
+
+```bash
+cargo install cargo-mutants
+cargo mutants --all-features --file src/entity_id.rs --file src/date.rs
+```

@@ -899,6 +899,7 @@ fn parse_prefixed(s: &str, prefix: char, lenient: bool) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use serde_json::json;
 
     #[test]
@@ -1118,5 +1119,151 @@ mod tests {
                 p: Some(PropertyId::new(31))
             }
         );
+    }
+
+    // --- properties -----------------------------------------------------
+
+    /// Every parser rejects `0`, so generate only numbers that identify an
+    /// entity.
+    fn number() -> impl Strategy<Value = u64> {
+        1u64..=u64::MAX
+    }
+
+    fn item_id() -> impl Strategy<Value = ItemId> {
+        number().prop_map(ItemId::new)
+    }
+
+    fn property_id() -> impl Strategy<Value = PropertyId> {
+        number().prop_map(PropertyId::new)
+    }
+
+    fn lexeme_id() -> impl Strategy<Value = LexemeId> {
+        number().prop_map(LexemeId::new)
+    }
+
+    fn form_id() -> impl Strategy<Value = FormId> {
+        (lexeme_id(), number()).prop_map(|(lexeme, number)| FormId::new(lexeme, number))
+    }
+
+    fn sense_id() -> impl Strategy<Value = SenseId> {
+        (lexeme_id(), number()).prop_map(|(lexeme, number)| SenseId::new(lexeme, number))
+    }
+
+    fn media_info_id() -> impl Strategy<Value = MediaInfoId> {
+        number().prop_map(MediaInfoId::from_page_id)
+    }
+
+    fn entity_schema_id() -> impl Strategy<Value = EntitySchemaId> {
+        number().prop_map(EntitySchemaId::new)
+    }
+
+    fn any_entity_id() -> impl Strategy<Value = EntityId> {
+        proptest::prop_oneof![
+            item_id().prop_map(EntityId::Item),
+            property_id().prop_map(EntityId::Property),
+            lexeme_id().prop_map(EntityId::Lexeme),
+            form_id().prop_map(EntityId::Form),
+            sense_id().prop_map(EntityId::Sense),
+            media_info_id().prop_map(EntityId::MediaInfo),
+            entity_schema_id().prop_map(EntityId::EntitySchema),
+        ]
+    }
+
+    proptest! {
+        /// `Display` is the canonical form, which every strict parser and
+        /// the URI reader accept back.
+        #[test]
+        fn canonical_form_round_trips(id in any_entity_id()) {
+            let text = id.to_string();
+            prop_assert_eq!(text.parse::<EntityId>().ok(), Some(id));
+            prop_assert_eq!(EntityId::parse_lenient(&text).ok(), Some(id));
+            prop_assert_eq!(EntityId::from_uri(&id.uri()).ok(), Some(id));
+            prop_assert_eq!(
+                id.uri().rsplit('/').next().map(str::to_string),
+                Some(text),
+                "{} does not end in its canonical ID",
+                id.uri()
+            );
+        }
+
+        /// The lenient parser takes what people paste: case, whitespace,
+        /// `wd:`, and entity URIs.
+        #[test]
+        fn lenient_accepts_what_people_paste(id in any_entity_id()) {
+            let canonical = id.to_string();
+            for text in [
+                canonical.to_ascii_lowercase(),
+                format!("  {canonical}\t"),
+                format!("wd:{canonical}"),
+                format!("WD:{}", canonical.to_ascii_lowercase()),
+                id.uri(),
+                format!("  {}  ", id.uri()),
+            ] {
+                prop_assert_eq!(
+                    EntityId::parse_lenient(&text).ok(),
+                    Some(id),
+                    "lenient parse of {:?}",
+                    text
+                );
+            }
+        }
+
+        /// The kind-specific parsers read the same canonical form.
+        #[test]
+        fn kind_specific_parsers_round_trip(id in any_entity_id()) {
+            let text = id.to_string();
+            let parsed = match id {
+                EntityId::Item(_) => text.parse::<ItemId>().map(EntityId::from).ok(),
+                EntityId::Property(_) => text.parse::<PropertyId>().map(EntityId::from).ok(),
+                EntityId::Lexeme(_) => text.parse::<LexemeId>().map(EntityId::from).ok(),
+                EntityId::Form(_) => text.parse::<FormId>().map(EntityId::from).ok(),
+                EntityId::Sense(_) => text.parse::<SenseId>().map(EntityId::from).ok(),
+                EntityId::MediaInfo(_) => text.parse::<MediaInfoId>().map(EntityId::from).ok(),
+                EntityId::EntitySchema(_) => {
+                    text.parse::<EntitySchemaId>().map(EntityId::from).ok()
+                }
+            };
+            prop_assert_eq!(parsed, Some(id));
+        }
+
+        /// Numeric kinds accept a bare number, and leading zeros in any
+        /// spelling still parse to the canonical ID.
+        #[test]
+        fn bare_numbers_and_leading_zeros_are_lenient(value in number()) {
+            let text = value.to_string();
+            prop_assert_eq!(ItemId::parse_lenient(&text).ok(), Some(ItemId::new(value)));
+            prop_assert_eq!(
+                PropertyId::parse_lenient(&text).ok(),
+                Some(PropertyId::new(value))
+            );
+            prop_assert_eq!(LexemeId::parse_lenient(&text).ok(), Some(LexemeId::new(value)));
+            prop_assert_eq!(
+                MediaInfoId::parse_lenient(&text).ok(),
+                Some(MediaInfoId::from_page_id(value))
+            );
+            prop_assert_eq!(
+                EntitySchemaId::parse_lenient(&text).ok(),
+                Some(EntitySchemaId::new(value))
+            );
+            for prefix in ['Q', 'P', 'L', 'M', 'E'] {
+                let padded = format!("{prefix}0{text}");
+                prop_assert_eq!(
+                    EntityId::parse_lenient(&padded)
+                        .map(|id| id.to_string())
+                        .ok(),
+                    Some(format!("{prefix}{text}")),
+                    "leading zeros in {:?}",
+                    padded
+                );
+            }
+        }
+
+        /// Serialization writes the canonical string, and deserialization
+        /// accepts it back.
+        #[test]
+        fn serde_round_trips(id in any_entity_id()) {
+            let json = serde_json::to_string(&id).expect("an entity ID serialises");
+            prop_assert_eq!(serde_json::from_str::<EntityId>(&json).ok(), Some(id));
+        }
     }
 }

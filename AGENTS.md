@@ -48,6 +48,9 @@ cargo fmt                                                 # format
 # Fuzz targets (nightly; run from fuzz/, a separate crate/workspace)
 cargo +nightly fuzz run sparql_rewrite
 cargo +nightly fuzz run static_files
+
+# Mutation testing (slow; CI runs it weekly over the pure modules)
+cargo mutants --all-features --file src/entity_id.rs --file src/date.rs
 ```
 
 Tests are colocated as `#[cfg(test)] mod tests` inside each source file. Fixtures for `item_merger` / Wikibase entity tests live in `test_data/` (`item1.json`, `item2.json`). Property tests (`proptest`) live in the same modules and run with `cargo test`; fuzz targets are under `fuzz/fuzz_targets/` and run on a schedule, not per push.

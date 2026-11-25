@@ -252,6 +252,7 @@ impl BoundingBox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_from_str() {
@@ -509,6 +510,101 @@ mod tests {
             // ... and the box is tight: points just beyond it are further away.
             let beyond = LatLon::new(bbox.max_lat + 0.001, center.lon);
             assert!(center.distance_km(&beyond) > km);
+        }
+    }
+
+    // --- properties -----------------------------------------------------
+
+    /// A finite coordinate, clamped into the range `LatLon` accepts.
+    fn coordinate(limit: f64) -> impl Strategy<Value = f64> {
+        any::<f64>()
+            .prop_filter("a finite coordinate", |value| value.is_finite())
+            .prop_map(move |value| value.clamp(-limit, limit))
+    }
+
+    fn point() -> impl Strategy<Value = LatLon> {
+        (coordinate(90.0), coordinate(180.0)).prop_map(|(lat, lon)| LatLon::new(lat, lon))
+    }
+
+    /// Coordinates as Wikidata emits them: at most seven decimal places. (An
+    /// arbitrary `f64` does not round-trip through `serde_json` exactly — its
+    /// parser is a ULP off for some extreme exponents — but real coordinates
+    /// do.)
+    fn realistic_point() -> impl Strategy<Value = LatLon> {
+        (
+            -900_000_000i64..=900_000_000,
+            -1_800_000_000i64..=1_800_000_000,
+        )
+            .prop_map(|(lat, lon)| LatLon::new(lat as f64 / 1e7, lon as f64 / 1e7))
+    }
+
+    proptest! {
+        /// WKT from either engine spelling reads back to the same point.
+        #[test]
+        fn wkt_round_trips(point in point()) {
+            prop_assert_eq!(LatLon::from_wkt(&point.to_wkt()), Some(point.clone()));
+            prop_assert_eq!(
+                LatLon::from_wkt(&format!("POINT({} {})", point.lon, point.lat)),
+                Some(point.clone())
+            );
+            prop_assert_eq!(
+                LatLon::from_wkt(&format!(
+                    "<https://www.wikidata.org/entity/Q2> point({} {})",
+                    point.lon, point.lat
+                )),
+                Some(point.clone())
+            );
+        }
+
+        /// `lat,lon`, `lat/lon` and the map-URL `@` form read back.
+        #[test]
+        fn from_str_round_trips(point in point()) {
+            let text = format!("{},{}", point.lat, point.lon);
+            prop_assert_eq!(text.parse::<LatLon>().ok(), Some(point.clone()));
+            let text = format!("@{}/{}", point.lat, point.lon);
+            prop_assert_eq!(text.parse::<LatLon>().ok(), Some(point.clone()));
+        }
+
+        /// JSON carries the exact coordinates of a point as Wikidata stores
+        /// them.
+        #[test]
+        fn serde_round_trips(point in realistic_point()) {
+            let json = serde_json::to_string(&point).expect("a coordinate serialises");
+            prop_assert_eq!(serde_json::from_str::<LatLon>(&json).ok(), Some(point.clone()));
+        }
+
+        /// `try_new` accepts exactly the finite in-range pairs.
+        #[test]
+        fn try_new_matches_the_bounds(lat in any::<f64>(), lon in any::<f64>()) {
+            let valid = lat.is_finite()
+                && lon.is_finite()
+                && (-90.0..=90.0).contains(&lat)
+                && (-180.0..=180.0).contains(&lon);
+            prop_assert_eq!(LatLon::try_new(lat, lon).is_ok(), valid);
+            prop_assert_eq!(
+                LatLon::try_new(lat, lon).ok(),
+                valid.then(|| LatLon::new(lat, lon))
+            );
+        }
+
+        /// A point is no distance from itself.
+        #[test]
+        fn distance_to_self_is_zero(point in point()) {
+            prop_assert_eq!(point.distance_km(&point), 0.0);
+            prop_assert_eq!(point.distance_m(&point), 0.0);
+        }
+
+        /// The box around a point contains it and stays on Earth's ranges.
+        #[test]
+        fn bounding_box_contains_its_center(point in point(), km in 0u32..=20_000) {
+            let bbox = BoundingBox::around(&point, f64::from(km));
+            prop_assert!(bbox.contains(&point), "{bbox:?} does not contain {point:?}");
+            prop_assert!(bbox.min_lat <= bbox.max_lat);
+            prop_assert!(bbox.min_lon <= bbox.max_lon);
+            prop_assert!((-90.0..=90.0).contains(&bbox.min_lat));
+            prop_assert!((-90.0..=90.0).contains(&bbox.max_lat));
+            prop_assert!((-180.0..=180.0).contains(&bbox.min_lon));
+            prop_assert!((-180.0..=180.0).contains(&bbox.max_lon));
         }
     }
 }
