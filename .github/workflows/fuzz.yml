@@ -1,0 +1,40 @@
+name: Fuzz
+
+# Fuzzing is run on a schedule rather than per push: a useful run is minutes
+# long, and a crash reports a real finding rather than blocking an unrelated
+# change. Start a run by hand with "Run workflow".
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - sparql_rewrite
+          - static_files
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (nightly; libFuzzer needs the sanitizer flags)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz ${{ matrix.target }}
+        working-directory: fuzz
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=180 -rss_limit_mb=4096
+
+      - name: Upload a crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

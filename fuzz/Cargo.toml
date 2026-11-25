@@ -1,0 +1,31 @@
+[package]
+name = "wikimisc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Its own workspace, so the fuzz crate never becomes a member of (or a path
+# dependency of) the library package.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+percent-encoding = "2"
+wikimisc = { path = "..", features = ["sparql", "web"] }
+
+[[bin]]
+name = "sparql_rewrite"
+path = "fuzz_targets/sparql_rewrite.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "static_files"
+path = "fuzz_targets/static_files.rs"
+test = false
+doc = false
+bench = false

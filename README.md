@@ -327,3 +327,18 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 CI also builds and tests each feature in isolation, so a module that only
 compiles when a neighbouring feature happens to be enabled will fail the build.
+
+Properties that example-based tests cannot enumerate are checked with
+`proptest` and run as part of `cargo test`: the SPARQL tokenizer's token spans
+and re-tokenization, and the static-file allowlist's "never serve anything
+hidden or outside the tree" invariant.
+
+The SPARQL rewriters and the static-file allowlist also have libFuzzer targets
+in `fuzz/`. They need nightly and `cargo-fuzz`, and run on a schedule in CI:
+
+```bash
+cargo install cargo-fuzz
+cd fuzz
+cargo +nightly fuzz run sparql_rewrite
+cargo +nightly fuzz run static_files
+```

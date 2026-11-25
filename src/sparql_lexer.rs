@@ -226,6 +226,7 @@ impl Brackets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn texts(sparql: &str) -> Vec<&str> {
         tokenize(sparql).iter().map(|t| t.text).collect()
@@ -362,6 +363,154 @@ mod tests {
     fn test_unbalanced_brackets() {
         for sparql in ["{ {", "{ } }", "{ ( } )", "( }"] {
             assert!(Brackets::new(&tokenize(sparql)).is_none(), "{sparql}");
+        }
+    }
+
+    // --- properties -----------------------------------------------------
+
+    /// Characters the tokenizer treats specially, plus arbitrary Unicode so
+    /// the shrinker can probe any boundary it likes.
+    fn lexer_input() -> impl Strategy<Value = String> {
+        const TRICKY: &[char] = &[
+            '?', '$', '<', '>', '"', '\'', '#', '\n', '\r', ' ', '\t', '{', '}', '(', ')', '.',
+            ',', '\\', '%', '^', '`', '|', '@', ':', '/', '*', '-', '_', 'a', 'Z', '0', 'é', '漢',
+            '😀', '\0', '\u{00B7}',
+        ];
+        let alphabet =
+            proptest::prop_oneof![proptest::sample::select(TRICKY.to_vec()), any::<char>(),];
+        proptest::collection::vec(alphabet, 0..48).prop_map(|chars| chars.into_iter().collect())
+    }
+
+    /// Whitespace and comments are the only text the tokenizer may skip.
+    fn gap_is_skippable(gap: &str) -> bool {
+        gap.lines().all(|line| {
+            let line = line.trim_start();
+            line.is_empty() || line.starts_with('#')
+        })
+    }
+
+    fn is_opening(token: &Token) -> bool {
+        token.is_punct('(') || token.is_punct('{')
+    }
+
+    fn is_closing(token: &Token) -> bool {
+        token.is_punct(')') || token.is_punct('}')
+    }
+
+    proptest! {
+        /// Tokens are ordered, non-empty and in bounds, each is exactly the
+        /// slice it claims, and everything between them is whitespace or a
+        /// comment.
+        #[test]
+        fn tokens_tile_the_input(input in lexer_input()) {
+            let tokens = tokenize(&input);
+            let mut previous_end = 0;
+            for token in &tokens {
+                prop_assert!(token.start >= previous_end, "tokens overlap in {input:?}");
+                prop_assert!(token.end() <= input.len(), "token past end in {input:?}");
+                prop_assert!(!token.text.is_empty(), "empty token in {input:?}");
+                prop_assert!(input.is_char_boundary(token.start));
+                prop_assert!(input.is_char_boundary(token.end()));
+                prop_assert_eq!(token.text, &input[token.start..token.end()]);
+                previous_end = token.end();
+            }
+            let mut cursor = 0;
+            for token in &tokens {
+                let gap = &input[cursor..token.start];
+                prop_assert!(
+                    gap_is_skippable(gap),
+                    "skipped non-comment text {gap:?} in {input:?}"
+                );
+                cursor = token.end();
+            }
+            let tail = &input[cursor..];
+            prop_assert!(
+                gap_is_skippable(tail),
+                "skipped non-comment text {tail:?} in {input:?}"
+            );
+        }
+
+        /// Token boundaries are real: a token re-tokenizes to itself alone.
+        #[test]
+        fn tokens_are_self_contained(input in lexer_input()) {
+            for token in tokenize(&input) {
+                let inner = tokenize(token.text);
+                prop_assert_eq!(inner.len(), 1, "token {:?} re-tokenizes as {:?}", token, inner);
+                if let Some(single) = inner.first() {
+                    prop_assert_eq!(single.kind, token.kind);
+                    prop_assert_eq!(single.text, token.text);
+                }
+            }
+        }
+
+        /// A token's kind is consistent with its text.
+        #[test]
+        fn token_shapes_match_kinds(input in lexer_input()) {
+            for token in tokenize(&input) {
+                match token.kind {
+                    TokenKind::Iri => prop_assert!(
+                        token.text.len() >= 2
+                            && token.text.starts_with('<')
+                            && token.text.ends_with('>'),
+                        "{token:?}"
+                    ),
+                    TokenKind::String => prop_assert!(
+                        matches!(token.text.chars().next(), Some('"') | Some('\'')),
+                        "{token:?}"
+                    ),
+                    TokenKind::Var => {
+                        prop_assert!(
+                            matches!(token.text.chars().next(), Some('?') | Some('$')),
+                            "{token:?}"
+                        );
+                        prop_assert!(token.text.len() > 1, "bare sigil token {token:?}");
+                        prop_assert_eq!(token.var_name(), Some(&token.text[1..]));
+                    }
+                    TokenKind::Word => prop_assert!(
+                        token.text.chars().next().is_some_and(is_word_start),
+                        "word starting with the wrong character: {token:?}"
+                    ),
+                    TokenKind::Punct => {
+                        prop_assert_eq!(token.text.chars().count(), 1, "{:?}", token);
+                    }
+                }
+            }
+        }
+
+        /// Where the brackets balance, every pair is open/close of the same
+        /// kind and encloses what lies between it.
+        #[test]
+        fn brackets_pair_openings_with_closings(input in lexer_input()) {
+            let tokens = tokenize(&input);
+            let Some(brackets) = Brackets::new(&tokens) else {
+                return Ok(());
+            };
+            for (i, token) in tokens.iter().enumerate() {
+                if let Some(parent) = brackets.parent(i) {
+                    prop_assert!(parent < i);
+                    prop_assert!(is_opening(&tokens[parent]), "{:?}", tokens[parent]);
+                    prop_assert!(
+                        brackets.partner(parent).is_some_and(|close| close > i),
+                        "{:?} is not closed after {i}",
+                        tokens[parent]
+                    );
+                }
+                if let Some(j) = brackets.partner(i) {
+                    prop_assert_ne!(i, j);
+                    prop_assert_eq!(brackets.partner(j), Some(i));
+                    let (opening, closing) = if is_opening(token) { (i, j) } else { (j, i) };
+                    prop_assert!(is_opening(&tokens[opening]));
+                    prop_assert!(is_closing(&tokens[closing]));
+                    prop_assert!(opening < closing);
+                    prop_assert!(
+                        (tokens[opening].is_punct('(') && tokens[closing].is_punct(')'))
+                            || (tokens[opening].is_punct('{') && tokens[closing].is_punct('}')),
+                        "{:?} pairs with {:?}",
+                        tokens[opening],
+                        tokens[closing]
+                    );
+                }
+            }
         }
     }
 }

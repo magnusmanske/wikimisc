@@ -44,9 +44,13 @@ cargo test --all-features <name>                          # run tests matching <
 cargo test --all-features --test <module> -- --nocapture   # see println! output
 cargo clippy --all-targets --all-features -- -D warnings  # lint
 cargo fmt                                                 # format
+
+# Fuzz targets (nightly; run from fuzz/, a separate crate/workspace)
+cargo +nightly fuzz run sparql_rewrite
+cargo +nightly fuzz run static_files
 ```
 
-Tests are colocated as `#[cfg(test)] mod tests` inside each source file. Fixtures for `item_merger` / Wikibase entity tests live in `test_data/` (`item1.json`, `item2.json`).
+Tests are colocated as `#[cfg(test)] mod tests` inside each source file. Fixtures for `item_merger` / Wikibase entity tests live in `test_data/` (`item1.json`, `item2.json`). Property tests (`proptest`) live in the same modules and run with `cargo test`; fuzz targets are under `fuzz/fuzz_targets/` and run on a schedule, not per push.
 
 ## Architecture
 

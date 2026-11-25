@@ -331,6 +331,11 @@ wikibase = { version = "0.7.9", optional = true }
 # feature sets whose own dependency list excludes these still use them in their
 # `#[cfg(test)]` modules (e.g. `lat-lon` round-trips through `serde_json`, and
 # the async tests need a runtime even where the feature itself does not).
+#
+# Properties that the example-based tests cannot enumerate (the lexer's token
+# spans, the static-file allowlist's security invariant) are checked by
+# `proptest` in the matching `#[cfg(test)]` module.
+proptest = "1"
 serde_json = "1"
 # Checks that `sparql_rewrite` produces valid SPARQL 1.1.
 spargebra = "0.4"
