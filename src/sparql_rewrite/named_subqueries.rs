@@ -541,4 +541,56 @@ WHERE { INCLUDE %cats SERVICE wikibase:label { bd:serviceParam wikibase:language
             ))
         );
     }
+
+    #[test]
+    fn test_span_len_is_the_range_length() {
+        assert_eq!(span_len((2, 5)), 3);
+        assert_eq!(span_len((5, 5)), 0);
+        // Ranges are always in order here, but the subtraction saturates.
+        assert_eq!(span_len((5, 2)), 0);
+    }
+
+    #[test]
+    fn test_min_length_limit_allows_growth_beyond_the_ratio() {
+        // One large body included many times grows the query far beyond
+        // MAX_GROWTH times the input, but stays under the MIN_LENGTH_LIMIT
+        // floor, so it must still be inlined.
+        let body = "?a wdt:P31 wd:Q5 . ".repeat(300);
+        let query = format!(
+            "SELECT * WITH {{ SELECT ?a WHERE {{ {body} }} }} AS %big WHERE {{ {} }}",
+            "INCLUDE %big ".repeat(150)
+        );
+        match rewrite_named_subqueries(&query) {
+            NamedSubqueryRewrite::Rewritten(output) => {
+                assert!(
+                    output.len() > query.len() * MAX_GROWTH,
+                    "{} bytes is not more than {} times {}",
+                    output.len(),
+                    MAX_GROWTH,
+                    query.len()
+                );
+                assert!(output.len() <= MIN_LENGTH_LIMIT, "{}", output.len());
+            }
+            other => panic!("expected the subqueries to be inlined, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_many_top_level_includes_are_capped() {
+        // Every subquery is under the 1 MiB floor on its own, but inlining
+        // them all is not: the final length has to be checked, not just each
+        // one. The input stays under 64 KiB, so the cap is the 1 MiB floor.
+        let body = "?a wdt:P31 wd:Q5 . ".repeat(3158);
+        let query = format!(
+            "SELECT * WITH {{ SELECT ?a WHERE {{ {body} }} }} AS %big WHERE {{ {} }}",
+            "INCLUDE %big ".repeat(18)
+        );
+        match rewrite_named_subqueries(&query) {
+            NamedSubqueryRewrite::Unsupported(UnsupportedNamedSubquery::TooLarge) => {}
+            NamedSubqueryRewrite::Rewritten(output) => {
+                panic!("inlined {} bytes instead of refusing", output.len())
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
 }

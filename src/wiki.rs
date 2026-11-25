@@ -263,11 +263,24 @@ mod tests {
     fn urls() {
         let wiki = Wiki::new("de", "wikipedia").unwrap();
         assert_eq!(wiki.api_url(), "https://de.wikipedia.org/w/api.php");
+        assert_eq!(wiki.index_url(), "https://de.wikipedia.org/w/index.php");
+        assert_eq!(wiki.to_string(), "de.wikipedia.org");
         assert_eq!(
             wiki.page_url("Benutzer:Magnus Manske/Spacer"),
             "https://de.wikipedia.org/wiki/Benutzer:Magnus_Manske/Spacer"
         );
         assert_eq!(encode_title("A&B?c d"), "A%26B%3Fc_d");
         assert_eq!(encode_component("1957-001A a&b"), "1957-001A%20a%26b");
+    }
+
+    #[test]
+    fn upper_first_uppercases_only_the_first_letter() {
+        assert_eq!(upper_first(""), "");
+        assert_eq!(upper_first("abc"), "Abc");
+        assert_eq!(upper_first("ABC"), "ABC");
+        assert_eq!(upper_first("1abc"), "1abc");
+        assert_eq!(upper_first("éclair"), "Éclair");
+        // `char::to_uppercase` maps the sharp s to two letters.
+        assert_eq!(upper_first("ßeta"), "SSeta");
     }
 }
