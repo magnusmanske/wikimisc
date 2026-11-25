@@ -133,7 +133,10 @@ mod tests {
 
     #[test]
     fn html_text_leaves_quotes_alone() {
-        assert_eq!(html_text(r#"a<b & "c" 'd'"#), r#"a&lt;b &amp; "c" 'd'"#);
+        assert_eq!(
+            html_text(r#"a<b> & "c" 'd'"#),
+            r#"a&lt;b&gt; &amp; "c" 'd'"#
+        );
     }
 
     #[test]
